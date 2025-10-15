@@ -1,4 +1,4 @@
-# Import necessary libraries
+// Import necessary libraries
 import pandas as pd
 import numpy as np
 import vectorbtpro as vbt
@@ -576,6 +576,50 @@ def visualize_wfo_results(wfo_results: Dict[str, Any], df: pd.DataFrame) -> None
         plt.legend(loc='best')
         plt.tight_layout()
         plt.show()
+
+# ======================================================================
+# UTILITY FUNCTIONS FOR MAIN
+# ======================================================================
+
+def display_default_parameters() -> None:
+    """Display default parameters for strategy and WFO settings."""
+    strategy_config = StrategyConfig()
+    wfo_settings = WFOSettings()
+    print("Default Strategy Parameters:")
+    for attr, value in vars(strategy_config).items():
+        print(f"  {attr}: {value}")
+    print("\nDefault WFO Settings:")
+    for attr, value in vars(wfo_settings).items():
+        print(f"  {attr}: {value}")
+
+def get_param_grid() -> Dict[str, List]:
+    """Get parameter grid for optimization."""
+    # Default parameter grid; can be modified or prompted
+    return {
+        'timeperiod': [10, 15, 20, 25, 30],
+        'StDev': [0.5, 1.0, 1.5, 2.0, 2.5],
+        'coeff_medianeBBW': [1.0, 1.1, 1.2],
+        'coef_mediane': [0.8, 1.0, 1.2],
+        'Nb_bars_above': [3, 5, 7],
+        'fenetre_lowest': [20, 30, 40],
+        'seuil_lowest': [3.0, 3.5, 4.0],
+        'user_exit_sma_length': [15, 20, 25]
+    }
+
+def get_metrics_info() -> Dict[str, Any]:
+    """Get metrics information for optimization."""
+    # Default metrics; can be modified
+    return {
+        'metric1_name': 'sharpe_ratio',
+        'metric2_name': 'total_return',
+        'weight_metric1': 1.0,
+        'weight_metric2': 0.0
+    }
+
+def get_wfo_settings() -> WFOSettings:
+    """Get WFO settings."""
+    # Return default settings; can be modified or prompted
+    return WFOSettings()
 
 # ======================================================================
 # MAIN PROGRAM
