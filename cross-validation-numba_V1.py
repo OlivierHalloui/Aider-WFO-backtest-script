@@ -4,24 +4,16 @@ import numpy as np
 import vectorbtpro as vbt
 from vectorbtpro.indicators.factory import IndicatorFactory
 import matplotlib.pyplot as plt
-import plotly.graph_objects as go
-import plotly.io as pio
-from plotly.subplots import make_subplots
-from matplotlib.backends.backend_pdf import PdfPages
 import talib
 import datetime
 import time
 import os
+import argparse
 from numba import njit
 from itertools import product
 from tqdm import tqdm
-import time
 from datetime import timedelta
-import platform
-import subprocess
 import seaborn as sns
-import io
-from PIL import Image
 import logging
 from typing import Dict, List, Tuple, Optional, Any
 from abc import ABC, abstractmethod
@@ -42,51 +34,39 @@ DEFAULT_FILE_PATH = '/home/olivier/Downloads/ATDMF_strategy_V5_long/ATDMF_strate
 
 class WFOSettings:
     """Configuration class for Walk-Forward Optimization settings."""
-    def __init__(self):
-        self.n_windows: int = 1
-        self.train_size: float = 0.5
-        self.anchored: bool = False
-        self.optimization_metric: str = "sharpe_ratio"
-        self.secondary_metric: str = "total_return"
-        self.metric_weights: Tuple[float, float] = (1.0, 0.0)
-        self.parallel_backend: str = "dask"
-        self.use_numba: bool = True
-        self.chunk_size: Optional[str] = "auto"
+    def __init__(self, n_windows: int = 1, train_size: float = 0.5, anchored: bool = False,
+                 optimization_metric: str = "sharpe_ratio", secondary_metric: str = "total_return",
+                 metric_weights: Tuple[float, float] = (1.0, 0.0), parallel_backend: str = "dask",
+                 use_numba: bool = True, chunk_size: Optional[str] = "auto"):
+        self.n_windows = n_windows
+        self.train_size = train_size
+        self.anchored = anchored
+        self.optimization_metric = optimization_metric
+        self.secondary_metric = secondary_metric
+        self.metric_weights = metric_weights
+        self.parallel_backend = parallel_backend
+        self.use_numba = use_numba
+        self.chunk_size = chunk_size
 
 class StrategyConfig:
     """Configuration class for strategy parameters."""
-    def __init__(self):
-        self.timeperiod: int = 20
-        self.StDev: float = 1.3
-        self.matype: int = 0
-        self.coeff_medianeBBW: float = 1.1
-        self.coef_mediane: float = 1.0
-        self.Nb_bars_above: int = 5
-        self.fenetre_lowest: int = 30
-        self.seuil_lowest: float = 3.5
-        self.user_exit_sma_length: int = 20
+    def __init__(self, timeperiod: int = 20, StDev: float = 1.3, matype: int = 0,
+                 coeff_medianeBBW: float = 1.1, coef_mediane: float = 1.0,
+                 Nb_bars_above: int = 5, fenetre_lowest: int = 30,
+                 seuil_lowest: float = 3.5, user_exit_sma_length: int = 20):
+        self.timeperiod = timeperiod
+        self.StDev = StDev
+        self.matype = matype
+        self.coeff_medianeBBW = coeff_medianeBBW
+        self.coef_mediane = coef_mediane
+        self.Nb_bars_above = Nb_bars_above
+        self.fenetre_lowest = fenetre_lowest
+        self.seuil_lowest = seuil_lowest
+        self.user_exit_sma_length = user_exit_sma_length
 
 # ======================================================================
 # NUMBA-OPTIMIZED INDICATOR FUNCTIONS
 # ======================================================================
-
-@njit(cache=True)
-def bbands_1d_nb(close: np.ndarray, window: int = 20, alpha: float = 2.0, ddof: int = 0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Numba-optimized Bollinger Bands calculation."""
-    n = len(close)
-    upper_band = np.empty(n, dtype=np.float64)
-    middle_band = np.empty(n, dtype=np.float64)
-    lower_band = np.empty(n, dtype=np.float64)
-    middle_band = vbt.indicators.nb.ma_1d_nb(close, window)
-    std = vbt.indicators.nb.msd_1d_nb(close, window, ddof=ddof)
-    for i in range(n):
-        if np.isnan(middle_band[i]) or np.isnan(std[i]):
-            upper_band[i] = np.nan
-            lower_band[i] = np.nan
-        else:
-            upper_band[i] = middle_band[i] + alpha * std[i]
-            lower_band[i] = middle_band[i] - alpha * std[i]
-    return upper_band, middle_band, lower_band
 
 @njit
 def rolling_median(arr: np.ndarray, window: int) -> np.ndarray:
@@ -203,14 +183,8 @@ CrossBBWLowSignal = IndicatorFactory(
 # DATA LOADING AND PREPROCESSING
 # ======================================================================
 
-def get_dates() -> Tuple[str, str]:
-    """Prompt for date range input with defaults."""
-    start_date = input(f"Enter start date (YYYY-MM-DD) [default: {DEFAULT_START_DATE}]: ") or DEFAULT_START_DATE
-    end_date = input(f"Enter end date (YYYY-MM-DD) [default: {DEFAULT_END_DATE}]: ") or DEFAULT_END_DATE
-    return start_date, end_date
-
 def load_data(start_date: str, end_date: str, timeframe: str = DEFAULT_TIMEFRAME, from_file: bool = True, file_path: Optional[str] = None) -> pd.DataFrame:
-    """Load OHLCV data."""
+    """Load OHLCV data from file or fetch from Binance."""
     try:
         if from_file and file_path:
             df = pd.read_csv(file_path)
@@ -476,12 +450,13 @@ class WFOOptimizer:
 # VISUALIZATION
 # ======================================================================
 
-def visualize_wfo_results(wfo_results: Dict[str, Any], df: pd.DataFrame) -> None:
-    """Visualize WFO results."""
+def visualize_wfo_results(wfo_results: Dict[str, Any], df: pd.DataFrame, output_dir: str = "WFO_Results") -> None:
+    """Visualize WFO results and save plots."""
     if not wfo_results['out_of_sample_performance']:
         logger.warning("No out-of-sample results to visualize")
         return
     
+    os.makedirs(output_dir, exist_ok=True)
     sns.set(style="whitegrid")
     oos_df = pd.DataFrame(wfo_results['out_of_sample_performance'])
     params_df = pd.DataFrame(wfo_results['best_params'])
@@ -494,10 +469,10 @@ def visualize_wfo_results(wfo_results: Dict[str, Any], df: pd.DataFrame) -> None
     for window_idx, window_result in enumerate(wfo_results['window_results']):
         window_info = window_result['window_info']
         plt.axvline(x=pd.to_datetime(window_info['start_date']), color='black', linestyle='--', alpha=0.5)
-        if window_info.get('in_sample_start') and window_info.get('in_sample_end'):
-            plt.axvspan(pd.to_datetime(window_info['in_sample_start']), pd.to_datetime(window_info['in_sample_end']), alpha=0.15, color='green', label='In-Sample' if window_idx == 0 else "")
-        if window_info.get('out_sample_start') and window_info.get('out_sample_end'):
-            plt.axvspan(pd.to_datetime(window_info['out_sample_start']), pd.to_datetime(window_info['out_sample_end']), alpha=0.15, color='red', label='Out-of-Sample' if window_idx == 0 else "")
+        # Note: in_sample_start/end not in window_info; using placeholders
+        in_sample_end = window_info['start_date'] + (window_info['end_date'] - window_info['start_date']) * 0.5
+        plt.axvspan(pd.to_datetime(window_info['start_date']), pd.to_datetime(in_sample_end), alpha=0.15, color='green', label='In-Sample' if window_idx == 0 else "")
+        plt.axvspan(pd.to_datetime(in_sample_end), pd.to_datetime(window_info['end_date']), alpha=0.15, color='red', label='Out-of-Sample' if window_idx == 0 else "")
     
     plt.title('Price Chart with WFO Windows', fontsize=16)
     plt.xlabel('Date', fontsize=14)
@@ -506,7 +481,8 @@ def visualize_wfo_results(wfo_results: Dict[str, Any], df: pd.DataFrame) -> None
     plt.legend(loc='best')
     plt.figtext(0.5, 0.01, "Chart shows price with in-sample (green) and out-of-sample (red) periods.", ha="center", fontsize=12)
     plt.tight_layout(rect=[0, 0.03, 1, 0.97])
-    plt.show()
+    plt.savefig(f"{output_dir}/price_chart.png")
+    plt.close()
     
     # In-sample vs out-of-sample comparison
     is_metrics = [{'window': i + 1, 'performance': window_result['optimization_results'][0]['combined_score'], 'type': 'In-Sample'} for i, window_result in enumerate(wfo_results['window_results']) if window_result['optimization_results']]
@@ -521,7 +497,8 @@ def visualize_wfo_results(wfo_results: Dict[str, Any], df: pd.DataFrame) -> None
         plt.ylabel('Performance', fontsize=14)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.show()
+        plt.savefig(f"{output_dir}/performance_comparison.png")
+        plt.close()
     
     # Parameter stability
     numeric_params = params_df.select_dtypes(include=['number']).columns
@@ -554,16 +531,15 @@ def visualize_wfo_results(wfo_results: Dict[str, Any], df: pd.DataFrame) -> None
         plt.ylim(-0.05, 1.05)
         plt.legend(loc='best')
         plt.tight_layout()
-        plt.show()
+        plt.savefig(f"{output_dir}/parameter_stability.png")
+        plt.close()
 
 # ======================================================================
 # UTILITY FUNCTIONS FOR MAIN
 # ======================================================================
 
-def display_default_parameters() -> None:
+def display_default_parameters(strategy_config: StrategyConfig, wfo_settings: WFOSettings) -> None:
     """Display default parameters for strategy and WFO settings."""
-    strategy_config = StrategyConfig()
-    wfo_settings = WFOSettings()
     print("Default Strategy Parameters:")
     for attr, value in vars(strategy_config).items():
         print(f"  {attr}: {value}")
@@ -573,7 +549,6 @@ def display_default_parameters() -> None:
 
 def get_param_grid() -> Dict[str, List]:
     """Get parameter grid for optimization."""
-    # Default parameter grid; can be modified or prompted
     return {
         'timeperiod': [10, 15, 20, 25, 30],
         'StDev': [0.5, 1.0, 1.5, 2.0, 2.5],
@@ -587,7 +562,6 @@ def get_param_grid() -> Dict[str, List]:
 
 def get_metrics_info() -> Dict[str, Any]:
     """Get metrics information for optimization."""
-    # Default metrics; can be modified
     return {
         'metric1_name': 'sharpe_ratio',
         'metric2_name': 'total_return',
@@ -595,41 +569,51 @@ def get_metrics_info() -> Dict[str, Any]:
         'weight_metric2': 0.0
     }
 
-def get_wfo_settings() -> WFOSettings:
-    """Get WFO settings."""
-    # Return default settings; can be modified or prompted
-    return WFOSettings()
-
 # ======================================================================
 # MAIN PROGRAM
 # ======================================================================
 
 def main() -> None:
     """Main function."""
+    parser = argparse.ArgumentParser(description="Run ATDMF WFO Backtest")
+    parser.add_argument('--start_date', type=str, default=DEFAULT_START_DATE, help='Start date (YYYY-MM-DD)')
+    parser.add_argument('--end_date', type=str, default=DEFAULT_END_DATE, help='End date (YYYY-MM-DD)')
+    parser.add_argument('--from_file', action='store_true', help='Load data from file')
+    parser.add_argument('--file_path', type=str, default=DEFAULT_FILE_PATH, help='Path to data file')
+    parser.add_argument('--n_windows', type=int, default=1, help='Number of WFO windows')
+    parser.add_argument('--train_size', type=float, default=0.5, help='Train size fraction')
+    parser.add_argument('--anchored', action='store_true', help='Use anchored WFO')
+    args = parser.parse_args()
+    
     logger.info("Starting ATDMF WFO")
     
-    start_date, end_date = get_dates()
-    df = load_data(start_date, end_date, from_file=True, file_path=DEFAULT_FILE_PATH)
-    
-    display_default_parameters()
-    param_grid = get_param_grid()
-    metrics_info = get_metrics_info()
-    settings = get_wfo_settings()
-    
-    optimizer = WFOOptimizer(settings)
-    wfo_results = optimizer.walk_forward_optimization(df, param_grid, metrics_info)
-    
-    visualize_wfo_results(wfo_results, df)
-    
-    # Save results
-    results_dir = "WFO_Results"
-    os.makedirs(results_dir, exist_ok=True)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    if wfo_results['out_of_sample_performance']:
-        pd.DataFrame(wfo_results['out_of_sample_performance']).to_csv(f"{results_dir}/oos_performance_{timestamp}.csv", index=False)
-    pd.DataFrame(wfo_results['best_params']).to_csv(f"{results_dir}/best_parameters_{timestamp}.csv", index=False)
-    
-    logger.info("WFO completed")
+    try:
+        df = load_data(args.start_date, args.end_date, from_file=args.from_file, file_path=args.file_path)
+        
+        strategy_config = StrategyConfig()
+        wfo_settings = WFOSettings(n_windows=args.n_windows, train_size=args.train_size, anchored=args.anchored)
+        display_default_parameters(strategy_config, wfo_settings)
+        
+        param_grid = get_param_grid()
+        metrics_info = get_metrics_info()
+        
+        optimizer = WFOOptimizer(wfo_settings)
+        wfo_results = optimizer.walk_forward_optimization(df, param_grid, metrics_info)
+        
+        visualize_wfo_results(wfo_results, df)
+        
+        # Save results
+        results_dir = "WFO_Results"
+        os.makedirs(results_dir, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        if wfo_results['out_of_sample_performance']:
+            pd.DataFrame(wfo_results['out_of_sample_performance']).to_csv(f"{results_dir}/oos_performance_{timestamp}.csv", index=False)
+        pd.DataFrame(wfo_results['best_params']).to_csv(f"{results_dir}/best_parameters_{timestamp}.csv", index=False)
+        
+        logger.info("WFO completed")
+    except Exception as e:
+        logger.error(f"Error in main: {e}")
+        raise
 
 if __name__ == "__main__":
     main()
