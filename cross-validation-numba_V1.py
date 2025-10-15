@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_START_DATE = "2025-01-19"
 DEFAULT_END_DATE = "2025-01-31"
 DEFAULT_TIMEFRAME = '5S'
-DEFAULT_FILE_PATH = '/home/olivier/Downloads/ATDMF_strategy_V5_long/ATDMF_strategy_long_BTCFDUSD05S/Data/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_1s/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_5S.csv'
+DEFAULT_FILE_PATH = '/home/olivier/Downloads/ATDMF_strategy_V5_long/ATDMF_strategy_long_BTCFDUSD05S/Data/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_5S.csv'
 
 # ======================================================================
 # CONFIGURATION CLASSES
@@ -89,32 +89,11 @@ def bbands_1d_nb(close: np.ndarray, window: int = 20, alpha: float = 2.0, ddof: 
     return upper_band, middle_band, lower_band
 
 @njit
-def rolling_mean(arr: np.ndarray, window: int) -> np.ndarray:
-    """Numba-optimized rolling mean."""
-    result = np.full(len(arr), np.nan)
-    cumsum = 0.0
-    for i in range(len(arr)):
-        if i >= window:
-            cumsum -= arr[i - window]
-        cumsum += arr[i]
-        if i >= window - 1:
-            result[i] = cumsum / window
-    return result
-
-@njit
 def rolling_median(arr: np.ndarray, window: int) -> np.ndarray:
     """Numba-optimized rolling median."""
     result = np.full(len(arr), np.nan)
     for i in range(window - 1, len(arr)):
         result[i] = np.median(arr[i - window + 1:i + 1])
-    return result
-
-@njit
-def rolling_min(arr: np.ndarray, window: int) -> np.ndarray:
-    """Numba-optimized rolling min."""
-    result = np.full(len(arr), np.nan)
-    for i in range(window - 1, len(arr)):
-        result[i] = np.min(arr[i - window + 1:i + 1])
     return result
 
 @njit
@@ -146,7 +125,7 @@ def ecart_bollinger_borne_signal_nb(prix: np.ndarray, upper_band: np.ndarray, lo
 def bollinger_horizontal_signal_nb(upper_band: np.ndarray, lower_band: np.ndarray, middle_band: np.ndarray, coeff_medianeBBW: float) -> np.ndarray:
     """Bollinger Horizontal signal."""
     BBW = (upper_band - lower_band) / middle_band
-    MMBBW = rolling_mean(BBW, 5)
+    MMBBW = vbt.indicators.nb.ma_1d_nb(BBW, 5)
     medianeBBW = rolling_median(BBW, 200)
     seuil = medianeBBW / coeff_medianeBBW
     signal = np.zeros(len(BBW), dtype=np.int32)
@@ -161,7 +140,7 @@ def bollinger_horizontal_signal_nb(upper_band: np.ndarray, lower_band: np.ndarra
 def cross_bbw_low_signal_nb(upper_band: np.ndarray, lower_band: np.ndarray, middle_band: np.ndarray, fenetre_lowest: int, seuil_lowest: float) -> np.ndarray:
     """Cross BBW Low signal."""
     largeur_bb = (upper_band - lower_band) / middle_band
-    bbw_lowest = rolling_min(largeur_bb, fenetre_lowest)
+    bbw_lowest = vbt.indicators.nb.rolling_min_nb(largeur_bb, fenetre_lowest)
     signal = np.full(len(largeur_bb), False)
     for i in range(len(largeur_bb)):
         if np.isnan(bbw_lowest[i]) or np.isnan(largeur_bb[i]):
