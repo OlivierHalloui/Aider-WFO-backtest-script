@@ -17,6 +17,10 @@ import seaborn as sns
 import logging
 from typing import Dict, List, Tuple, Optional, Any
 from abc import ABC, abstractmethod
+import functools
+
+# New import for Bayesian optimization
+import optuna
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -76,21 +80,23 @@ def rolling_median(arr: np.ndarray, window: int) -> np.ndarray:
         result[i] = np.median(arr[i - window + 1:i + 1])
     return result
 
-@njit
-def compute_bars_since_below(ecart_borne1: np.ndarray, mediane: np.ndarray, coef: float, Nb_bars_above: int) -> np.ndarray:
-    """Compute bars since below signal."""
-    bars_since_below = np.empty(len(ecart_borne1))
+@functools.lru_cache(maxsize=128)
+def compute_bars_since_below(ecart_borne1: Tuple[float, ...], mediane: Tuple[float, ...], coef: float, Nb_bars_above: int) -> Tuple[bool, ...]:
+    """Compute bars since below signal with caching."""
+    ecart_borne1_arr = np.array(ecart_borne1)
+    mediane_arr = np.array(mediane)
+    bars_since_below = np.empty(len(ecart_borne1_arr))
     counter = np.inf
-    for i in range(len(ecart_borne1)):
-        if np.isnan(mediane[i]) or np.isnan(ecart_borne1[i]):
+    for i in range(len(ecart_borne1_arr)):
+        if np.isnan(mediane_arr[i]) or np.isnan(ecart_borne1_arr[i]):
             bars_since_below[i] = np.nan
             continue
-        if ecart_borne1[i] < mediane[i] / coef:
+        if ecart_borne1_arr[i] < mediane_arr[i] / coef:
             counter = 0
         else:
             counter += 1
         bars_since_below[i] = counter
-    return bars_since_below >= Nb_bars_above
+    return tuple(bars_since_below >= Nb_bars_above)
 
 @njit
 def ecart_bollinger_borne_signal_nb(prix: np.ndarray, upper_band: np.ndarray, lower_band: np.ndarray, timeperiod: int, longueur_mediane: int, coef_mediane: float, Nb_bars_above: int) -> np.ndarray:
@@ -99,12 +105,15 @@ def ecart_bollinger_borne_signal_nb(prix: np.ndarray, upper_band: np.ndarray, lo
     sma = vbt.indicators.nb.ma_1d_nb(prix, timeperiod)
     ecart_borne1 = ecart / sma
     mediane = rolling_median(ecart_borne1, longueur_mediane)
-    return compute_bars_since_below(ecart_borne1, mediane, coef_mediane, Nb_bars_above)
+    return compute_bars_since_below(tuple(ecart_borne1), tuple(mediane), coef_mediane, Nb_bars_above)
 
-@njit
-def bollinger_horizontal_signal_nb(upper_band: np.ndarray, lower_band: np.ndarray, middle_band: np.ndarray, coeff_medianeBBW: float) -> np.ndarray:
-    """Bollinger Horizontal signal."""
-    BBW = (upper_band - lower_band) / middle_band
+@functools.lru_cache(maxsize=128)
+def bollinger_horizontal_signal_nb(upper_band: Tuple[float, ...], lower_band: Tuple[float, ...], middle_band: Tuple[float, ...], coeff_medianeBBW: float) -> Tuple[int, ...]:
+    """Bollinger Horizontal signal with caching."""
+    upper_band_arr = np.array(upper_band)
+    lower_band_arr = np.array(lower_band)
+    middle_band_arr = np.array(middle_band)
+    BBW = (upper_band_arr - lower_band_arr) / middle_band_arr
     MMBBW = vbt.indicators.nb.ma_1d_nb(BBW, 5)
     medianeBBW = rolling_median(BBW, 200)
     seuil = medianeBBW / coeff_medianeBBW
@@ -114,7 +123,7 @@ def bollinger_horizontal_signal_nb(upper_band: np.ndarray, lower_band: np.ndarra
             continue
         if BBW[i] < seuil[i] or MMBBW[i] < seuil[i]:
             signal[i] = 1
-    return signal
+    return tuple(signal)
 
 @njit
 def cross_bbw_low_signal_nb(upper_band: np.ndarray, lower_band: np.ndarray, middle_band: np.ndarray, fenetre_lowest: int, seuil_lowest: float) -> np.ndarray:
@@ -276,7 +285,7 @@ class ATDMFStrategy(TradingStrategy):
                     params['timeperiod'], 100, params['coef_mediane'], params['Nb_bars_above']
                 ),
                 'bollinger_horizontal_signal': bollinger_horizontal_signal_nb(
-                    upper_band, lower_band, middle_band, params['coeff_medianeBBW']
+                    tuple(upper_band), tuple(lower_band), tuple(middle_band), params['coeff_medianeBBW']
                 ),
                 'bbw_lowest_signal': cross_bbw_low_signal_nb(
                     upper_band, lower_band, middle_band, params['fenetre_lowest'], params['seuil_lowest']
@@ -310,36 +319,35 @@ class ATDMFStrategy(TradingStrategy):
             }
         return signals
 
-    def create_entry_exit_conditions(self, df: pd.DataFrame, signals: Dict[str, np.ndarray], upper_band: np.ndarray, middle_band: np.ndarray) -> Tuple[pd.Series, pd.Series]:
-        """Create entry and exit conditions."""
-        cond_df = pd.DataFrame({
-            'bbw_lowest_signal': signals['bbw_lowest_signal'],
-            'ecart_bollinger_signal': signals['ecart_bollinger_signal'],
-            'bollinger_horizontal_signal': signals['bollinger_horizontal_signal'],
-            'sma_exit_signal': signals['sma_exit_signal'],
-            'close': df['Close'].values,
-            'high': df['High'].values,
-            'upper_band': upper_band,
-            'middle_band': middle_band
-        }, index=df.index)
+    @njit
+    def create_entry_exit_conditions(self, df: pd.DataFrame, signals: Dict[str, np.ndarray], upper_band: np.ndarray, middle_band: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Create entry and exit conditions using NumPy arrays for Numba compatibility."""
+        # Convert to NumPy arrays
+        bbw_lowest_signal = signals['bbw_lowest_signal'].astype(np.bool_)
+        ecart_bollinger_signal = signals['ecart_bollinger_signal'].astype(np.bool_)
+        bollinger_horizontal_signal = signals['bollinger_horizontal_signal'].astype(np.bool_)
+        sma_exit_signal = signals['sma_exit_signal'].astype(np.bool_)
+        close_prices = df['Close'].values
+        high_prices = df['High'].values
         
-        entry_condition = (
-            (cond_df['bbw_lowest_signal']) &
-            (cond_df['close'] > cond_df['upper_band'])
-        )
+        # Entry condition: bbw_lowest_signal and close > upper_band
+        entry_condition = np.logical_and(bbw_lowest_signal, close_prices > upper_band)
         
-        exit_condition = (cond_df['sma_exit_signal'])
+        # Exit condition: sma_exit_signal
+        exit_condition = sma_exit_signal
+        
         return entry_condition, exit_condition
 
 def run_backtest(df: pd.DataFrame, params: Dict[str, Any], timeframe: str = DEFAULT_TIMEFRAME, return_portfolio: bool = True) -> Any:
-    """Run a backtest."""
+    """Run a backtest using direct NumPy arrays."""
     try:
         strategy = ATDMFStrategy()
         signals = strategy.create_signal_generators(df, **params)
         entry_condition, exit_condition = strategy.create_entry_exit_conditions(df, signals, signals['upper_band'], signals['middle_band'])
         
+        # Use NumPy arrays directly
         portfolio = vbt.Portfolio.from_signals(
-            close=df['Close'],
+            close=df['Close'].values,  # Convert to NumPy
             entries=entry_condition,
             exits=exit_condition,
             max_size=10000,
@@ -376,18 +384,38 @@ class WFOOptimizer:
         self.settings = settings
     
     def optimize_parameters(self, in_sample_df: pd.DataFrame, param_grid: Dict[str, List], metrics_info: Dict[str, Any], timeframe: str) -> pd.DataFrame:
-        """Optimize parameters."""
-        param_dicts = [dict(zip(param_grid.keys(), values)) | metrics_info for values in product(*param_grid.values())]
+        """Optimize parameters using Bayesian optimization with Optuna."""
+        def objective(trial):
+            # Suggest parameters
+            params = {
+                'timeperiod': trial.suggest_int('timeperiod', min(param_grid['timeperiod']), max(param_grid['timeperiod'])),
+                'StDev': trial.suggest_float('StDev', min(param_grid['StDev']), max(param_grid['StDev'])),
+                'coeff_medianeBBW': trial.suggest_float('coeff_medianeBBW', min(param_grid['coeff_medianeBBW']), max(param_grid['coeff_medianeBBW'])),
+                'coef_mediane': trial.suggest_float('coef_mediane', min(param_grid['coef_mediane']), max(param_grid['coef_mediane'])),
+                'Nb_bars_above': trial.suggest_int('Nb_bars_above', min(param_grid['Nb_bars_above']), max(param_grid['Nb_bars_above'])),
+                'fenetre_lowest': trial.suggest_int('fenetre_lowest', min(param_grid['fenetre_lowest']), max(param_grid['fenetre_lowest'])),
+                'seuil_lowest': trial.suggest_float('seuil_lowest', min(param_grid['seuil_lowest']), max(param_grid['seuil_lowest'])),
+                'user_exit_sma_length': trial.suggest_int('user_exit_sma_length', min(param_grid['user_exit_sma_length']), max(param_grid['user_exit_sma_length'])),
+                **metrics_info
+            }
+            score = run_backtest(in_sample_df, params, timeframe, return_portfolio=False)
+            return score
         
-        @vbt.parameterized(execute_kwargs=dict(show_progress=True, engine=self.settings.parallel_backend, chunk_len=self.settings.chunk_size))
-        def run_parameterized_backtest(df: pd.DataFrame, param_dict: Dict[str, Any], timeframe: str) -> float:
-            return run_backtest(df, param_dict, timeframe, return_portfolio=False)
+        # Run Optuna optimization
+        sampler = optuna.samplers.TPESampler()
+        study = optuna.create_study(sampler=sampler, direction='maximize')
+        study.optimize(objective, n_trials=100)
         
-        results = [param_dict | {'combined_score': run_parameterized_backtest(in_sample_df, param_dict, timeframe)} for param_dict in tqdm(param_dicts, desc="Optimizing parameters")]
+        # Convert best trials to DataFrame
+        results = []
+        for trial in study.trials:
+            result = trial.params.copy()
+            result['combined_score'] = trial.value
+            results.append(result)
         return pd.DataFrame(results).sort_values('combined_score', ascending=False)
     
     def walk_forward_optimization(self, df: pd.DataFrame, param_grid: Optional[Dict[str, List]] = None, metrics_info: Optional[Dict[str, Any]] = None, timeframe: str = DEFAULT_TIMEFRAME) -> Dict[str, Any]:
-        """Perform WFO."""
+        """Perform WFO with memory-optimized views."""
         start_time = time.time()
         window_times = []
         optimization_times = []
@@ -408,19 +436,19 @@ class WFOOptimizer:
             start_idx = i * window_size
             end_idx = start_idx + window_size if i < self.settings.n_windows - 1 else total_rows
             
-            window_df = df.iloc[start_idx:end_idx].copy()
+            window_df = df.iloc[start_idx:end_idx]  # View, no copy
             in_sample_start_idx = 0 if self.settings.anchored else start_idx
             in_sample_end_idx = start_idx + int(window_size * self.settings.train_size)
             
-            in_sample_df = df.iloc[in_sample_start_idx:in_sample_end_idx].copy() if self.settings.anchored else window_df.iloc[:int(window_size * self.settings.train_size)].copy()
-            out_sample_df = window_df.iloc[int(window_size * self.settings.train_size):].copy()
+            in_sample_df = df.iloc[in_sample_start_idx:in_sample_end_idx] if self.settings.anchored else window_df.iloc[:int(window_size * self.settings.train_size)]  # View, no copy
+            out_sample_df = window_df.iloc[int(window_size * self.settings.train_size):]  # View, no copy
             
             optimization_start = time.time()
             optimization_results = self.optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe)
             optimization_time = time.time() - optimization_start
             optimization_times.append(optimization_time)
             
-            best_params = optimization_results.iloc[0].drop(['combined_score', metrics_info['metric1_name'], metrics_info['metric2_name']], errors='ignore').to_dict()
+            best_params = optimization_results.iloc[0].drop(['combined_score'], errors='ignore').to_dict()
             
             if len(out_sample_df) > 0:
                 out_sample_portfolio = run_backtest(out_sample_df, best_params, timeframe)
