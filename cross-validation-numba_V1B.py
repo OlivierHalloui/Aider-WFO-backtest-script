@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_START_DATE = "2025-01-19"
 DEFAULT_END_DATE = "2025-01-31"
 DEFAULT_TIMEFRAME = '5S'
-DEFAULT_FILE_PATH = '/home/olivier/Downloads/ATDMF_strategy_V5_long/ATDMF_strategy_long_BTCFDUSD05S/Data/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_5S.csv'
+DEFAULT_FILE_PATH = '/home/olivier/Downloads/ATDMF_strategy_V5_long/ATDMF_strategy_long_BTCFDUSD05S/Data/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_1s/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_5S.csv'
 
 # ======================================================================
 # CONFIGURATION CLASSES
@@ -205,7 +205,7 @@ def load_data(start_date: str, end_date: str, timeframe: str = DEFAULT_TIMEFRAME
                 end=end_date,
                 timeframe=base_timeframe
             )
-            df = df_1s.resample(timeframe).agg({
+            df = df.resample(timeframe).agg({
                 'Open': 'first',
                 'High': 'max',
                 'Low': 'min',
