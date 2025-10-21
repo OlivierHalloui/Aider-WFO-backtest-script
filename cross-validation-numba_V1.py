@@ -12,7 +12,7 @@ import talib
 import datetime
 import time
 import os
-from numba import njit
+from numba import njit, prange
 from itertools import product
 from tqdm import tqdm
 import time
@@ -31,30 +31,18 @@ DEFAULT_DATA_FILE = (
     "BTCFDUSD05S/Data/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_1s/"
     "Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_5S.csv"
 )
-# Default parameter grid for optimization
-# DEFAULT_PARAM_GRID = {
-#     'timeperiod': [10, 15, 20, 25, 30],
-#     'StDev': [0.5, 1.0, 1.5, 2.0, 2.5],
-#     'coeff_medianeBBW': [1.0, 1.1, 1.2],
-#     'coef_mediane': [0.8, 1.0, 1.2],
-#     'Nb_bars_above': [3, 5, 7],
-#     'fenetre_lowest': [20, 30, 40],
-#     'seuil_lowest': [3.0, 3.5, 4.0],
-#     'user_exit_sma_length': [15, 20, 25]
-# }
 
-# Expanded parameter grid for more extensive search
 DEFAULT_PARAM_GRID = {
     'timeperiod': [10, 15, 20, 25, 30],
     'StDev': [0.5, 1.0, 1.5, 2.0, 2.5],
-    'coeff_medianeBBW': [0.8, 1.0, 1.2, 1.4, 1.6],
-    'coef_mediane': [0.5, 0.7, 0.9, 1.1, 1.3, 1.5],
-    'fenetre_lowest': [30, 40, 50, 60, 70, 80],
-    'seuil_lowest': [1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
-    'longueur_mediane': [50.0, 75.0, 100.0, 125.0, 150.0],
-    'Nb_bars_above': [2.0, 4.0, 6.0, 8.0, 10.0],
+    'coeff_medianeBBW': [1.0, 1.1, 1.2],
+    'coef_mediane': [0.8, 1.0, 1.2],
+    'Nb_bars_above': [3, 5, 7],
+    'fenetre_lowest': [20, 30, 40],
+    'seuil_lowest': [3.0, 3.5, 4.0],
     'user_exit_sma_length': [15, 20, 25]
 }
+
 
 # ======================================================================
 # CONFIGURATION SETTINGS
@@ -94,37 +82,32 @@ def bbands_1d_nb(close, window=20, alpha=2.0, ddof=0):
             lower_band[i] = middle_band[i] - alpha * std[i]
     return upper_band, middle_band, lower_band
 
-@njit
+@njit(parallel=True, cache=True)
 def rolling_mean(arr, window):
     result = np.full(len(arr), np.nan)
-    cumsum = 0.0
-    for i in range(len(arr)):
-        if i >= window:
-            cumsum -= arr[i - window]
-        cumsum += arr[i]
-        if i >= window - 1:
-            result[i] = cumsum / window
+    for i in prange(window - 1, len(arr)):
+        result[i] = np.mean(arr[i - window + 1:i + 1])
     return result
 
-@njit
+@njit(parallel=True, cache=True)
 def rolling_median(arr, window):
     result = np.full(len(arr), np.nan)
-    for i in range(window - 1, len(arr)):
+    for i in prange(window - 1, len(arr)):
         result[i] = np.median(arr[i - window + 1:i + 1])
     return result
 
-@njit
+@njit(parallel=True, cache=True)
 def rolling_min(arr, window):
     result = np.full(len(arr), np.nan)
-    for i in range(window - 1, len(arr)):
+    for i in prange(window - 1, len(arr)):
         result[i] = np.min(arr[i - window + 1:i + 1])
     return result
 
-@njit
+@njit(parallel=True, cache=True)
 def compute_bars_since_below(ecart_borne1, mediane, coef, Nb_bars_above):
     bars_since_below = np.empty(len(ecart_borne1))
     counter = np.inf
-    for i in range(len(ecart_borne1)):
+    for i in prange(len(ecart_borne1)):
         if np.isnan(mediane[i]) or np.isnan(ecart_borne1[i]):
             bars_since_below[i] = np.nan
             continue
@@ -135,7 +118,7 @@ def compute_bars_since_below(ecart_borne1, mediane, coef, Nb_bars_above):
         bars_since_below[i] = counter
     return bars_since_below >= Nb_bars_above
 
-@njit
+@njit(parallel=True, cache=True)
 def ecart_bollinger_borne_signal_nb(prix, upper_band, lower_band, timeperiod, longueur_mediane, coef_mediane, Nb_bars_above):
     ecart = upper_band - lower_band
     sma = vbt.indicators.nb.ma_1d_nb(prix, timeperiod)
@@ -143,33 +126,33 @@ def ecart_bollinger_borne_signal_nb(prix, upper_band, lower_band, timeperiod, lo
     mediane = rolling_median(ecart_borne1, longueur_mediane)
     return compute_bars_since_below(ecart_borne1, mediane, coef_mediane, Nb_bars_above)
 
-@njit
+@njit(parallel=True, cache=True)
 def bollinger_horizontal_signal_nb(upper_band, lower_band, middle_band, coeff_medianeBBW):
     BBW = (upper_band - lower_band) / middle_band
     MMBBW = rolling_mean(BBW, 5)
     medianeBBW = rolling_median(BBW, 200)
     seuil = medianeBBW / coeff_medianeBBW
     signal = np.zeros(len(BBW), dtype=np.int32)
-    for i in range(len(BBW)):
+    for i in prange(len(BBW)):
         if np.isnan(seuil[i]):
             continue
         if BBW[i] < seuil[i] or MMBBW[i] < seuil[i]:
             signal[i] = 1
     return signal
 
-@njit
+@njit(parallel=True, cache=True)
 def cross_bbw_low_signal_nb(upper_band, lower_band, middle_band, fenetre_lowest, seuil_lowest):
     largeur_bb = (upper_band - lower_band) / middle_band
     bbw_lowest = rolling_min(largeur_bb, fenetre_lowest)
     signal = np.full(len(largeur_bb), False)
-    for i in range(len(largeur_bb)):
+    for i in prange(len(largeur_bb)):
         if np.isnan(bbw_lowest[i]) or np.isnan(largeur_bb[i]):
             continue
         signal[i] = largeur_bb[i] <= (bbw_lowest[i] * seuil_lowest)
     return signal
 
 
-@njit(cache=True)
+@njit(parallel=True, cache=True)
 def calculate_exit_sma_nb(close, user_exit_sma_length):
     """
     Numba-optimized implementation of the SMA exit signal.
@@ -185,7 +168,7 @@ def calculate_exit_sma_nb(close, user_exit_sma_length):
     sma = vbt.indicators.nb.ma_1d_nb(close_1d, user_exit_sma_length)
     
     signal = np.zeros(n, dtype=np.bool_)
-    for i in range(1, n):
+    for i in prange(1, n):
         if (not np.isnan(close_1d[i-1]) and not np.isnan(sma[i-1]) and 
             not np.isnan(close_1d[i]) and not np.isnan(sma[i]) and 
             close_1d[i-1] > sma[i-1] and close_1d[i] < sma[i]):
@@ -265,17 +248,25 @@ def load_data(start_date, end_date, timeframe='5S', from_file=True, file_path=No
     pandas.DataFrame
         OHLCV data
     """
-    file_path = '/home/olivier/Downloads/ATDMF_strategy_V5_long/ATDMF_strategy_long_BTCFDUSD05S/Data/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_1s/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_5S.csv'
     if from_file and file_path:
-        # Load from file
-        df = pd.read_csv(file_path)
-        df['Open time'] = pd.to_datetime(df['Open time'])
+        # Load from file with optimized dtypes
+        dtypes = {
+            'Open time': 'str',  # Will convert to datetime later
+            'Open': 'float64',
+            'High': 'float64',
+            'Low': 'float64',
+            'Close': 'float64',
+            'Volume': 'float64' if 'Volume' in pd.read_csv(file_path, nrows=1).columns else None
+        }
+        df = pd.read_csv(file_path, dtype=dtypes)
+        df['Open time'] = pd.to_datetime(df['Open time'], errors='coerce')
         df.set_index('Open time', inplace=True)
+        # Resample efficiently
         df = df.resample(timeframe).agg({
-                    'Open': 'first',
-                    'High': 'max',
-                    'Low': 'min',
-                    'Close': 'last'
+            'Open': 'first',
+            'High': 'max',
+            'Low': 'min',
+            'Close': 'last'
         }).dropna()
         print(df)
 
@@ -479,13 +470,11 @@ def create_entry_exit_conditions(df, signals, upper_band, middle_band):
     
     # Entry condition matches V1B logic
     entry_condition = (
-    cond_df['nb_bars_above_signal'].astype(bool) &
-    cond_df['cross_bbw_low_signal'].astype(bool) &
-    cond_df['bollinger_horizontal_signal'].astype(bool) &
-    (cond_df['close'] > cond_df['upper_band']) &
-    (cond_df['close'].shift(1) < cond_df['upper_band'].shift(1))
+        cond_df['nb_bars_above_signal'].astype(bool) &
+        (cond_df['close'] > cond_df['upper_band']) &
+        (cond_df['close'].shift(1) < cond_df['upper_band'].shift(1))
     ).fillna(False)
-
+    
     # Exit condition
     exit_condition = (
         (cond_df['sma_exit_signal']) # | (cond_df['close'] < cond_df['middle_band'])
@@ -679,13 +668,7 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     if param_grid is None:
         param_grid = {
             'timeperiod': [10, 15, 20, 25, 30],
-            'StDev': [0.5, 1.0, 1.5, 2.0, 2.5],
-            'coeff_medianeBBW': [0.8, 1.0, 1.2, 1.4, 1.6],
-            'coef_mediane': [0.5, 0.7, 0.9, 1.1, 1.3, 1.5],
-            'fenetre_lowest': [30, 40, 50, 60, 70, 80],
-            'seuil_lowest': [1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
-            'longueur_mediane': [50.0, 75.0, 100.0, 125.0, 150.0],
-            'Nb_bars_above': [2.0, 4.0, 6.0, 8.0, 10.0]
+            'StDev': [0.5, 1.0, 1.5, 2.0, 2.5]
         }
         
     if metrics_info is None:
@@ -2237,13 +2220,12 @@ def generate_wfo_report_pdf(wfo_results, df, output_path=None, strategy_name="AT
         # Obtenir les métriques out-of-sample
         oos_metrics = []
         for metric in oos_df.to_dict('records'):
-            if 'window' in metric:
-                oos_metrics.append({
-                    'window': metric['window'],
-                    'performance': metric['return'] if 'return' in metric else (
-                                  metric['sharpe'] if 'sharpe' in metric else 0),
-                    'type': 'Out-of-Sample'
-                })
+            oos_metrics.append({
+                'window': metric['window'],
+                'performance': metric['return'] if 'return' in metric else (
+                              metric['sharpe'] if 'sharpe' in metric else 0),
+                'type': 'Out-of-Sample'
+            })
         
         # Combiner les métriques
         comparison_df = pd.DataFrame(is_metrics + oos_metrics)
@@ -2625,6 +2607,7 @@ def generate_wfo_report_pdf(wfo_results, df, output_path=None, strategy_name="AT
         
         # 2. Stabilité de Performance: coefficient de variation des rendements
         if 'return' in oos_df.columns and not oos_df['return'].isna().all():
+            # Calculer coefficient de variation (std/mean) pour non-zero mean
             mean_return = oos_df['return'].mean()
             if abs(mean_return) > 1e-6:  # Éviter division par zéro ou nombres minuscules
                 cv_return = oos_df['return'].std() / abs(mean_return)
@@ -2667,7 +2650,7 @@ def generate_wfo_report_pdf(wfo_results, df, output_path=None, strategy_name="AT
             for param, stability in param_stability.items():
                 robustness_metrics[f'Stabilité {param}'] = stability
         
-        # 6. Ratio Performance OOS vs IS
+        # 6. Ratio Performance OOS vs IS 
         # Si nous avons les métriques IS et OOS, calculer le ratio
         is_metrics = []
         for window_result in wfo_results['window_results']:
@@ -2749,29 +2732,28 @@ def generate_wfo_report_pdf(wfo_results, df, output_path=None, strategy_name="AT
             metrics_to_plot = {k: v for k, v in robustness_metrics.items() 
                              if not k.startswith('Stabilité Moy.') and '(0-1)' in k}
             
-            # Trier les métriques par valeur
+            # Sort metrics by value
             sorted_metrics = dict(sorted(metrics_to_plot.items(), key=lambda item: item[1], reverse=True))
             
-            # Tracer le graphique à barres
-            if sorted_metrics:
-                bars = ax2.barh(
-                    [k.replace(' (0-1)', '') for k in sorted_metrics.keys()], 
-                    list(sorted_metrics.values()),
-                    color='skyblue'
-                )
-                
-                # Ajouter des étiquettes de valeur
-                for i, bar in enumerate(bars):
-                    width = bar.get_width()
-                    label_x_pos = width + 0.01
-                    ax2.text(label_x_pos, bar.get_y() + bar.get_height()/2, 
-                           f'{width:.2f}', va='center')
-                
-                ax2.set_xlim(0, 1.1)
-                ax2.set_xlabel('Score (échelle 0-1)', fontsize=12)
-                ax2.set_ylabel('Métrique', fontsize=12)
-                ax2.set_title('Comparaison des Métriques de Robustesse', fontsize=14)
-                ax2.grid(True, axis='x', alpha=0.3)
+            # Plot bar chart
+            bars = plt.barh(
+                [k.replace(' (0-1)', '') for k in sorted_metrics.keys()], 
+                list(sorted_metrics.values()),
+                color='skyblue'
+            )
+            
+            # Ajouter des étiquettes de valeur
+            for i, bar in enumerate(bars):
+                width = bar.get_width()
+                label_x_pos = width + 0.01
+                plt.text(label_x_pos, bar.get_y() + bar.get_height()/2, 
+               f'{width:.2f}', va='center')
+            
+            plt.xlim(0, 1.1)
+            plt.xlabel('Score (échelle 0-1)', fontsize=12)
+            plt.ylabel('Métrique', fontsize=12)
+            plt.title('Comparaison des Métriques de Robustesse', fontsize=14)
+            plt.grid(True, axis='x', alpha=0.3)
             
             # Créer un graphique à barres de stabilité des paramètres
             param_stability_items = {k: v for k, v in robustness_metrics.items() 
@@ -2785,7 +2767,7 @@ def generate_wfo_report_pdf(wfo_results, df, output_path=None, strategy_name="AT
                                                    key=lambda item: item[1], reverse=True))
                 
                 # Tracer un graphique à barres
-                bars = ax3.barh(
+                bars = plt.barh(
                     list(sorted_param_stability.keys()), 
                     list(sorted_param_stability.values()),
                     color='lightgreen'
@@ -2795,14 +2777,14 @@ def generate_wfo_report_pdf(wfo_results, df, output_path=None, strategy_name="AT
                 for i, bar in enumerate(bars):
                     width = bar.get_width()
                     label_x_pos = width + 0.01
-                    ax3.text(label_x_pos, bar.get_y() + bar.get_height()/2, 
-                           f'{width:.2f}', va='center')
+                    plt.text(label_x_pos, bar.get_y() + bar.get_height()/2, 
+                   f'{width:.2f}', va='center')
                 
-                ax3.set_xlim(0, 1.1)
-                ax3.set_xlabel('Score de Stabilité (échelle 0-1)', fontsize=12)
-                ax3.set_ylabel('Paramètre', fontsize=12)
-                ax3.set_title('Analyse de Stabilité des Paramètres', fontsize=14)
-                ax3.grid(True, axis='x', alpha=0.3)
+                plt.xlim(0, 1.1)
+                plt.xlabel('Score de Stabilité (échelle 0-1)', fontsize=12)
+                plt.ylabel('Paramètre', fontsize=12)
+                plt.title('Analyse de Stabilité des Paramètres', fontsize=14)
+                plt.grid(True, axis='x', alpha=0.3)
             
             # Créer un résumé textuel de l'analyse de robustesse
             ax4 = plt.subplot2grid((2, 2), (1, 1))
@@ -2844,7 +2826,7 @@ def generate_wfo_report_pdf(wfo_results, df, output_path=None, strategy_name="AT
                 else:
                     summary_text += "    (Baisse de performance significative de in-sample à out-of-sample)\n"
             
-            # Ajouter des informations sur la stabilité des paramètres
+            # Add parameter stability info
             if 'Stabilité Moy. des Paramètres (0-1)' in robustness_metrics:
                 param_stab = robustness_metrics['Stabilité Moy. des Paramètres (0-1)']
                 summary_text += f"\nStabilité des Paramètres: {param_stab:.2f}/1.00\n"
@@ -2859,119 +2841,19 @@ def generate_wfo_report_pdf(wfo_results, df, output_path=None, strategy_name="AT
             # Ajouter le texte au graphique
             ax4.text(0, 1.0, summary_text, fontsize=11, va='top', linespacing=1.5)
             
-            save_figure_to_pdf(pdf)
+            # Ajouter un titre général
+            plt.suptitle('Strategy Robustness Analysis Dashboard', fontsize=18, y=0.98)
             
-        # =====================================================================
-        # DERNIÈRE PAGE - CONCLUSIONS
-        # =====================================================================
-        
-        plt.figure(figsize=(14, 10))
-        plt.axis('off')
-        
-        plt.text(0.5, 0.95, "Conclusions et Recommandations", fontsize=24, ha='center')
-        
-        # Préparer le texte de conclusion
-        conclusion_text = ""
-        
-        # Juger de la qualité globale de la stratégie
-        if 'return' in oos_df.columns and 'sharpe' in oos_df.columns:
-            avg_return = oos_df['return'].mean()
-            avg_sharpe = oos_df['sharpe'].mean()
+            # Ajouter une description en bas
+            plt.figtext(0.5, 0.01, 
+               "This dashboard provides a comprehensive analysis of strategy robustness based on WFO results.\n"
+               "Higher scores (closer to 1.0) indicate better robustness across all metrics.\n"
+               "A truly robust strategy should perform consistently across different market conditions.",
+               ha="center", fontsize=12, bbox={"facecolor":"white", "alpha":0.5, "pad":5})
             
-            conclusion_text += f"Performance Globale:\n"
-            
-            if avg_return > 0 and avg_sharpe > 1:
-                conclusion_text += "✅ La stratégie a démontré une performance positive dans l'ensemble avec un rendement moyen de "
-                conclusion_text += f"{avg_return:.2f}% et un ratio de Sharpe moyen de {avg_sharpe:.2f}.\n\n"
-            elif avg_return > 0:
-                conclusion_text += "⚠️ La stratégie a montré un rendement positif moyen de "
-                conclusion_text += f"{avg_return:.2f}%, mais avec un ratio de Sharpe moyen de seulement {avg_sharpe:.2f}.\n\n"
-            else:
-                conclusion_text += "❌ La stratégie n'a pas démontré une performance positive, avec un rendement moyen de "
-                conclusion_text += f"{avg_return:.2f}% et un ratio de Sharpe moyen de {avg_sharpe:.2f}.\n\n"
-        
-        # Évaluer la robustesse
-        if 'Score de Robustesse Global (0-1)' in robustness_metrics:
-            robustness_score = robustness_metrics['Score de Robustesse Global (0-1)']
-            
-            conclusion_text += f"Robustesse de la Stratégie:\n"
-            
-            if robustness_score >= 0.7:
-                conclusion_text += "✅ La stratégie démontre une robustesse élevée avec un score de "
-                conclusion_text += f"{robustness_score:.2f}/1.00, ce qui suggère qu'elle est susceptible de bien se comporter dans des conditions de marché futures.\n\n"
-            elif robustness_score >= 0.4:
-                conclusion_text += "⚠️ La stratégie présente une robustesse modérée avec un score de "
-                conclusion_text += f"{robustness_score:.2f}/1.00. Une certaine prudence est recommandée lors de son déploiement en temps réel.\n\n"
-            else:
-                conclusion_text += "❌ La stratégie ne démontre pas une robustesse suffisante, avec un score de seulement "
-                conclusion_text += f"{robustness_score:.2f}/1.00. Un travail supplémentaire est nécessaire pour améliorer sa fiabilité.\n\n"
-        
-        # Évaluer la stabilité des paramètres
-        if 'Stabilité Moy. des Paramètres (0-1)' in robustness_metrics:
-            param_stability = robustness_metrics['Stabilité Moy. des Paramètres (0-1)']
-            
-            conclusion_text += f"Paramètres Optimaux:\n"
-            
-            if param_stability >= 0.7:
-                conclusion_text += "✅ Les paramètres optimaux sont restés hautement cohérents à travers les fenêtres "
-                conclusion_text += f"(stabilité: {param_stability:.2f}/1.00), ce qui suggère que la stratégie n'est pas suroptimisée.\n\n"
-            elif param_stability >= 0.4:
-                conclusion_text += "⚠️ Une certaine variation dans les paramètres optimaux est observée "
-                conclusion_text += f"(stabilité: {param_stability:.2f}/1.00). Envisagez d'utiliser les valeurs moyennes des paramètres.\n\n"
-            else:
-                conclusion_text += "❌ Les paramètres optimaux varient significativement entre les fenêtres "
-                conclusion_text += f"(stabilité: {param_stability:.2f}/1.00), ce qui suggère un possible surajustement. "
-                conclusion_text += "Une approche plus robuste de sélection des paramètres est recommandée.\n\n"
-        
-        # Recommandations finales
-        conclusion_text += "Recommandations:\n\n"
-        
-        # Décider des recommandations basées sur les métriques
-        if not oos_df.empty and 'return' in oos_df.columns and 'sharpe' in oos_df.columns:
-            avg_return = oos_df['return'].mean()
-            avg_sharpe = oos_df['sharpe'].mean()
-            positive_rate = (oos_df['return'] > 0).mean()
-            
-            # Construire les recommandations
-            recommendations = []
-            
-            if avg_return > 0 and avg_sharpe > 1 and positive_rate >= 0.6:
-                recommendations.append("✅ La stratégie peut être considérée pour un déploiement en production avec les paramètres optimaux agrégés.")
-            elif avg_return > 0 and avg_sharpe > 0.5:
-                recommendations.append("⚠️ La stratégie pourrait être utilisée avec prudence, potentiellement avec une taille de position réduite.")
-            else:
-                recommendations.append("❌ Il est recommandé d'améliorer davantage la stratégie avant de la déployer en production.")
-            
-            # Recommandations sur les paramètres
-            if 'Stabilité Moy. des Paramètres (0-1)' in robustness_metrics:
-                param_stability = robustness_metrics['Stabilité Moy. des Paramètres (0-1)']
-                if param_stability < 0.5:
-                    recommendations.append("⚠️ Étant donné la variabilité des paramètres optimaux, envisagez d'utiliser une stratégie d'adaptation dynamique des paramètres.")
-            
-            # Recommandations sur le risque
-            if 'max_drawdown' in oos_df.columns:
-                avg_drawdown = oos_df['max_drawdown'].mean()
-                if avg_drawdown > 20:
-                    recommendations.append(f"⚠️ Le drawdown moyen de {avg_drawdown:.2f}% est élevé. Envisagez d'ajouter des mécanismes de gestion des risques.")
-            
-            # Ajouter toutes les recommandations au texte de conclusion
-            for recommendation in recommendations:
-                conclusion_text += f"• {recommendation}\n"
-        else:
-            conclusion_text += "• Données insuffisantes pour formuler des recommandations spécifiques."
-        
-        # Ajouter une note finale
-        conclusion_text += "\nNote Finale:\n"
-        conclusion_text += "L'analyse Walk-Forward Optimization fournit un aperçu précieux de la performance attendue en conditions réelles, "
-        conclusion_text += "mais ne garantit pas les résultats futurs. Surveillez constamment la performance de la stratégie et ajustez si nécessaire."
-        
-        # Ajouter le texte de conclusion au graphique
-        plt.text(0.1, 0.85, conclusion_text, fontsize=12, va='top', linespacing=1.8)
-        
-        save_figure_to_pdf(pdf)
-    
-    print(f"Rapport PDF généré avec succès: {output_path}")
-    return output_path
+            plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+            plt.subplots_adjust(top=0.9)
+            plt.show()
 
 def integrate_report_generation(wfo_results, df, strategy_name="ATDMF Strategy"):
     """
@@ -3050,14 +2932,14 @@ def get_param_grid():
     
     # Default parameter ranges
     default_ranges = {
-        'timeperiod': (10, 30, 1),
-        'StDev': (0.5, 2.5, 0.1),
-        'coeff_medianeBBW': (0.8, 1.6, 0.1),
+        'timeperiod': (20, 21, 1),
+        'StDev': (2, 2, 0.1),
+        'coeff_medianeBBW': (0.8, 1.6, 0.2),
         'coef_mediane': (0.5, 1.5, 0.1),
         'fenetre_lowest': (30, 50, 5),
         'seuil_lowest': (1, 3.5, 0.2),
-        'longueur_mediane': (50, 150, 10),
-        'Nb_bars_above': (2, 10, 1),
+        'longueur_mediane': (50, 150, 25),
+        'Nb_bars_above': (2, 10, 2),
         'user_exit_sma_length': (10, 30, 2)
     }
     
@@ -3074,7 +2956,7 @@ def get_param_grid():
     
     if not selected_indices:
         print("No valid parameters selected. Using timeperiod and StDev as defaults.")
-        selected_params = ['timeperiod', 'StDev','coeff_medianeBBW', 'coef_mediane', 'fenetre_lowest', 'seuil_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']
+        selected_params = ['timeperiod', 'StDev']
     else:
         param_keys = list(param_options.keys())
         selected_params = [param_keys[idx-1] for idx in selected_indices if 1 <= idx <= len(param_keys)]
