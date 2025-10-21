@@ -23,6 +23,39 @@ import seaborn as sns
 import io
 from PIL import Image
 
+DEFAULT_START_DATE = "2025-01-19"
+DEFAULT_END_DATE = "2025-01-31"
+DEFAULT_TIMEFRAME = '5S'
+DEFAULT_DATA_FILE = (
+    "/home/olivier/Downloads/ATDMF_strategy_V5_long/ATDMF_strategy_long_"
+    "BTCFDUSD05S/Data/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_1s/"
+    "Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_5S.csv"
+)
+# Default parameter grid for optimization
+# DEFAULT_PARAM_GRID = {
+#     'timeperiod': [10, 15, 20, 25, 30],
+#     'StDev': [0.5, 1.0, 1.5, 2.0, 2.5],
+#     'coeff_medianeBBW': [1.0, 1.1, 1.2],
+#     'coef_mediane': [0.8, 1.0, 1.2],
+#     'Nb_bars_above': [3, 5, 7],
+#     'fenetre_lowest': [20, 30, 40],
+#     'seuil_lowest': [3.0, 3.5, 4.0],
+#     'user_exit_sma_length': [15, 20, 25]
+# }
+
+# Expanded parameter grid for more extensive search
+DEFAULT_PARAM_GRID = {
+    'timeperiod': [10, 15, 20, 25, 30],
+    'StDev': [0.5, 1.0, 1.5, 2.0, 2.5],
+    'coeff_medianeBBW': [0.8, 1.0, 1.2, 1.4, 1.6],
+    'coef_mediane': [0.5, 0.7, 0.9, 1.1, 1.3, 1.5],
+    'fenetre_lowest': [30, 40, 50, 60, 70, 80],
+    'seuil_lowest': [1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
+    'longueur_mediane': [50.0, 75.0, 100.0, 125.0, 150.0],
+    'Nb_bars_above': [2.0, 4.0, 6.0, 8.0, 10.0],
+    'user_exit_sma_length': [15, 20, 25]
+}
+
 # ======================================================================
 # CONFIGURATION SETTINGS
 # ======================================================================
@@ -345,7 +378,7 @@ def create_signal_generators(df, **params):
             )
         
         # Calculate signals using Numba functions
-        ecart_bollinger_signal = ecart_bollinger_borne_signal_nb(
+        nb_bars_above_signal = ecart_bollinger_borne_signal_nb(
             Prix, upper_band, lower_band, 
             timeperiod=timeperiod, 
             longueur_mediane=100, 
@@ -358,7 +391,7 @@ def create_signal_generators(df, **params):
             coeff_medianeBBW=coeff_medianeBBW
         )
         
-        bbw_lowest_signal = cross_bbw_low_signal_nb(
+        cross_bbw_low_signal = cross_bbw_low_signal_nb(
             upper_band, lower_band, middle_band,
             fenetre_lowest=fenetre_lowest,
             seuil_lowest=seuil_lowest
@@ -377,8 +410,8 @@ def create_signal_generators(df, **params):
         # Ecart_Bollinger_borne signal
         ecart = upper_band - lower_band
         ecart_borne1 = ecart / talib.SMA(Prix, timeperiod=timeperiod)
-        mediane = pd.Series(ecart_borne1).rolling(100).median() / 1
-        ecart_bollinger_signal = (pd.Series(ecart_borne1).shift(6) < mediane).values
+        mediane = pd.Series(ecart_borne1).rolling(100).median() / coef_mediane
+        nb_bars_above_signal = (pd.Series(ecart_borne1).shift(6) < mediane).values
         
         # Bollinger Horizontal signal
         BBW = (upper_band - lower_band) / middle_band
@@ -389,9 +422,9 @@ def create_signal_generators(df, **params):
         bollinger_horizontal_signal = np.where(seuilBBW | seuilMMBBW, True, False)
         
         # BBW Lowest signal
-        largeur_bb = upper_band - lower_band
-        bbw_lowest = talib.MIN(largeur_bb, timeperiod=fenetre_lowest)
-        bbw_lowest_signal = largeur_bb < (bbw_lowest * seuil_lowest)
+        largeur_bb = (upper_band - lower_band) / middle_band
+        bbw_lowest = pd.Series(largeur_bb).rolling(window=fenetre_lowest, min_periods=fenetre_lowest).min()
+        cross_bbw_low_signal = largeur_bb < (bbw_lowest * seuil_lowest)
         
         # SMA Exit signal
         sma = talib.SMA(Prix, user_exit_sma_length)
@@ -402,9 +435,9 @@ def create_signal_generators(df, **params):
         'upper_band': upper_band,
         'middle_band': middle_band,
         'lower_band': lower_band,
-        'ecart_bollinger_signal': ecart_bollinger_signal,
+        'nb_bars_above_signal': nb_bars_above_signal,
         'bollinger_horizontal_signal': bollinger_horizontal_signal,
-        'bbw_lowest_signal': bbw_lowest_signal,
+        'cross_bbw_low_signal': cross_bbw_low_signal,
         'sma_exit_signal': sma_exit_signal
     }
 
@@ -434,8 +467,8 @@ def create_entry_exit_conditions(df, signals, upper_band, middle_band):
     
     # Create a DataFrame for conditions
     cond_df = pd.DataFrame({
-        'bbw_lowest_signal': signals['bbw_lowest_signal'],
-        'ecart_bollinger_signal': signals['ecart_bollinger_signal'],
+        'cross_bbw_low_signal': signals['cross_bbw_low_signal'],
+        'nb_bars_above_signal': signals['nb_bars_above_signal'],
         'bollinger_horizontal_signal': signals['bollinger_horizontal_signal'],
         'sma_exit_signal': signals['sma_exit_signal'],
         'close': Prix,
@@ -444,16 +477,15 @@ def create_entry_exit_conditions(df, signals, upper_band, middle_band):
         'middle_band': middle_band
     }, index=df.index)
     
-    # Entry condition
+    # Entry condition matches V1B logic
     entry_condition = (
-        (cond_df['bbw_lowest_signal']) &
-        #(cond_df['ecart_bollinger_signal']) &
-        #(cond_df['bollinger_horizontal_signal']) &
-        (cond_df['close'] > cond_df['upper_band']) 
-        #(cond_df['close'].shift(1) > cond_df['upper_band'].shift(1)) 
-        #& (cond_df['close'] > cond_df['high'].shift(1))
-    )
-    
+    cond_df['nb_bars_above_signal'].astype(bool) &
+    cond_df['cross_bbw_low_signal'].astype(bool) &
+    cond_df['bollinger_horizontal_signal'].astype(bool) &
+    (cond_df['close'] > cond_df['upper_band']) &
+    (cond_df['close'].shift(1) < cond_df['upper_band'].shift(1))
+    ).fillna(False)
+
     # Exit condition
     exit_condition = (
         (cond_df['sma_exit_signal']) # | (cond_df['close'] < cond_df['middle_band'])
@@ -647,7 +679,13 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     if param_grid is None:
         param_grid = {
             'timeperiod': [10, 15, 20, 25, 30],
-            'StDev': [0.5, 1.0, 1.5, 2.0, 2.5]
+            'StDev': [0.5, 1.0, 1.5, 2.0, 2.5],
+            'coeff_medianeBBW': [0.8, 1.0, 1.2, 1.4, 1.6],
+            'coef_mediane': [0.5, 0.7, 0.9, 1.1, 1.3, 1.5],
+            'fenetre_lowest': [30, 40, 50, 60, 70, 80],
+            'seuil_lowest': [1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
+            'longueur_mediane': [50.0, 75.0, 100.0, 125.0, 150.0],
+            'Nb_bars_above': [2.0, 4.0, 6.0, 8.0, 10.0]
         }
         
     if metrics_info is None:
@@ -3012,14 +3050,14 @@ def get_param_grid():
     
     # Default parameter ranges
     default_ranges = {
-        'timeperiod': (20, 21, 1),
-        'StDev': (2, 2, 0.1),
-        'coeff_medianeBBW': (0.8, 1.6, 0.2),
+        'timeperiod': (10, 30, 1),
+        'StDev': (0.5, 2.5, 0.1),
+        'coeff_medianeBBW': (0.8, 1.6, 0.1),
         'coef_mediane': (0.5, 1.5, 0.1),
         'fenetre_lowest': (30, 50, 5),
         'seuil_lowest': (1, 3.5, 0.2),
-        'longueur_mediane': (50, 150, 25),
-        'Nb_bars_above': (2, 10, 2),
+        'longueur_mediane': (50, 150, 10),
+        'Nb_bars_above': (2, 10, 1),
         'user_exit_sma_length': (10, 30, 2)
     }
     
@@ -3036,7 +3074,7 @@ def get_param_grid():
     
     if not selected_indices:
         print("No valid parameters selected. Using timeperiod and StDev as defaults.")
-        selected_params = ['timeperiod', 'StDev']
+        selected_params = ['timeperiod', 'StDev','coeff_medianeBBW', 'coef_mediane', 'fenetre_lowest', 'seuil_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']
     else:
         param_keys = list(param_options.keys())
         selected_params = [param_keys[idx-1] for idx in selected_indices if 1 <= idx <= len(param_keys)]
@@ -3338,5 +3376,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
