@@ -1,4 +1,4 @@
-// Import necessary libraries for configuration
+# Import necessary libraries for configuration
 import os
 
 DEFAULT_START_DATE = "2025-01-19"
