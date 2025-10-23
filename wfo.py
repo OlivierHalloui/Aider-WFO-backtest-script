@@ -271,7 +271,6 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
         print(f"Optimization time: {timedelta(seconds=int(optimization_time))}")
         
         # Test best parameters on in-sample data
-        print(f"Testing best parameters on in-sample data ({len(in_sample_df)} bars)...")
         in_sample_portfolio = run_backtest(in_sample_df, best_params, timeframe)
         
         in_sample_metrics = {
@@ -284,13 +283,6 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
             'sortino_ratio': in_sample_portfolio.sortino_ratio,
             'n_trades': len(in_sample_portfolio.trades)
         }
-        
-        print(f"In-Sample Performance:")
-        print(f"Return: {in_sample_metrics['return']:.2f}%")
-        print(f"Sharpe Ratio: {in_sample_metrics['sharpe']:.2f}")
-        print(f"Max Drawdown: {in_sample_metrics['max_drawdown']:.2f}%")
-        print(f"Win Rate: {in_sample_metrics['win_rate']:.2f}%")
-        print(f"Number of Trades: {in_sample_metrics['n_trades']}")
         
         wfo_results['in_sample_performance'].append(in_sample_metrics)
         
