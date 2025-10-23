@@ -1,4 +1,4 @@
-# Import necessary libraries for configuration
+// Import necessary libraries for configuration
 import os
 
 DEFAULT_START_DATE = "2025-01-19"
@@ -38,3 +38,4 @@ class WFOSettings:
         self.parallel_backend = "dask"   # Parallelization backend ('dask', 'ray', 'pathos', 'threadpool')
         self.use_numba = True            # Whether to use Numba for accelerated computations
         self.chunk_size = 200            # Chunk size for parallelization
+        self.optimization_method = "bayesian"  # Optimization method ('bayesian', 'optuna', 'grid')

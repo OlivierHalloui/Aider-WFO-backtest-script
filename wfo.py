@@ -1,4 +1,4 @@
-# Import necessary libraries for WFO
+// Import necessary libraries for WFO
 import pandas as pd
 import numpy as np
 import vectorbtpro as vbt
@@ -10,6 +10,7 @@ from strategy import run_backtest
 from config import WFOSettings
 from skopt import gp_minimize
 from skopt.space import Integer, Real
+import optuna
 
 # ======================================================================
 # WALK-FORWARD OPTIMIZATION FRAMEWORK
@@ -17,7 +18,7 @@ from skopt.space import Integer, Real
 
 def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', settings=None):
     """
-    Optimize parameters using Bayesian Optimization on in-sample data.
+    Optimize parameters using selected optimization method on in-sample data.
     
     Parameters:
     -----------
@@ -40,43 +41,94 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
     if settings is None:
         settings = WFOSettings()
     
-    # Define the search space based on parameter types
-    # Integers: timeperiod, fenetre_lowest, longueur_mediane, Nb_bars_above, user_exit_sma_length
-    # Floats: StDev, coeff_medianeBBW, coef_mediane, seuil_lowest
-    space = [
-        Integer(param_grid['timeperiod'][0], param_grid['timeperiod'][1], name='timeperiod'),
-        Real(param_grid['StDev'][0], param_grid['StDev'][1], name='StDev'),
-        Real(param_grid['coeff_medianeBBW'][0], param_grid['coeff_medianeBBW'][1], name='coeff_medianeBBW'),
-        Real(param_grid['coef_mediane'][0], param_grid['coef_mediane'][1], name='coef_mediane'),
-        Integer(param_grid['fenetre_lowest'][0], param_grid['fenetre_lowest'][1], name='fenetre_lowest'),
-        Real(param_grid['seuil_lowest'][0], param_grid['seuil_lowest'][1], name='seuil_lowest'),
-        Integer(param_grid['longueur_mediane'][0], param_grid['longueur_mediane'][1], name='longueur_mediane'),
-        Integer(param_grid['Nb_bars_above'][0], param_grid['Nb_bars_above'][1], name='Nb_bars_above'),
-        Integer(param_grid['user_exit_sma_length'][0], param_grid['user_exit_sma_length'][1], name='user_exit_sma_length')
-    ]
+    method = settings.optimization_method.lower()
     
-    # Objective function to minimize (invert score since gp_minimize minimizes)
-    def objective(params):
-        param_dict = dict(zip([dim.name for dim in space], params))
-        param_dict.update(metrics_info)
-        score = run_backtest(in_sample_df, param_dict, timeframe, return_portfolio=False)
-        return -score  # Minimize negative score to maximize original score
-    
-    # Run Bayesian Optimization
-    n_calls = min(200, np.prod([len(values) if isinstance(values, list) else 1 for values in param_grid.values()]))  # Limit calls
-    res = gp_minimize(objective, space, n_calls=n_calls, random_state=42, n_initial_points=20)
-    
-    # Extract results
-    results = []
-    for i, (params, score) in enumerate(zip(res.x_iters, res.func_vals)):
-        param_dict = dict(zip([dim.name for dim in space], params))
-        param_dict.update(metrics_info)
-        param_dict['combined_score'] = -score  # Revert to positive score
-        results.append(param_dict)
-    
-    # Convert to DataFrame and sort
-    results_df = pd.DataFrame(results)
-    sorted_results = results_df.sort_values('combined_score', ascending=False)
+    if method == "grid":
+        # Original grid search implementation
+        param_dicts = []
+        param_keys = list(param_grid.keys())
+        
+        for values in product(*param_grid.values()):
+            param_dict = dict(zip(param_keys, values))
+            param_dict.update(metrics_info)
+            param_dicts.append(param_dict)
+        
+        results = []
+        for param_dict in tqdm(param_dicts, desc="Optimizing parameters"):
+            score = run_backtest(in_sample_df, param_dict, timeframe, return_portfolio=False)
+            result = param_dict.copy()
+            result['combined_score'] = score
+            results.append(result)
+        
+        results_df = pd.DataFrame(results)
+        sorted_results = results_df.sort_values('combined_score', ascending=False)
+        
+    elif method == "bayesian":
+        # Bayesian Optimization implementation
+        space = [
+            Integer(param_grid['timeperiod'][0], param_grid['timeperiod'][1], name='timeperiod'),
+            Real(param_grid['StDev'][0], param_grid['StDev'][1], name='StDev'),
+            Real(param_grid['coeff_medianeBBW'][0], param_grid['coeff_medianeBBW'][1], name='coeff_medianeBBW'),
+            Real(param_grid['coef_mediane'][0], param_grid['coef_mediane'][1], name='coef_mediane'),
+            Integer(param_grid['fenetre_lowest'][0], param_grid['fenetre_lowest'][1], name='fenetre_lowest'),
+            Real(param_grid['seuil_lowest'][0], param_grid['seuil_lowest'][1], name='seuil_lowest'),
+            Integer(param_grid['longueur_mediane'][0], param_grid['longueur_mediane'][1], name='longueur_mediane'),
+            Integer(param_grid['Nb_bars_above'][0], param_grid['Nb_bars_above'][1], name='Nb_bars_above'),
+            Integer(param_grid['user_exit_sma_length'][0], param_grid['user_exit_sma_length'][1], name='user_exit_sma_length')
+        ]
+        
+        def objective(params):
+            param_dict = dict(zip([dim.name for dim in space], params))
+            param_dict.update(metrics_info)
+            score = run_backtest(in_sample_df, param_dict, timeframe, return_portfolio=False)
+            return -score  # Minimize negative score
+        
+        n_calls = min(200, np.prod([len(values) if isinstance(values, list) else 1 for values in param_grid.values()]))
+        res = gp_minimize(objective, space, n_calls=n_calls, random_state=42, n_initial_points=20)
+        
+        results = []
+        for i, (params, score) in enumerate(zip(res.x_iters, res.func_vals)):
+            param_dict = dict(zip([dim.name for dim in space], params))
+            param_dict.update(metrics_info)
+            param_dict['combined_score'] = -score
+            results.append(param_dict)
+        
+        results_df = pd.DataFrame(results)
+        sorted_results = results_df.sort_values('combined_score', ascending=False)
+        
+    elif method == "optuna":
+        # Optuna (TPE) implementation
+        def objective(trial):
+            params = {
+                'timeperiod': trial.suggest_int('timeperiod', param_grid['timeperiod'][0], param_grid['timeperiod'][1]),
+                'StDev': trial.suggest_float('StDev', param_grid['StDev'][0], param_grid['StDev'][1]),
+                'coeff_medianeBBW': trial.suggest_float('coeff_medianeBBW', param_grid['coeff_medianeBBW'][0], param_grid['coeff_medianeBBW'][1]),
+                'coef_mediane': trial.suggest_float('coef_mediane', param_grid['coef_mediane'][0], param_grid['coef_mediane'][1]),
+                'fenetre_lowest': trial.suggest_int('fenetre_lowest', param_grid['fenetre_lowest'][0], param_grid['fenetre_lowest'][1]),
+                'seuil_lowest': trial.suggest_float('seuil_lowest', param_grid['seuil_lowest'][0], param_grid['seuil_lowest'][1]),
+                'longueur_mediane': trial.suggest_int('longueur_mediane', param_grid['longueur_mediane'][0], param_grid['longueur_mediane'][1]),
+                'Nb_bars_above': trial.suggest_int('Nb_bars_above', param_grid['Nb_bars_above'][0], param_grid['Nb_bars_above'][1]),
+                'user_exit_sma_length': trial.suggest_int('user_exit_sma_length', param_grid['user_exit_sma_length'][0], param_grid['user_exit_sma_length'][1])
+            }
+            params.update(metrics_info)
+            return run_backtest(in_sample_df, params, timeframe, return_portfolio=False)
+        
+        study = optuna.create_study(direction='maximize')
+        n_trials = min(200, np.prod([len(values) if isinstance(values, list) else 1 for values in param_grid.values()]))
+        study.optimize(objective, n_trials=n_trials)
+        
+        results = []
+        for trial in study.trials:
+            param_dict = trial.params.copy()
+            param_dict.update(metrics_info)
+            param_dict['combined_score'] = trial.value
+            results.append(param_dict)
+        
+        results_df = pd.DataFrame(results)
+        sorted_results = results_df.sort_values('combined_score', ascending=False)
+        
+    else:
+        raise ValueError(f"Unsupported optimization method: {method}. Choose 'grid', 'bayesian', or 'optuna'.")
     
     return sorted_results
 
@@ -141,7 +193,8 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
             'secondary_metric': settings.secondary_metric,
             'metric_weights': settings.metric_weights,
             'parallel_backend': settings.parallel_backend,
-            'use_numba': settings.use_numba
+            'use_numba': settings.use_numba,
+            'optimization_method': settings.optimization_method
         }
     }
     
@@ -154,6 +207,7 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     print(f"Secondary Metric: {settings.secondary_metric} (weight: {settings.metric_weights[1]})")
     print(f"Parallelization Backend: {settings.parallel_backend}")
     print(f"Numba Acceleration: {'Enabled' if settings.use_numba else 'Disabled'}")
+    print(f"Optimization Method: {settings.optimization_method}")
     print(f"Parameter Combinations: {param_combinations}")
     
     # Loop through each window
@@ -311,6 +365,7 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     print("\n=== Performance Timing Summary ===")
     print(f"Backend: {settings.parallel_backend}")
     print(f"Numba: {'Enabled' if settings.use_numba else 'Disabled'}")
+    print(f"Optimization Method: {settings.optimization_method}")
     print(f"Total processing time: {timedelta(seconds=int(total_time))}")
     print(f"Average window time: {timedelta(seconds=int(np.mean(window_times)))}")
     print(f"Average optimization time: {timedelta(seconds=int(np.mean(optimization_times)))}")
