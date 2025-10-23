@@ -8,6 +8,8 @@ import time
 from datetime import timedelta
 from strategy import run_backtest
 from config import WFOSettings
+from skopt import gp_minimize
+from skopt.space import Integer, Real
 
 # ======================================================================
 # WALK-FORWARD OPTIMIZATION FRAMEWORK
@@ -15,14 +17,14 @@ from config import WFOSettings
 
 def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', settings=None):
     """
-    Optimize parameters using grid search on in-sample data.
+    Optimize parameters using Bayesian Optimization on in-sample data.
     
     Parameters:
     -----------
     in_sample_df : pandas.DataFrame
         In-sample OHLCV data
     param_grid : dict
-        Parameter grid to search
+        Parameter grid with bounds (min, max) for each parameter
     metrics_info : dict
         Metrics information dictionary
     timeframe : str, optional
@@ -38,34 +40,39 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
     if settings is None:
         settings = WFOSettings()
     
-    # Create parameter combinations with Param for vectorbt's parameterized decorator
-    param_dicts = []
-    param_keys = list(param_grid.keys())
+    # Define the search space based on parameter types
+    # Integers: timeperiod, fenetre_lowest, longueur_mediane, Nb_bars_above, user_exit_sma_length
+    # Floats: StDev, coeff_medianeBBW, coef_mediane, seuil_lowest
+    space = [
+        Integer(param_grid['timeperiod'][0], param_grid['timeperiod'][1], name='timeperiod'),
+        Real(param_grid['StDev'][0], param_grid['StDev'][1], name='StDev'),
+        Real(param_grid['coeff_medianeBBW'][0], param_grid['coeff_medianeBBW'][1], name='coeff_medianeBBW'),
+        Real(param_grid['coef_mediane'][0], param_grid['coef_mediane'][1], name='coef_mediane'),
+        Integer(param_grid['fenetre_lowest'][0], param_grid['fenetre_lowest'][1], name='fenetre_lowest'),
+        Real(param_grid['seuil_lowest'][0], param_grid['seuil_lowest'][1], name='seuil_lowest'),
+        Integer(param_grid['longueur_mediane'][0], param_grid['longueur_mediane'][1], name='longueur_mediane'),
+        Integer(param_grid['Nb_bars_above'][0], param_grid['Nb_bars_above'][1], name='Nb_bars_above'),
+        Integer(param_grid['user_exit_sma_length'][0], param_grid['user_exit_sma_length'][1], name='user_exit_sma_length')
+    ]
     
-    for values in product(*param_grid.values()):
-        param_dict = dict(zip(param_keys, values))
+    # Objective function to minimize (invert score since gp_minimize minimizes)
+    def objective(params):
+        param_dict = dict(zip([dim.name for dim in space], params))
         param_dict.update(metrics_info)
-        param_dicts.append(param_dict)
+        score = run_backtest(in_sample_df, param_dict, timeframe, return_portfolio=False)
+        return -score  # Minimize negative score to maximize original score
     
-    # Use vectorbt's parameterized decorator for optimization
-    @vbt.parameterized(
-        execute_kwargs=dict(
-            show_progress=True,
-            engine=settings.parallel_backend,
-            chunk_len=settings.chunk_size
-        )
-    )
-    def run_parameterized_backtest(df, param_dict, timeframe='5s'):
-        params = param_dict.copy()
-        return run_backtest(df, params, timeframe, return_portfolio=False)
+    # Run Bayesian Optimization
+    n_calls = min(200, np.prod([len(values) if isinstance(values, list) else 1 for values in param_grid.values()]))  # Limit calls
+    res = gp_minimize(objective, space, n_calls=n_calls, random_state=42, n_initial_points=20)
     
-    # Run parameterized backtest
+    # Extract results
     results = []
-    for param_dict in tqdm(param_dicts, desc="Optimizing parameters"):
-        score = run_parameterized_backtest(in_sample_df, param_dict, timeframe)
-        result = param_dict.copy()
-        result['combined_score'] = score
-        results.append(result)
+    for i, (params, score) in enumerate(zip(res.x_iters, res.func_vals)):
+        param_dict = dict(zip([dim.name for dim in space], params))
+        param_dict.update(metrics_info)
+        param_dict['combined_score'] = -score  # Revert to positive score
+        results.append(param_dict)
     
     # Convert to DataFrame and sort
     results_df = pd.DataFrame(results)
@@ -82,7 +89,7 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     df : pandas.DataFrame
         OHLCV DataFrame
     param_grid : dict, optional
-        Parameter grid to search
+        Parameter grid with bounds (min, max) for each parameter
     metrics_info : dict, optional
         Metrics information dictionary
     timeframe : str, optional
