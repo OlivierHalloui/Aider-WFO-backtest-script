@@ -1,6 +1,7 @@
 # Import necessary libraries for indicators
 import numpy as np
 from numba import njit, prange
+import vectorbtpro as vbt
 from vectorbtpro.indicators.factory import IndicatorFactory
 
 # ======================================================================

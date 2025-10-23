@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import datetime
 import os
+from typing import Optional, Dict
 from .config import (
     DEFAULT_START_DATE, DEFAULT_END_DATE, DEFAULT_TIMEFRAME, DEFAULT_DATA_FILE,
     DEFAULT_PARAM_GRID, WFOSettings

@@ -2,6 +2,7 @@
 import pandas as pd
 import vectorbtpro as vbt
 import os
+from .config import DEFAULT_DATA_FILE
 
 # ======================================================================
 # DATA LOADING AND PREPROCESSING
