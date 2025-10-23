@@ -64,18 +64,13 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         sorted_results = results_df.sort_values('combined_score', ascending=False)
         
     elif method == "bayesian":
-        # Bayesian Optimization implementation
-        space = [
-            Integer(param_grid['timeperiod'][0], param_grid['timeperiod'][1], name='timeperiod'),
-            Real(param_grid['StDev'][0], param_grid['StDev'][1], name='StDev'),
-            Real(param_grid['coeff_medianeBBW'][0], param_grid['coeff_medianeBBW'][1], name='coeff_medianeBBW'),
-            Real(param_grid['coef_mediane'][0], param_grid['coef_mediane'][1], name='coef_mediane'),
-            Integer(param_grid['fenetre_lowest'][0], param_grid['fenetre_lowest'][1], name='fenetre_lowest'),
-            Real(param_grid['seuil_lowest'][0], param_grid['seuil_lowest'][1], name='seuil_lowest'),
-            Integer(param_grid['longueur_mediane'][0], param_grid['longueur_mediane'][1], name='longueur_mediane'),
-            Integer(param_grid['Nb_bars_above'][0], param_grid['Nb_bars_above'][1], name='Nb_bars_above'),
-            Integer(param_grid['user_exit_sma_length'][0], param_grid['user_exit_sma_length'][1], name='user_exit_sma_length')
-        ]
+        # Bayesian Optimization implementation - dynamic based on param_grid
+        space = []
+        for param_name, bounds in param_grid.items():
+            if param_name in ['timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']:
+                space.append(Integer(bounds[0], bounds[1], name=param_name))
+            else:
+                space.append(Real(bounds[0], bounds[1], name=param_name))
         
         def objective(params):
             param_dict = dict(zip([dim.name for dim in space], params))
@@ -97,19 +92,14 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         sorted_results = results_df.sort_values('combined_score', ascending=False)
         
     elif method == "optuna":
-        # Optuna (TPE) implementation
+        # Optuna (TPE) implementation - dynamic based on param_grid
         def objective(trial):
-            params = {
-                'timeperiod': trial.suggest_int('timeperiod', param_grid['timeperiod'][0], param_grid['timeperiod'][1]),
-                'StDev': trial.suggest_float('StDev', param_grid['StDev'][0], param_grid['StDev'][1]),
-                'coeff_medianeBBW': trial.suggest_float('coeff_medianeBBW', param_grid['coeff_medianeBBW'][0], param_grid['coeff_medianeBBW'][1]),
-                'coef_mediane': trial.suggest_float('coef_mediane', param_grid['coef_mediane'][0], param_grid['coef_mediane'][1]),
-                'fenetre_lowest': trial.suggest_int('fenetre_lowest', param_grid['fenetre_lowest'][0], param_grid['fenetre_lowest'][1]),
-                'seuil_lowest': trial.suggest_float('seuil_lowest', param_grid['seuil_lowest'][0], param_grid['seuil_lowest'][1]),
-                'longueur_mediane': trial.suggest_int('longueur_mediane', param_grid['longueur_mediane'][0], param_grid['longueur_mediane'][1]),
-                'Nb_bars_above': trial.suggest_int('Nb_bars_above', param_grid['Nb_bars_above'][0], param_grid['Nb_bars_above'][1]),
-                'user_exit_sma_length': trial.suggest_int('user_exit_sma_length', param_grid['user_exit_sma_length'][0], param_grid['user_exit_sma_length'][1])
-            }
+            params = {}
+            for param_name, bounds in param_grid.items():
+                if param_name in ['timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']:
+                    params[param_name] = trial.suggest_int(param_name, bounds[0], bounds[1])
+                else:
+                    params[param_name] = trial.suggest_float(param_name, bounds[0], bounds[1])
             params.update(metrics_info)
             return run_backtest(in_sample_df, params, timeframe, return_portfolio=False)
         
