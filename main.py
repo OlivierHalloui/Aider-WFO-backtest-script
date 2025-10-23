@@ -4,14 +4,14 @@ import numpy as np
 import datetime
 import os
 from typing import Optional, Dict
-from .config import (
+from config import (
     DEFAULT_START_DATE, DEFAULT_END_DATE, DEFAULT_TIMEFRAME, DEFAULT_DATA_FILE,
     DEFAULT_PARAM_GRID, WFOSettings
 )
-from .data_loading import get_dates, load_data
-from .strategy import run_backtest
-from .wfo import walk_forward_optimization
-from .visualization import (
+from data_loading import get_dates, load_data
+from strategy import run_backtest
+from wfo import walk_forward_optimization
+from visualization import (
     visualize_wfo_results, create_parameter_performance_map, visualize_robustness_metrics,
     integrate_report_generation
 )

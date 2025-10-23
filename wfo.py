@@ -6,8 +6,8 @@ from itertools import product
 from tqdm import tqdm
 import time
 from datetime import timedelta
-from .strategy import run_backtest
-from .config import WFOSettings
+from strategy import run_backtest
+from config import WFOSettings
 
 # ======================================================================
 # WALK-FORWARD OPTIMIZATION FRAMEWORK

@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import vectorbtpro as vbt
 import talib
-from .indicators import (
+from indicators import (
     bbands_1d_nb, ecart_bollinger_borne_signal_nb, bollinger_horizontal_signal_nb,
     cross_bbw_low_signal_nb, calculate_exit_sma_nb
 )
