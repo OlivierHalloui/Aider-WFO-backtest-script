@@ -223,6 +223,20 @@ def get_wfo_settings():
     anchored_input = input("Use anchored WFO (fixed start date) or unanchored (rolling window)? (a/u) [default: u]: ").lower()
     settings.anchored = anchored_input == 'a'
     
+    # Optimization method
+    print("\nSelect optimization method:")
+    print("1. grid - Exhaustive grid search (slow for large parameter spaces)")
+    print("2. bayesian - Bayesian Optimization (recommended for efficiency)")
+    print("3. optuna - Tree-Structured Parzen Estimator (TPE) optimization")
+    
+    method_choice = input("Enter choice (1-3) [default: 2]: ") or "2"
+    methods = {
+        "1": "grid",
+        "2": "bayesian",
+        "3": "optuna"
+    }
+    settings.optimization_method = methods.get(method_choice, "bayesian")
+    
     # Parallelization backend
     print("\nSelect parallelization backend:")
     print("1. threadpool - Best for Numba functions")
