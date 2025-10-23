@@ -37,4 +37,4 @@ class WFOSettings:
         self.metric_weights = (1.0, 0.0) # Weights for primary and secondary metrics
         self.parallel_backend = "dask"   # Parallelization backend ('dask', 'ray', 'pathos', 'threadpool')
         self.use_numba = True            # Whether to use Numba for accelerated computations
-        self.chunk_size = "auto"         # Chunk size for parallelization
+        self.chunk_size = 200            # Chunk size for parallelization
