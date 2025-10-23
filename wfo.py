@@ -319,6 +319,22 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     # Calculate total time
     total_time = time.time() - start_time
     
+    # Calculate aggregate in-sample performance
+    is_scores = []
+    for window_result in wfo_results['window_results']:
+        if window_result['optimization_results'] and len(window_result['optimization_results']) > 0:
+            best_result = window_result['optimization_results'][0]
+            if 'combined_score' in best_result:
+                is_scores.append(best_result['combined_score'])
+    
+    if is_scores:
+        print("\n=== Aggregate In-Sample Performance ===")
+        print(f"Average In-Sample Score: {np.mean(is_scores):.4f}")
+        print(f"Median In-Sample Score: {np.median(is_scores):.4f}")
+        print(f"Min In-Sample Score: {np.min(is_scores):.4f}")
+        print(f"Max In-Sample Score: {np.max(is_scores):.4f}")
+        print(f"Std Dev In-Sample Score: {np.std(is_scores):.4f}")
+    
     # Calculate aggregate out-of-sample performance if available
     if wfo_results['out_of_sample_performance']:
         oos_df = pd.DataFrame(wfo_results['out_of_sample_performance'])
