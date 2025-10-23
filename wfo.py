@@ -183,6 +183,7 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     # Store WFO results
     wfo_results = {
         'window_results': [],
+        'in_sample_performance': [],
         'out_of_sample_performance': [],
         'best_params': [],
         'settings': {
@@ -269,6 +270,30 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
         print(f"Score: {optimization_results.iloc[0]['combined_score']:.4f}")
         print(f"Optimization time: {timedelta(seconds=int(optimization_time))}")
         
+        # Test best parameters on in-sample data
+        print(f"Testing best parameters on in-sample data ({len(in_sample_df)} bars)...")
+        in_sample_portfolio = run_backtest(in_sample_df, best_params, timeframe)
+        
+        in_sample_metrics = {
+            'window': i + 1,
+            'return': in_sample_portfolio.total_return * 100,
+            'sharpe': in_sample_portfolio.sharpe_ratio,
+            'max_drawdown': in_sample_portfolio.max_drawdown * 100,
+            'win_rate': in_sample_portfolio.trades.win_rate,
+            'calmar_ratio': in_sample_portfolio.calmar_ratio if in_sample_portfolio.max_drawdown > 0 else np.nan,
+            'sortino_ratio': in_sample_portfolio.sortino_ratio,
+            'n_trades': len(in_sample_portfolio.trades)
+        }
+        
+        print(f"In-Sample Performance:")
+        print(f"Return: {in_sample_metrics['return']:.2f}%")
+        print(f"Sharpe Ratio: {in_sample_metrics['sharpe']:.2f}")
+        print(f"Max Drawdown: {in_sample_metrics['max_drawdown']:.2f}%")
+        print(f"Win Rate: {in_sample_metrics['win_rate']:.2f}%")
+        print(f"Number of Trades: {in_sample_metrics['n_trades']}")
+        
+        wfo_results['in_sample_performance'].append(in_sample_metrics)
+        
         # Test on out-of-sample data if available
         if len(out_sample_df) > 0:
             print(f"Testing best parameters on out-of-sample data ({len(out_sample_df)} bars)...")
@@ -320,20 +345,18 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     total_time = time.time() - start_time
     
     # Calculate aggregate in-sample performance
-    is_scores = []
-    for window_result in wfo_results['window_results']:
-        if window_result['optimization_results'] and len(window_result['optimization_results']) > 0:
-            best_result = window_result['optimization_results'][0]
-            if 'combined_score' in best_result:
-                is_scores.append(best_result['combined_score'])
-    
-    if is_scores:
+    if wfo_results['in_sample_performance']:
+        is_df = pd.DataFrame(wfo_results['in_sample_performance'])
+        
         print("\n=== Aggregate In-Sample Performance ===")
-        print(f"Average In-Sample Score: {np.mean(is_scores):.4f}")
-        print(f"Median In-Sample Score: {np.median(is_scores):.4f}")
-        print(f"Min In-Sample Score: {np.min(is_scores):.4f}")
-        print(f"Max In-Sample Score: {np.max(is_scores):.4f}")
-        print(f"Std Dev In-Sample Score: {np.std(is_scores):.4f}")
+        print(f"Average Return: {is_df['return'].mean():.2f}%")
+        print(f"Average Sharpe Ratio: {is_df['sharpe'].mean():.2f}")
+        print(f"Average Max Drawdown: {is_df['max_drawdown'].mean():.2f}%")
+        print(f"Average Win Rate: {is_df['win_rate'].mean():.2f}%")
+        print(f"Average Calmar Ratio: {is_df['calmar_ratio'].mean():.2f}")
+        print(f"Average Sortino Ratio: {is_df['sortino_ratio'].mean():.2f}")
+        print(f"Total Trades: {is_df['n_trades'].sum()}")
+        print(f"Cumulative Return: {((1 + is_df['return']/100).prod() - 1) * 100:.2f}%")
     
     # Calculate aggregate out-of-sample performance if available
     if wfo_results['out_of_sample_performance']:
