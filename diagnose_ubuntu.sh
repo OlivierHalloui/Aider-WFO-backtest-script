@@ -4,6 +4,8 @@
 # This script checks various system components that might be related to boot issues, display problems, or NVIDIA driver conflicts.
 # Run with: bash diagnose_ubuntu.sh
 
+exec > >(tee report.txt) 2>&1
+
 echo "=== Ubuntu System Diagnostic Report ==="
 echo "Generated on: $(date)"
 echo ""
