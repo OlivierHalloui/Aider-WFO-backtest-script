@@ -1,9 +1,11 @@
 # Import necessary libraries for main script
+
 import pandas as pd
 import numpy as np
 import datetime
 import os
-from typing import Optional, Dict
+import traceback
+from typing import Optional, Dict, Callable
 from config import (
     DEFAULT_START_DATE, DEFAULT_END_DATE, DEFAULT_TIMEFRAME, DEFAULT_DATA_FILE,
     DEFAULT_PARAM_GRID, WFOSettings
@@ -189,20 +191,19 @@ def get_wfo_settings(config):
     
     return settings
 
-def run_optimization(config):
+def run_optimization(config, status_callback: Optional[Callable[[str], None]] = None):
     """
     Run the optimization process using config dict.
-    
-    Parameters:
-    -----------
-    config : dict
-        Configuration dictionary
     """
-    # Get dates
+    def log(message: str):
+        print(message)
+        if status_callback:
+            status_callback(message)
+
+    log("Preparing date range...")
     start_date, end_date = get_dates(config)
     
-    # Load data
-    print("\nLoading data...")
+    log("\nLoading data...")
     timeframe = config.get('timeframe', DEFAULT_TIMEFRAME)
     
     from_file = config.get('from_file', True)
@@ -213,24 +214,22 @@ def run_optimization(config):
     else:
         df = load_data(start_date, end_date, timeframe, from_file=False)
     
-    print(f"Loaded {len(df)} bars of data from {start_date} to {end_date}")
+    log(f"Loaded {len(df)} bars of data from {start_date} to {end_date}")
     
-    # Display default parameters
     display_default_parameters()
 
-    # Get parameter grid
     param_grid = get_param_grid(config)
-    print(f"Parameter grid: {param_grid}")
+    log(f"Parameter grid: {param_grid}")
     
-    # Get metrics information
     metrics_info = get_metrics_info(config)
-    print(f"Metrics: {metrics_info['metric1_name']} (weight: {metrics_info['weight_metric1']:.2f}), "
-          f"{metrics_info['metric2_name']} (weight: {metrics_info['weight_metric2']:.2f})")
+    log(
+        f"Metrics: {metrics_info['metric1_name']} (weight: {metrics_info['weight_metric1']:.2f}), "
+        f"{metrics_info['metric2_name']} (weight: {metrics_info['weight_metric2']:.2f})"
+    )
     
-    # Get WFO settings
     settings = get_wfo_settings(config)
     
-    # Run Walk-Forward Optimization
+    log("Starting walk-forward optimization...")
     wfo_results = walk_forward_optimization(
         df, 
         param_grid=param_grid,
@@ -238,56 +237,41 @@ def run_optimization(config):
         timeframe=timeframe,
         settings=settings
     )
+    log("Walk-forward optimization completed.")
     
-    # Save results to CSV
     results_dir = "WFO_Results"
     os.makedirs(results_dir, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Save out-of-sample metrics if available
     if wfo_results['out_of_sample_performance']:
         oos_df = pd.DataFrame(wfo_results['out_of_sample_performance'])
         oos_df.to_csv(f"{results_dir}/oos_performance_{timestamp}.csv", index=False)
     
-    # Save best parameters for each window
     params_df = pd.DataFrame(wfo_results['best_params'])
     params_df.to_csv(f"{results_dir}/best_parameters_{timestamp}.csv", index=False)
     
-    # Save WFO settings
     with open(f"{results_dir}/wfo_settings_{timestamp}.txt", 'w') as f:
         for key, value in wfo_results['settings'].items():
             f.write(f"{key}: {value}\n")
     
-    print(f"\nResults saved to {results_dir} directory")
+    log(f"\nResults saved to {results_dir} directory")
     
-    # Visualize results
     visualize = config.get('visualize', True)
     if visualize:
-        # Register DataFrame with OHLC accessor if needed
         try:
             from vectorbtpro.data.base import OHLCV
             df = OHLCV.from_df(df)
         except (ImportError, ValueError) as e:
-            # If registration fails, continue with regular DataFrame
-            print(f"Note: Could not register DataFrame with OHLCV: {e}")
+            log(f"Note: Could not register DataFrame with OHLCV: {e}")
        
-       # Core WFO visualizations
         visualize_wfo_results(wfo_results, df)
-        
-        
-        # Parameter performance analysis
         create_parameter_performance_map(wfo_results)
-        
-        # Robustness analysis
         visualize_robustness_metrics(wfo_results)
 
-    # Generate comprehensive PDF report
     integrate_report_generation(wfo_results, df, strategy_name="ATDMF Strategy")
 
-    # Ask if user wants to run a final backtest with best parameters
     run_final = config.get('run_final', False)
     if run_final:
-        # Average the parameters from all windows
         avg_params = {}
         for param in param_grid.keys():
             if param in ['timeperiod', 'fenetre_lowest', 'user_exit_sma_length']:
@@ -295,25 +279,23 @@ def run_optimization(config):
             else:
                 avg_params[param] = round(params_df[param].mean(), 2)
         
-        print(f"Running final backtest with parameters: {avg_params}")
+        log(f"Running final backtest with parameters: {avg_params}")
         final_portfolio = run_backtest(df, avg_params, timeframe)
         
-        # Calculate average P&L per trade
         avg_pl_per_trade = 0
         if len(final_portfolio.trades) > 0:
             avg_pl_per_trade = (final_portfolio.total_return*100) / len(final_portfolio.trades)
         
-        print("\n=== Final Backtest Results ===")
-        print(f"Total Return: {final_portfolio.total_return * 100:.2f}%")
-        print(f"Sharpe Ratio: {final_portfolio.sharpe_ratio:.2f}")
-        print(f"Max Drawdown: {final_portfolio.max_drawdown * 100:.2f}%")
-        print(f"Win Rate: {final_portfolio.trades.win_rate *100:.2f}%")
-        print(f"Average P&L per Trade: {avg_pl_per_trade:.2f}%")
-        print(f"Number of Trades: {len(final_portfolio.trades)}")
-        print(f"Calmar Ratio: {final_portfolio.calmar_ratio:.2f}")
-        print(f"Sortino Ratio: {final_portfolio.sortino_ratio:.2f}")
+        log("\n=== Final Backtest Results ===")
+        log(f"Total Return: {final_portfolio.total_return * 100:.2f}%")
+        log(f"Sharpe Ratio: {final_portfolio.sharpe_ratio:.2f}")
+        log(f"Max Drawdown: {final_portfolio.max_drawdown * 100:.2f}%")
+        log(f"Win Rate: {final_portfolio.trades.win_rate *100:.2f}%")
+        log(f"Average P&L per Trade: {avg_pl_per_trade:.2f}%")
+        log(f"Number of Trades: {len(final_portfolio.trades)}")
+        log(f"Calmar Ratio: {final_portfolio.calmar_ratio:.2f}")
+        log(f"Sortino Ratio: {final_portfolio.sortino_ratio:.2f}")
         
-        # Plot performance
         final_portfolio.plot().show()
 
 # GUI Class
@@ -329,6 +311,7 @@ class ConfigGUI(tk.Tk):
         super().__init__()
         self.title("ATDMF Strategy WFO Optimizer")
         self.geometry("800x600")
+        self.timeframe_options = ['1s', '5s', '1m', '5m', '1h']
         
         # Default config
         self.config = {
@@ -369,7 +352,10 @@ class ConfigGUI(tk.Tk):
         self.create_metrics_tab()
         self.create_wfo_settings_tab()
         self.create_run_tab()
-        
+        self.is_running = False
+        self.current_thread = None
+        self.apply_config_to_widgets()
+
         # Status queue for threading
         self.status_queue = queue.Queue()
         self.after(100, self.check_status_queue)
@@ -389,7 +375,7 @@ class ConfigGUI(tk.Tk):
         self.end_date_entry.grid(row=1, column=1)
         
         ttk.Label(tab, text="Timeframe:").grid(row=2, column=0, sticky='w')
-        self.timeframe_combo = ttk.Combobox(tab, values=['1s', '5s', '1m', '5m', '1h'])
+        self.timeframe_combo = ttk.Combobox(tab, values=self.timeframe_options, state='readonly')
         self.timeframe_combo.set(self.config['timeframe'])
         self.timeframe_combo.grid(row=2, column=1)
         
@@ -528,11 +514,63 @@ class ConfigGUI(tk.Tk):
         ttk.Button(tab, text="Save Config", command=self.save_config).pack(pady=5)
         ttk.Button(tab, text="Load Config", command=self.load_config).pack(pady=5)
         
-        ttk.Button(tab, text="Run Optimization", command=self.run_optimization_thread).pack(pady=10)
+        self.run_button = ttk.Button(tab, text="Run Optimization", command=self.run_optimization_thread)
+        self.run_button.pack(pady=10)
         
         self.status_text = tk.Text(tab, height=10, state='disabled')
         self.status_text.pack(fill='both', expand=True)
-    
+
+    def _set_entry_value(self, entry_widget, value):
+        entry_widget.delete(0, tk.END)
+        entry_widget.insert(0, str(value))
+
+    def _ensure_config_defaults(self, config):
+        config.setdefault('selected_params', list(DEFAULT_PARAM_GRID.keys()))
+        for param, defaults in DEFAULT_PARAM_GRID.items():
+            config.setdefault(f'{param}_min', defaults[0])
+            config.setdefault(f'{param}_max', defaults[1])
+            config.setdefault(f'{param}_step', defaults[2])
+        return config
+
+    def apply_config_to_widgets(self):
+        config = self._ensure_config_defaults(self.config.copy())
+        self.config = config
+
+        # Dates & data settings
+        self._set_entry_value(self.start_date_entry, config.get('start_date', DEFAULT_START_DATE))
+        self._set_entry_value(self.end_date_entry, config.get('end_date', DEFAULT_END_DATE))
+        self.timeframe_combo.set(config.get('timeframe', DEFAULT_TIMEFRAME))
+        self.data_source_var.set(config.get('from_file', True))
+        self._set_entry_value(self.file_path_entry, config.get('file_path', DEFAULT_DATA_FILE))
+
+        # Parameters
+        selected_params = config.get('selected_params', list(DEFAULT_PARAM_GRID.keys()))
+        for param in DEFAULT_PARAM_GRID.keys():
+            self.param_vars[param].set(param in selected_params)
+            min_entry, max_entry, step_entry = self.param_entries[param]
+            self._set_entry_value(min_entry, config.get(f'{param}_min', DEFAULT_PARAM_GRID[param][0]))
+            self._set_entry_value(max_entry, config.get(f'{param}_max', DEFAULT_PARAM_GRID[param][1]))
+            self._set_entry_value(step_entry, config.get(f'{param}_step', DEFAULT_PARAM_GRID[param][2]))
+
+        # Metrics
+        self.metric1_combo.set(config.get('metric1_name', 'sharpe_ratio'))
+        self.metric2_combo.set(config.get('metric2_name', 'total_return'))
+        self._set_entry_value(self.weight1_entry, config.get('weight_metric1', 1.0))
+        self._set_entry_value(self.weight2_entry, config.get('weight_metric2', 0.0))
+
+        # WFO settings
+        self._set_entry_value(self.n_windows_entry, config.get('n_windows', 1))
+        self._set_entry_value(self.train_size_entry, config.get('train_size', 0.5))
+        self.anchored_var.set(config.get('anchored', False))
+        self.opt_method_combo.set(config.get('optimization_method', 'bayesian'))
+        self.backend_combo.set(config.get('parallel_backend', 'dask'))
+        self._set_entry_value(self.max_workers_entry, config.get('max_workers', os.cpu_count() or 1))
+        self.numba_var.set(config.get('use_numba', True))
+
+        # Run options
+        self.visualize_var.set(config.get('visualize', True))
+        self.run_final_var.set(config.get('run_final', False))
+
     def collect_config(self):
         try:
             config = {}
@@ -541,12 +579,23 @@ class ConfigGUI(tk.Tk):
             config['end_date'] = self.end_date_entry.get()
             pd.to_datetime(config['start_date'])  # Validate
             pd.to_datetime(config['end_date'])  # Validate
-            config['timeframe'] = self.timeframe_combo.get()
+            timeframe_value = self.timeframe_combo.get()
+            if timeframe_value not in self.timeframe_options:
+                raise ValueError(f"Invalid timeframe selected: {timeframe_value}")
+            config['timeframe'] = timeframe_value
             config['from_file'] = self.data_source_var.get()
-            config['file_path'] = self.file_path_entry.get()
+            file_path_value = self.file_path_entry.get().strip()
+            if config['from_file']:
+                if not file_path_value:
+                    raise ValueError("File path is required when 'From File' is selected.")
+                if not os.path.isfile(file_path_value):
+                    raise FileNotFoundError(f"Data file not found: {file_path_value}")
+            config['file_path'] = file_path_value
             
             # Parameters
             selected_params = [p for p, v in self.param_vars.items() if v.get()]
+            if not selected_params:
+                raise ValueError("At least one parameter must be selected for optimization.")
             config['selected_params'] = selected_params
             for param in selected_params:
                 min_val = float(self.param_entries[param][0].get())
@@ -584,18 +633,39 @@ class ConfigGUI(tk.Tk):
             return False
     
     def run_optimization_thread(self):
+        if self.is_running:
+            messagebox.showinfo("Run In Progress", "An optimization is already running. Please wait for it to finish.")
+            return
         if not self.collect_config():
             return
-        thread = threading.Thread(target=self.run_optimization_worker)
+        self.is_running = True
+        self.run_button.config(state='disabled')
+        self.summary_label.config(text="Configuration Summary: Running...")
+        thread = threading.Thread(target=self.run_optimization_worker, daemon=True)
+        self.current_thread = thread
         thread.start()
     
     def run_optimization_worker(self):
+        success = True
         try:
             self.status_queue.put("Starting optimization...")
-            run_optimization(self.config)
+            run_optimization(self.config, status_callback=self.status_queue.put)
             self.status_queue.put("Optimization completed successfully!")
         except Exception as e:
+            success = False
             self.status_queue.put(f"Error: {str(e)}")
+            self.status_queue.put(traceback.format_exc())
+        finally:
+            self.after(0, lambda: self.on_run_complete(success))
+    
+    def on_run_complete(self, success: bool):
+        self.is_running = False
+        self.current_thread = None
+        self.run_button.config(state='normal')
+        if success:
+            self.summary_label.config(text="Configuration Summary: Completed")
+        else:
+            self.summary_label.config(text="Configuration Summary: Error")
     
     def check_status_queue(self):
         try:
@@ -620,12 +690,18 @@ class ConfigGUI(tk.Tk):
     def load_config(self):
         filename = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
         if filename:
-            with open(filename, 'r') as f:
-                self.config = json.load(f)
-            # Update widgets (simplified, in practice update each widget)
-            self.start_date_entry.delete(0, tk.END)
-            self.start_date_entry.insert(0, self.config['start_date'])
-            # ... similarly for others
+            try:
+                with open(filename, 'r') as f:
+                    loaded_config = json.load(f)
+            except (OSError, json.JSONDecodeError) as err:
+                messagebox.showerror("Load Error", f"Could not load configuration: {err}")
+                return
+
+            merged_config = self.config.copy()
+            merged_config.update(loaded_config)
+            self.config = self._ensure_config_defaults(merged_config)
+            self.apply_config_to_widgets()
+            self.summary_label.config(text=f"Configuration Summary: Loaded {os.path.basename(filename)}")
 
 def main():
     """Main function to run the WFO process."""
