@@ -8,13 +8,10 @@ from config import DEFAULT_DATA_FILE
 # DATA LOADING AND PREPROCESSING
 # ======================================================================
 
-def get_dates():
+def get_dates(config):
     """Prompt for date range input with defaults."""
-    default_start = "2025-01-19"
-    default_end = "2025-01-31"
-    
-    start_date = input(f"Enter start date (YYYY-MM-DD) [default: {default_start}]: ") or default_start
-    end_date = input(f"Enter end date (YYYY-MM-DD) [default: {default_end}]: ") or default_end
+    start_date = config.get('start_date', "2025-01-19")
+    end_date = config.get('end_date', "2025-01-31")
     
     return start_date, end_date
 
@@ -73,7 +70,7 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
         )
         
         # Resample to desired timeframe
-        df = df_1s.resample(timeframe).agg({
+        df = df.resample(timeframe).agg({
             'Open': 'first',
             'High': 'max',
             'Low': 'min',
