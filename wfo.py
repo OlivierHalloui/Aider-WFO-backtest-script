@@ -6,17 +6,26 @@ from itertools import product
 from tqdm import tqdm
 import time
 from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from strategy import run_backtest
 from config import WFOSettings
-from skopt import gp_minimize
-from skopt.space import Integer, Real
 import optuna
+
+
+class OptimizationInterrupted(Exception):
+    """Raised when the optimization process is interrupted by the user."""
+    pass
+
+
+backtest_cache = {}
+backtest_cache_lock = threading.Lock()
 
 # ======================================================================
 # WALK-FORWARD OPTIMIZATION FRAMEWORK
 # ======================================================================
 
-def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', settings=None):
+def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', settings=None, control=None):
     """
     Optimize parameters using selected optimization method on in-sample data.
     
@@ -35,16 +44,38 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         
     Returns:
     --------
-    pandas.DataFrame
-        Sorted optimization results
+    tuple[pandas.DataFrame, int]
+        Sorted optimization results and number of evaluations performed
     """
     if settings is None:
         settings = WFOSettings()
     
     method = settings.optimization_method.lower()
+    data_signature = (
+        in_sample_df.index[0] if len(in_sample_df) > 0 else None,
+        in_sample_df.index[-1] if len(in_sample_df) > 0 else None,
+        len(in_sample_df)
+    )
+    
+    def evaluate_params(param_dict):
+        """(Change 6) Evaluate run_backtest with caching, logging, and interruption control."""
+        if control:
+            control.wait_if_paused()
+            if control.should_stop():
+                raise OptimizationInterrupted()
+        cache_key = (data_signature, tuple(sorted(param_dict.items())))
+        with backtest_cache_lock:
+            if cache_key in backtest_cache:
+                return backtest_cache[cache_key]
+        start = time.time()
+        score = run_backtest(in_sample_df, param_dict, timeframe, return_portfolio=False)
+        elapsed = time.time() - start
+        print(f"Evaluation time: {elapsed:.2f}s for params: {param_dict}")
+        with backtest_cache_lock:
+            backtest_cache[cache_key] = score
+        return score
     
     if method == "grid":
-        # Original grid search implementation
         param_dicts = []
         param_keys = list(param_grid.keys())
         
@@ -54,46 +85,132 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
             param_dicts.append(param_dict)
         
         results = []
-        for param_dict in tqdm(param_dicts, desc="Optimizing parameters"):
-            score = run_backtest(in_sample_df, param_dict, timeframe, return_portfolio=False)
-            result = param_dict.copy()
-            result['combined_score'] = score
-            results.append(result)
+
+        max_workers = settings.max_workers or 1
+        if max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_params = {executor.submit(evaluate_params, pdict): pdict for pdict in param_dicts}
+                try:
+                    for future in tqdm(as_completed(future_to_params), total=len(param_dicts), desc="Optimizing parameters"):
+                        base = future_to_params[future].copy()
+                        base['combined_score'] = future.result()
+                        results.append(base)
+                except OptimizationInterrupted:
+                    for future in future_to_params:
+                        future.cancel()
+                    raise
+        else:
+            for param_dict in tqdm(param_dicts, desc="Optimizing parameters"):
+                score = evaluate_params(param_dict)
+                result = param_dict.copy()
+                result['combined_score'] = score
+                results.append(result)
         
         results_df = pd.DataFrame(results)
         sorted_results = results_df.sort_values('combined_score', ascending=False)
+        evaluation_count = len(results_df)
         
     elif method == "bayesian":
-        # Bayesian Optimization implementation - dynamic based on param_grid
-        space = []
-        for param_name, bounds in param_grid.items():
-            if param_name in ['timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']:
-                space.append(Integer(bounds[0], bounds[1], name=param_name))
-            else:
-                space.append(Real(bounds[0], bounds[1], name=param_name))
+        def extract_bounds(bounds):
+            if isinstance(bounds, (list, tuple)):
+                if len(bounds) == 3 and all(isinstance(b, (int, float)) for b in bounds[:2]):
+                    return bounds
+                if len(bounds) >= 2 and all(isinstance(b, (int, float)) for b in bounds[:2]):
+                    step = max(abs(bounds[1] - bounds[0]), 1)
+                    return bounds[0], bounds[-1], step
+            raise ValueError(f"Unsupported bounds format for Bayesian optimization: {bounds}")
         
-        def objective(params):
-            param_dict = dict(zip([dim.name for dim in space], params))
-            param_dict.update(metrics_info)
-            score = run_backtest(in_sample_df, param_dict, timeframe, return_portfolio=False)
-            return -score  # Minimize negative score
+        continuous_ranges = []
+        for bounds in param_grid.values():
+            min_val, max_val, _ = extract_bounds(bounds)
+            continuous_ranges.append(max(max_val - min_val, 1e-3))
+        estimated_space_size = min(1000, max(1, int(np.prod(continuous_ranges))))
+        total_combinations = estimated_space_size
         
-        n_calls = min(200, np.prod([len(values) if isinstance(values, list) else 1 for values in param_grid.values()]))
-        res = gp_minimize(objective, space, n_calls=n_calls, random_state=42, n_initial_points=20)
+        n_calls = min(500, max(100, total_combinations))
+        n_initial_points = min(50, max(10, int(0.1 * n_calls)))
+        patience = max(1, int(0.2 * n_calls))
+        
+        class NoImprovementStopper:
+            def __init__(self, patience_steps):
+                self.patience_steps = patience_steps
+                self.best_value = np.inf
+                self.no_improve_steps = 0
+            
+            def __call__(self, study, trial):
+                value = trial.value
+                if value < self.best_value - 1e-9:
+                    self.best_value = value
+                    self.no_improve_steps = 0
+                else:
+                    self.no_improve_steps += 1
+                if self.no_improve_steps >= self.patience_steps:
+                    study.stop()
+        
+        int_params = {'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length'}
+        sampler = optuna.samplers.TPESampler(
+            multivariate=True,
+            constant_liar=True,
+            n_startup_trials=n_initial_points,
+            seed=getattr(settings, 'random_state', 42)
+        )
+        pruner = optuna.pruners.MedianPruner(n_warmup_steps=n_initial_points)
+        study = optuna.create_study(direction='minimize', sampler=sampler, pruner=pruner)
+        n_jobs = min(4, max(1, settings.max_workers or 1))
+        
+        def objective(trial):
+            if control:
+                control.wait_if_paused()
+                if control.should_stop():
+                    raise OptimizationInterrupted()
+            params = {}
+            for param_name, bounds in param_grid.items():
+                min_val, max_val, step = extract_bounds(bounds)
+                if param_name in int_params:
+                    params[param_name] = trial.suggest_int(param_name, int(min_val), int(max_val), step=int(max(step, 1)))
+                else:
+                    params[param_name] = trial.suggest_float(
+                        param_name,
+                        float(min_val),
+                        float(max_val)
+                    )
+            params.update(metrics_info)
+            score = evaluate_params(params)
+            noisy_value = -score + np.random.normal(0, 1e-6)
+            return noisy_value
+        
+        early_stopper = NoImprovementStopper(patience)
+        try:
+            study.optimize(
+                objective,
+                n_trials=n_calls,
+                n_jobs=n_jobs,
+                callbacks=[early_stopper]
+            )
+        except OptimizationInterrupted:
+            raise
         
         results = []
-        for i, (params, score) in enumerate(zip(res.x_iters, res.func_vals)):
-            param_dict = dict(zip([dim.name for dim in space], params))
+        for trial in study.trials:
+            param_dict = trial.params.copy()
             param_dict.update(metrics_info)
-            param_dict['combined_score'] = -score
+            param_dict['combined_score'] = -trial.value
             results.append(param_dict)
+        
+        if not results:
+            raise OptimizationInterrupted()
         
         results_df = pd.DataFrame(results)
         sorted_results = results_df.sort_values('combined_score', ascending=False)
+        evaluation_count = len(study.trials)
         
     elif method == "optuna":
         # Optuna (TPE) implementation - dynamic based on param_grid
         def objective(trial):
+            if control:
+                control.wait_if_paused()
+                if control.should_stop():
+                    raise OptimizationInterrupted()
             params = {}
             for param_name, bounds in param_grid.items():
                 if param_name in ['timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']:
@@ -101,11 +218,14 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
                 else:
                     params[param_name] = trial.suggest_float(param_name, bounds[0], bounds[1])
             params.update(metrics_info)
-            return run_backtest(in_sample_df, params, timeframe, return_portfolio=False)
+            return evaluate_params(params)
         
         study = optuna.create_study(direction='maximize')
         n_trials = min(200, np.prod([len(values) if isinstance(values, list) else 1 for values in param_grid.values()]))
-        study.optimize(objective, n_trials=n_trials)
+        try:
+            study.optimize(objective, n_trials=n_trials)
+        except OptimizationInterrupted:
+            raise
         
         results = []
         for trial in study.trials:
@@ -116,13 +236,14 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         
         results_df = pd.DataFrame(results)
         sorted_results = results_df.sort_values('combined_score', ascending=False)
+        evaluation_count = len(study.trials)
         
     else:
         raise ValueError(f"Unsupported optimization method: {method}. Choose 'grid', 'bayesian', or 'optuna'.")
     
-    return sorted_results
+    return sorted_results, evaluation_count
 
-def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe='5s', settings=None):
+def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe='5s', settings=None, status_callback=None, control=None):
     """
     Performs Walk-Forward Optimization on the given data with timing measurements.
     
@@ -192,17 +313,32 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     # Calculate total parameter combinations for reporting
     param_combinations = np.prod([len(values) for values in param_grid.values()])
     
-    print(f"Starting Walk-Forward Optimization with {settings.n_windows} windows, {settings.train_size*100}% training size")
-    print(f"WFO Type: {'Anchored' if settings.anchored else 'Unanchored'}")
-    print(f"Primary Metric: {settings.optimization_metric} (weight: {settings.metric_weights[0]})")
-    print(f"Secondary Metric: {settings.secondary_metric} (weight: {settings.metric_weights[1]})")
-    print(f"Parallelization Backend: {settings.parallel_backend}")
-    print(f"Numba Acceleration: {'Enabled' if settings.use_numba else 'Disabled'}")
-    print(f"Optimization Method: {settings.optimization_method}")
-    print(f"Parameter Combinations: {param_combinations}")
+    def log(message: str):
+        print(message)
+        if status_callback:
+            status_callback(message)
+    
+    def report_stats(payload: dict):
+        if status_callback:
+            status_callback(payload)
+    
+    log(f"Starting Walk-Forward Optimization with {settings.n_windows} windows, {settings.train_size*100}% training size")
+    log(f"WFO Type: {'Anchored' if settings.anchored else 'Unanchored'}")
+    log(f"Primary Metric: {settings.optimization_metric} (weight: {settings.metric_weights[0]})")
+    log(f"Secondary Metric: {settings.secondary_metric} (weight: {settings.metric_weights[1]})")
+    log(f"Parallelization Backend: {settings.parallel_backend}")
+    log(f"Numba Acceleration: {'Enabled' if settings.use_numba else 'Disabled'}")
+    log(f"Optimization Method: {settings.optimization_method}")
+    log(f"Parameter Combinations: {param_combinations}")
     
     # Loop through each window
     for i in range(settings.n_windows):
+        if control:
+            control.wait_if_paused(log)
+            if control.should_stop():
+                log("Stop requested before processing the next window. Exiting.")
+                raise OptimizationInterrupted()
+
         window_start_time = time.time()
         
         start_idx = i * window_size
@@ -237,28 +373,32 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
             'out_sample_end': out_sample_df.index[-1] if len(out_sample_df) > 0 else None
         }
         
-        print(f"\nWindow {i+1}/{settings.n_windows}: {window_dates['start_date']} to {window_dates['end_date']}")
-        print(f"In-Sample: {window_dates['in_sample_start']} to {window_dates['in_sample_end']}")
+        log(f"\nWindow {i+1}/{settings.n_windows}: {window_dates['start_date']} to {window_dates['end_date']}")
+        log(f"In-Sample: {window_dates['in_sample_start']} to {window_dates['in_sample_end']}")
         if len(out_sample_df) > 0:
-            print(f"Out-of-Sample: {window_dates['out_sample_start']} to {window_dates['out_sample_end']}")
+            log(f"Out-of-Sample: {window_dates['out_sample_start']} to {window_dates['out_sample_end']}")
         
         # Optimize parameters on in-sample data
-        print(f"Optimizing parameters on in-sample data ({len(in_sample_df)} bars)...")
+        log(f"Optimizing parameters on in-sample data ({len(in_sample_df)} bars)...")
         
         # Time the optimization process
         optimization_start = time.time()
-        optimization_results = optimize_parameters(
-            in_sample_df, param_grid, metrics_info, timeframe, settings
-        )
+        try:
+            optimization_results, eval_count = optimize_parameters(
+                in_sample_df, param_grid, metrics_info, timeframe, settings, control=control
+            )
+        except OptimizationInterrupted:
+            log("Optimization interrupted during parameter search.")
+            raise
         optimization_time = time.time() - optimization_start
         optimization_times.append(optimization_time)
         
         # Get best parameters
         best_params = optimization_results.iloc[0].drop(['combined_score', metrics_info['metric1_name'], metrics_info['metric2_name']], errors='ignore').to_dict()
         
-        print(f"Best parameters found: {best_params}")
-        print(f"Score: {optimization_results.iloc[0]['combined_score']:.4f}")
-        print(f"Optimization time: {timedelta(seconds=int(optimization_time))}")
+        log(f"Best parameters found: {best_params}")
+        log(f"Score: {optimization_results.iloc[0]['combined_score']:.4f}")
+        log(f"Optimization time: {timedelta(seconds=int(optimization_time))}")
         
         # Test best parameters on in-sample data
         in_sample_portfolio = run_backtest(in_sample_df, best_params, timeframe)
@@ -277,8 +417,9 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
         wfo_results['in_sample_performance'].append(in_sample_metrics)
         
         # Test on out-of-sample data if available
+        out_sample_metrics = None
         if len(out_sample_df) > 0:
-            print(f"Testing best parameters on out-of-sample data ({len(out_sample_df)} bars)...")
+            log(f"Testing best parameters on out-of-sample data ({len(out_sample_df)} bars)...")
             out_sample_portfolio = run_backtest(out_sample_df, best_params, timeframe)
             
             # Calculate performance metrics
@@ -299,12 +440,12 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
                 'n_trades': len(out_sample_portfolio.trades)
             }
             
-            print(f"Out-of-Sample Performance:")
-            print(f"Return: {out_sample_metrics['return']:.2f}%")
-            print(f"Sharpe Ratio: {out_sample_metrics['sharpe']:.2f}")
-            print(f"Max Drawdown: {out_sample_metrics['max_drawdown']:.2f}%")
-            print(f"Win Rate: {out_sample_metrics['win_rate']:.2f}%")
-            print(f"Number of Trades: {out_sample_metrics['n_trades']}")
+            log(f"Out-of-Sample Performance:")
+            log(f"Return: {out_sample_metrics['return']:.2f}%")
+            log(f"Sharpe Ratio: {out_sample_metrics['sharpe']:.2f}")
+            log(f"Max Drawdown: {out_sample_metrics['max_drawdown']:.2f}%")
+            log(f"Win Rate: {out_sample_metrics['win_rate']:.2f}%")
+            log(f"Number of Trades: {out_sample_metrics['n_trades']}")
             
             wfo_results['out_of_sample_performance'].append(out_sample_metrics)
         
@@ -321,7 +462,28 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
         # Record window processing time
         window_time = time.time() - window_start_time
         window_times.append(window_time)
-        print(f"Window processing time: {timedelta(seconds=int(window_time))}")
+        log(f"Window processing time: {timedelta(seconds=int(window_time))}")
+        
+        # Progress metrics for GUI
+        combinations_tested = max(1, eval_count)
+        combos_per_sec = combinations_tested / optimization_time if optimization_time > 0 else 0.0
+        windows_completed = i + 1
+        remaining_windows = settings.n_windows - windows_completed
+        avg_window_time = np.mean(window_times)
+        eta_seconds = avg_window_time * remaining_windows if avg_window_time and remaining_windows > 0 else 0.0
+        
+        report_payload = {
+            'type': 'stats',
+            'speed': combos_per_sec,
+            'eta': eta_seconds,
+            'window': windows_completed,
+            'evaluations': combinations_tested,
+            'window_metrics': {
+                'in_sample': in_sample_metrics,
+                'out_sample': out_sample_metrics
+            }
+        }
+        report_stats(report_payload)
     
     # Calculate total time
     total_time = time.time() - start_time
@@ -330,35 +492,35 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     if wfo_results['in_sample_performance']:
         is_df = pd.DataFrame(wfo_results['in_sample_performance'])
         
-        print("\n=== Aggregate In-Sample Performance ===")
-        print(f"Average Return: {is_df['return'].mean():.2f}%")
-        print(f"Average Sharpe Ratio: {is_df['sharpe'].mean():.2f}")
-        print(f"Average Max Drawdown: {is_df['max_drawdown'].mean():.2f}%")
-        print(f"Average Win Rate: {is_df['win_rate'].mean():.2f}%")
-        print(f"Average Calmar Ratio: {is_df['calmar_ratio'].mean():.2f}")
-        print(f"Average Sortino Ratio: {is_df['sortino_ratio'].mean():.2f}")
-        print(f"Total Trades: {is_df['n_trades'].sum()}")
-        print(f"Cumulative Return: {((1 + is_df['return']/100).prod() - 1) * 100:.2f}%")
+        log("\n=== Aggregate In-Sample Performance ===")
+        log(f"Average Return: {is_df['return'].mean():.2f}%")
+        log(f"Average Sharpe Ratio: {is_df['sharpe'].mean():.2f}")
+        log(f"Average Max Drawdown: {is_df['max_drawdown'].mean():.2f}%")
+        log(f"Average Win Rate: {is_df['win_rate'].mean():.2f}%")
+        log(f"Average Calmar Ratio: {is_df['calmar_ratio'].mean():.2f}")
+        log(f"Average Sortino Ratio: {is_df['sortino_ratio'].mean():.2f}")
+        log(f"Total Trades: {is_df['n_trades'].sum()}")
+        log(f"Cumulative Return: {((1 + is_df['return']/100).prod() - 1) * 100:.2f}%")
     
     # Calculate aggregate out-of-sample performance if available
     if wfo_results['out_of_sample_performance']:
         oos_df = pd.DataFrame(wfo_results['out_of_sample_performance'])
         
-        print("\n=== Aggregate Out-of-Sample Performance ===")
-        print(f"Average Return: {oos_df['return'].mean():.2f}%")
-        print(f"Average Sharpe Ratio: {oos_df['sharpe'].mean():.2f}")
-        print(f"Average Max Drawdown: {oos_df['max_drawdown'].mean():.2f}%")
-        print(f"Average Win Rate: {oos_df['win_rate'].mean():.2f}%")
-        print(f"Average Calmar Ratio: {oos_df['calmar_ratio'].mean():.2f}")
-        print(f"Average Sortino Ratio: {oos_df['sortino_ratio'].mean():.2f}")
-        print(f"Total Trades: {oos_df['n_trades'].sum()}")
-        print(f"Cumulative Return: {((1 + oos_df['return']/100).prod() - 1) * 100:.2f}%")
+        log("\n=== Aggregate Out-of-Sample Performance ===")
+        log(f"Average Return: {oos_df['return'].mean():.2f}%")
+        log(f"Average Sharpe Ratio: {oos_df['sharpe'].mean():.2f}")
+        log(f"Average Max Drawdown: {oos_df['max_drawdown'].mean():.2f}%")
+        log(f"Average Win Rate: {oos_df['win_rate'].mean():.2f}%")
+        log(f"Average Calmar Ratio: {oos_df['calmar_ratio'].mean():.2f}")
+        log(f"Average Sortino Ratio: {oos_df['sortino_ratio'].mean():.2f}")
+        log(f"Total Trades: {oos_df['n_trades'].sum()}")
+        log(f"Cumulative Return: {((1 + oos_df['return']/100).prod() - 1) * 100:.2f}%")
 
         # Check for consistency in parameter selection
         params_df = pd.DataFrame(wfo_results['best_params'])
-        print("\n=== Parameter Consistency Analysis ===")
+        log("\n=== Parameter Consistency Analysis ===")
         for param in param_grid.keys():
-            print(f"{param}: {params_df[param].value_counts().to_dict()}")
+            log(f"{param}: {params_df[param].value_counts().to_dict()}")
         
         # Calculate parameter stability
         param_stability = {}
@@ -366,9 +528,9 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
             param_values = params_df[param].values
             param_stability[param] = 1.0 - (np.std(param_values) / np.mean(param_values)) if np.mean(param_values) > 0 else 0.0
             
-        print("\n=== Parameter Stability (higher is better) ===")
+        log("\n=== Parameter Stability (higher is better) ===")
         for param, stability in param_stability.items():
-            print(f"{param}: {stability:.4f}")
+            log(f"{param}: {stability:.4f}")
     
     # Add timing information to results
     wfo_results['timing'] = {
@@ -383,14 +545,15 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     }
     
     # Print timing summary
-    print("\n=== Performance Timing Summary ===")
-    print(f"Backend: {settings.parallel_backend}")
-    print(f"Numba: {'Enabled' if settings.use_numba else 'Disabled'}")
-    print(f"Optimization Method: {settings.optimization_method}")
-    print(f"Total processing time: {timedelta(seconds=int(total_time))}")
-    print(f"Average window time: {timedelta(seconds=int(np.mean(window_times)))}")
-    print(f"Average optimization time: {timedelta(seconds=int(np.mean(optimization_times)))}")
-    print(f"Parameter combinations per window: {param_combinations}")
-    print(f"Processing speed: {param_combinations * settings.n_windows / total_time:.2f} combinations/second")
+    log("\n=== Performance Timing Summary ===")
+    log(f"Backend: {settings.parallel_backend}")
+    log(f"Numba: {'Enabled' if settings.use_numba else 'Disabled'}")
+    log(f"Optimization Method: {settings.optimization_method}")
+    log(f"Total processing time: {timedelta(seconds=int(total_time))}")
+    log(f"Average window time: {timedelta(seconds=int(np.mean(window_times)))}")
+    log(f"Average optimization time: {timedelta(seconds=int(np.mean(optimization_times)))}")
+    log(f"Parameter combinations per window: {param_combinations}")
+    processing_speed = (param_combinations * settings.n_windows / total_time) if total_time > 0 else 0.0
+    log(f"Processing speed: {processing_speed:.2f} combinations/second")
     
     return wfo_results
