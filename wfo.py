@@ -120,8 +120,8 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
             param_dict.update(metrics_info)
             param_dicts.append(param_dict)
         
-        # Batch param_dicts if chunk_size is set
-        if hasattr(settings, 'chunk_size') and settings.chunk_size > 0:
+        # Batch param_dicts if chunk_size is set (only for threads for now)
+        if hasattr(settings, 'chunk_size') and settings.chunk_size > 0 and executor_class == 'thread':
             param_dicts = [param_dicts[i:i + settings.chunk_size] for i in range(0, len(param_dicts), settings.chunk_size)]
         
         results = []
@@ -130,8 +130,9 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         if max_workers > 1 and executor_class != 'thread':
             if executor_class == 'dask':
                 futures = [client.submit(evaluate_params, pdict) for pdict in param_dicts]
+                future_to_params = {future: pdict for future, pdict in zip(futures, param_dicts)}
                 for future in tqdm(dask_as_completed(futures), total=len(param_dicts), desc="Optimizing parameters"):
-                    base = future_to_params[future].copy()  # Note: Adjust future_to_params to use futures as keys
+                    base = future_to_params[future].copy()
                     base['combined_score'] = future.result()
                     results.append(base)
             elif executor_class == 'ray':
@@ -139,10 +140,10 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
                 def remote_evaluate(pdict):
                     return evaluate_params(pdict)
                 futures = [remote_evaluate.remote(pdict) for pdict in param_dicts]
-                for future in tqdm(ray.get(futures), total=len(param_dicts), desc="Optimizing parameters"):
-                    # Assuming futures are in order; adjust if needed
-                    base = param_dicts[len(results)].copy()
-                    base['combined_score'] = future
+                results_list = ray.get(futures)
+                for pdict, score in zip(param_dicts, results_list):
+                    base = pdict.copy()
+                    base['combined_score'] = score
                     results.append(base)
         else:
             # Fallback to threads or sequential
