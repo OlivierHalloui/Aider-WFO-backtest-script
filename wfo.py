@@ -12,6 +12,15 @@ from strategy import run_backtest
 from config import WFOSettings
 import optuna
 
+try:
+    import dask
+    from dask.distributed import Client, as_completed as dask_as_completed
+except ImportError:
+    dask = None
+try:
+    import ray
+except ImportError:
+    ray = None
 
 class OptimizationInterrupted(Exception):
     """Raised when the optimization process is interrupted by the user."""
@@ -50,6 +59,33 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
     if settings is None:
         settings = WFOSettings()
     
+    # Validate and initialize parallel backend
+    if settings.parallel_backend.lower() == 'dask':
+        if dask is None:
+            raise ImportError("Dask not installed. Install with 'pip install dask distributed'.")
+        client = Client(processes=False, threads_per_worker=1, n_workers=settings.max_workers or 1)
+        executor_class = 'dask'
+    elif settings.parallel_backend.lower() == 'ray':
+        if ray is None:
+            raise ImportError("Ray not installed. Install with 'pip install ray'.")
+        ray.init(num_cpus=settings.max_workers or 1)
+        executor_class = 'ray'
+    else:
+        executor_class = 'thread'  # Default to threads
+    
+    # Validate inputs
+    if not isinstance(param_grid, dict) or not param_grid:
+        raise ValueError("param_grid must be a non-empty dict.")
+    for key, bounds in param_grid.items():
+        if not isinstance(bounds, (list, tuple)) or len(bounds) < 2:
+            raise ValueError(f"param_grid['{key}'] must be a list/tuple with at least min and max.")
+        if not all(isinstance(b, (int, float)) for b in bounds[:2]):
+            raise ValueError(f"param_grid['{key}'] bounds must be numeric.")
+    if not isinstance(in_sample_df, pd.DataFrame) or in_sample_df.empty:
+        raise ValueError("in_sample_df must be a non-empty pandas DataFrame.")
+    if not hasattr(settings, 'optimization_method') or settings.optimization_method.lower() not in ['grid', 'bayesian', 'optuna']:
+        raise ValueError("settings.optimization_method must be 'grid', 'bayesian', or 'optuna'.")
+    
     method = settings.optimization_method.lower()
     data_signature = (
         in_sample_df.index[0] if len(in_sample_df) > 0 else None,
@@ -84,10 +120,32 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
             param_dict.update(metrics_info)
             param_dicts.append(param_dict)
         
+        # Batch param_dicts if chunk_size is set
+        if hasattr(settings, 'chunk_size') and settings.chunk_size > 0:
+            param_dicts = [param_dicts[i:i + settings.chunk_size] for i in range(0, len(param_dicts), settings.chunk_size)]
+        
         results = []
 
         max_workers = settings.max_workers or 1
-        if max_workers > 1:
+        if max_workers > 1 and executor_class != 'thread':
+            if executor_class == 'dask':
+                futures = [client.submit(evaluate_params, pdict) for pdict in param_dicts]
+                for future in tqdm(dask_as_completed(futures), total=len(param_dicts), desc="Optimizing parameters"):
+                    base = future_to_params[future].copy()  # Note: Adjust future_to_params to use futures as keys
+                    base['combined_score'] = future.result()
+                    results.append(base)
+            elif executor_class == 'ray':
+                @ray.remote
+                def remote_evaluate(pdict):
+                    return evaluate_params(pdict)
+                futures = [remote_evaluate.remote(pdict) for pdict in param_dicts]
+                for future in tqdm(ray.get(futures), total=len(param_dicts), desc="Optimizing parameters"):
+                    # Assuming futures are in order; adjust if needed
+                    base = param_dicts[len(results)].copy()
+                    base['combined_score'] = future
+                    results.append(base)
+        else:
+            # Fallback to threads or sequential
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_params = {executor.submit(evaluate_params, pdict): pdict for pdict in param_dicts}
                 try:
@@ -99,16 +157,13 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
                     for future in future_to_params:
                         future.cancel()
                     raise
-        else:
-            for param_dict in tqdm(param_dicts, desc="Optimizing parameters"):
-                score = evaluate_params(param_dict)
-                result = param_dict.copy()
-                result['combined_score'] = score
-                results.append(result)
         
         results_df = pd.DataFrame(results)
         sorted_results = results_df.sort_values('combined_score', ascending=False)
         evaluation_count = len(results_df)
+        
+        if results_df.empty:
+            raise ValueError("No optimization results found. Check param_grid or data.")
         
     elif method == "bayesian":
         def extract_bounds(bounds):
@@ -158,6 +213,9 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         study = optuna.create_study(direction='minimize', sampler=sampler, pruner=pruner)
         n_jobs = min(4, max(1, settings.max_workers or 1))
         
+        if executor_class in ['dask', 'ray']:
+            n_jobs = 1  # Let backend handle parallelism
+        
         def objective(trial):
             if control:
                 control.wait_if_paused()
@@ -198,11 +256,14 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
             results.append(param_dict)
         
         if not results:
-            raise OptimizationInterrupted()
+            raise ValueError("Bayesian optimization produced no results. Check bounds or trials.")
         
         results_df = pd.DataFrame(results)
         sorted_results = results_df.sort_values('combined_score', ascending=False)
         evaluation_count = len(study.trials)
+        
+        if results_df.empty:
+            raise ValueError("No optimization results found. Check param_grid or data.")
         
     elif method == "optuna":
         # Optuna (TPE) implementation - dynamic based on param_grid
@@ -234,9 +295,15 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
             param_dict['combined_score'] = trial.value
             results.append(param_dict)
         
+        if not results:
+            raise ValueError("Optuna optimization produced no results. Check bounds or trials.")
+        
         results_df = pd.DataFrame(results)
         sorted_results = results_df.sort_values('combined_score', ascending=False)
         evaluation_count = len(study.trials)
+        
+        if results_df.empty:
+            raise ValueError("No optimization results found. Check param_grid or data.")
         
     else:
         raise ValueError(f"Unsupported optimization method: {method}. Choose 'grid', 'bayesian', or 'optuna'.")
@@ -272,6 +339,14 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     
     if settings is None:
         settings = WFOSettings()
+    
+    # Validate inputs
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        raise ValueError("df must be a non-empty pandas DataFrame.")
+    if settings.n_windows < 1:
+        raise ValueError("settings.n_windows must be at least 1.")
+    if not (0 < settings.train_size <= 1):
+        raise ValueError("settings.train_size must be between 0 and 1.")
         
     if param_grid is None:
         param_grid = {
