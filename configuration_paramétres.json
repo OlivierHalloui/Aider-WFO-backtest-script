@@ -12,10 +12,10 @@
     ],
     "timeperiod_min": 10.0,
     "timeperiod_max": 30.0,
-    "timeperiod_step": 5.0,
+    "timeperiod_step": 1.0,
     "StDev_min": 1.0,
     "StDev_max": 2.5,
-    "StDev_step": 0.5,
+    "StDev_step": 0.1,
     "coeff_medianeBBW_min": 0.8,
     "coeff_medianeBBW_max": 1.6,
     "coeff_medianeBBW_step": 0.4,
@@ -29,10 +29,11 @@
     "n_windows": 10,
     "train_size": 0.5,
     "anchored": false,
-    "optimization_method": "bayesian",
+    "optimization_method": "grid",
     "parallel_backend": "dask",
     "max_workers": 32,
     "use_numba": true,
     "visualize": true,
-    "run_final": false
+    "run_final": true,
+    "generate_report": false
 }

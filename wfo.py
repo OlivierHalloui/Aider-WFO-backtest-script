@@ -60,12 +60,21 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         settings = WFOSettings()
     
     # Validate and initialize parallel backend
-    if settings.parallel_backend.lower() == 'dask':
+    parallel_backend = getattr(settings, 'parallel_backend', 'thread').lower()
+    method = settings.optimization_method.lower()
+
+    client = None
+    if method == 'grid' and parallel_backend in ('dask', 'ray'):
+        print(f"Parallel backend '{parallel_backend}' is not supported for grid search; falling back to threads.")
+        parallel_backend = 'thread'
+        settings.parallel_backend = 'thread'
+    
+    if parallel_backend == 'dask':
         if dask is None:
             raise ImportError("Dask not installed. Install with 'pip install dask distributed'.")
         client = Client(processes=False, threads_per_worker=1, n_workers=settings.max_workers or 1)
         executor_class = 'dask'
-    elif settings.parallel_backend.lower() == 'ray':
+    elif parallel_backend == 'ray':
         if ray is None:
             raise ImportError("Ray not installed. Install with 'pip install ray'.")
         ray.init(num_cpus=settings.max_workers or 1)
@@ -86,7 +95,6 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
     if not hasattr(settings, 'optimization_method') or settings.optimization_method.lower() not in ['grid', 'bayesian', 'optuna']:
         raise ValueError("settings.optimization_method must be 'grid', 'bayesian', or 'optuna'.")
     
-    method = settings.optimization_method.lower()
     data_signature = (
         in_sample_df.index[0] if len(in_sample_df) > 0 else None,
         in_sample_df.index[-1] if len(in_sample_df) > 0 else None,
@@ -119,10 +127,6 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
             param_dict = dict(zip(param_keys, values))
             param_dict.update(metrics_info)
             param_dicts.append(param_dict)
-        
-        # Batch param_dicts if chunk_size is set (only for threads for now)
-        if hasattr(settings, 'chunk_size') and settings.chunk_size > 0 and executor_class == 'thread':
-            param_dicts = [param_dicts[i:i + settings.chunk_size] for i in range(0, len(param_dicts), settings.chunk_size)]
         
         results = []
 
@@ -190,12 +194,14 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         class NoImprovementStopper:
             def __init__(self, patience_steps):
                 self.patience_steps = patience_steps
-                self.best_value = np.inf
+                self.best_value = None
                 self.no_improve_steps = 0
             
             def __call__(self, study, trial):
                 value = trial.value
-                if value < self.best_value - 1e-9:
+                if value is None:
+                    return
+                if self.best_value is None or value < self.best_value - 1e-9:
                     self.best_value = value
                     self.no_improve_steps = 0
                 else:
@@ -251,6 +257,8 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         
         results = []
         for trial in study.trials:
+            if trial.value is None:
+                continue
             param_dict = trial.params.copy()
             param_dict.update(metrics_info)
             param_dict['combined_score'] = -trial.value

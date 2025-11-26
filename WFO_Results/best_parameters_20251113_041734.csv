@@ -1,0 +1,2 @@
+timeperiod,StDev,coeff_medianeBBW,coef_mediane,fenetre_lowest,seuil_lowest,longueur_mediane,Nb_bars_above,user_exit_sma_length,metric1_name,metric2_name,weight_metric1,weight_metric2
+15,1.092927914161595,0.9426645807613807,1.2198489976480515,34,1.1961084711099428,61,3,20,sharpe_ratio,total_return,1.0,0.0
