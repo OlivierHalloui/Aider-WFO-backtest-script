@@ -63,25 +63,6 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
     parallel_backend = getattr(settings, 'parallel_backend', 'thread').lower()
     method = settings.optimization_method.lower()
 
-    client = None
-    if method == 'grid' and parallel_backend in ('dask', 'ray'):
-        print(f"Parallel backend '{parallel_backend}' is not supported for grid search; falling back to threads.")
-        parallel_backend = 'thread'
-        settings.parallel_backend = 'thread'
-    
-    if parallel_backend == 'dask':
-        if dask is None:
-            raise ImportError("Dask not installed. Install with 'pip install dask distributed'.")
-        client = Client(processes=False, threads_per_worker=1, n_workers=settings.max_workers or 1)
-        executor_class = 'dask'
-    elif parallel_backend == 'ray':
-        if ray is None:
-            raise ImportError("Ray not installed. Install with 'pip install ray'.")
-        ray.init(num_cpus=settings.max_workers or 1)
-        executor_class = 'ray'
-    else:
-        executor_class = 'thread'  # Default to threads
-    
     # Validate inputs
     if not isinstance(param_grid, dict) or not param_grid:
         raise ValueError("param_grid must be a non-empty dict.")
@@ -102,7 +83,7 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
     )
     
     def evaluate_params(param_dict):
-        """(Change 6) Evaluate run_backtest with caching, logging, and interruption control."""
+        """Evaluate run_backtest with caching, logging, and interruption control."""
         if control:
             control.wait_if_paused()
             if control.should_stop():
@@ -111,66 +92,86 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         with backtest_cache_lock:
             if cache_key in backtest_cache:
                 return backtest_cache[cache_key]
-        start = time.time()
+        # start = time.time()
         score = run_backtest(in_sample_df, param_dict, timeframe, return_portfolio=False)
-        elapsed = time.time() - start
-        print(f"Evaluation time: {elapsed:.2f}s for params: {param_dict}")
+        # elapsed = time.time() - start
+        # print(f"Evaluation time: {elapsed:.2f}s for params: {param_dict}")
         with backtest_cache_lock:
             backtest_cache[cache_key] = score
         return score
     
     if method == "grid":
-        param_dicts = []
+        print("Using Vectorized Grid Search...")
+        
+        # 1. Expand the grid into lists of values
         param_keys = list(param_grid.keys())
+        param_values_list = []
+        for key in param_keys:
+            # Check if it's a range definition [min, max, step] or list of values
+            values = param_grid[key]
+            # Assuming param_grid values are already expanded lists from main.py logic
+            # If not, we might need to expand them here.
+            # In main.py: param_grid[param] = list(np.round(np.arange(min_val, max_val + step, step), 1))
+            # So they are lists.
+            param_values_list.append(values)
+            
+        # 2. Create Cartesian Product
+        # We use itertools.product but only to generate the combinations, then unzip them into arrays
+        # This is fast enough for generating the arrays.
+        combinations = list(product(*param_values_list))
+        if not combinations:
+             raise ValueError("No parameter combinations generated.")
+             
+        print(f"Generating {len(combinations)} parameter combinations...")
         
-        for values in product(*param_grid.values()):
-            param_dict = dict(zip(param_keys, values))
-            param_dict.update(metrics_info)
-            param_dicts.append(param_dict)
+        # Transpose to get a list of values for each parameter
+        # zip(*combinations) returns a tuple of tuples, one tuple per parameter
+        transposed_combinations = list(zip(*combinations))
         
-        results = []
-
-        max_workers = settings.max_workers or 1
-        if max_workers > 1 and executor_class != 'thread':
-            if executor_class == 'dask':
-                futures = [client.submit(evaluate_params, pdict) for pdict in param_dicts]
-                future_to_params = {future: pdict for future, pdict in zip(futures, param_dicts)}
-                for future in tqdm(dask_as_completed(futures), total=len(param_dicts), desc="Optimizing parameters"):
-                    base = future_to_params[future].copy()
-                    base['combined_score'] = future.result()
-                    results.append(base)
-            elif executor_class == 'ray':
-                @ray.remote
-                def remote_evaluate(pdict):
-                    return evaluate_params(pdict)
-                futures = [remote_evaluate.remote(pdict) for pdict in param_dicts]
-                results_list = ray.get(futures)
-                for pdict, score in zip(param_dicts, results_list):
-                    base = pdict.copy()
-                    base['combined_score'] = score
-                    results.append(base)
+        vectorized_params = {}
+        for i, key in enumerate(param_keys):
+            vectorized_params[key] = np.array(transposed_combinations[i])
+            
+        # Add metrics info to the params (scalars broadcast automatically)
+        vectorized_params.update(metrics_info)
+        
+        # 3. Run Vectorized Backtest
+        start_vec = time.time()
+        
+        if control:
+            control.wait_if_paused()
+            if control.should_stop():
+                raise OptimizationInterrupted()
+                
+        # This single call runs ALL backtests
+        try:
+            scores = run_backtest(in_sample_df, vectorized_params, timeframe, return_portfolio=False)
+        except Exception as e:
+            print(f"Error during vectorized backtest: {e}")
+            raise
+            
+        elapsed_vec = time.time() - start_vec
+        print(f"Vectorized backtest finished in {elapsed_vec:.2f}s")
+        
+        # 4. Construct Results DataFrame
+        results_df = pd.DataFrame(combinations, columns=param_keys)
+        
+        # Scores should be a Series or Array matching the length of combinations
+        # If single combination, it might be scalar
+        if np.isscalar(scores):
+            results_df['combined_score'] = scores
         else:
-            # Fallback to threads or sequential
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_params = {executor.submit(evaluate_params, pdict): pdict for pdict in param_dicts}
-                try:
-                    for future in tqdm(as_completed(future_to_params), total=len(param_dicts), desc="Optimizing parameters"):
-                        base = future_to_params[future].copy()
-                        base['combined_score'] = future.result()
-                        results.append(base)
-                except OptimizationInterrupted:
-                    for future in future_to_params:
-                        future.cancel()
-                    raise
-        
-        results_df = pd.DataFrame(results)
+            results_df['combined_score'] = scores.values if hasattr(scores, 'values') else scores
+            
+        # Add metrics info columns (constant)
+        for k, v in metrics_info.items():
+            results_df[k] = v
+            
         sorted_results = results_df.sort_values('combined_score', ascending=False)
         evaluation_count = len(results_df)
         
-        if results_df.empty:
-            raise ValueError("No optimization results found. Check param_grid or data.")
-        
     elif method == "bayesian":
+        # Bayesian optimization (Iterative)
         def extract_bounds(bounds):
             if isinstance(bounds, (list, tuple)):
                 if len(bounds) == 3 and all(isinstance(b, (int, float)) for b in bounds[:2]):
@@ -218,10 +219,11 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         )
         pruner = optuna.pruners.MedianPruner(n_warmup_steps=n_initial_points)
         study = optuna.create_study(direction='minimize', sampler=sampler, pruner=pruner)
-        n_jobs = min(4, max(1, settings.max_workers or 1))
         
-        if executor_class in ['dask', 'ray']:
-            n_jobs = 1  # Let backend handle parallelism
+        # For Bayesian, we stick to sequential or simple parallel if needed, 
+        # but since we optimized the core, even single threaded is faster.
+        # Vectorizing Bayesian is hard because it's sequential by nature.
+        n_jobs = 1 
         
         def objective(trial):
             if control:
@@ -271,9 +273,6 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         sorted_results = results_df.sort_values('combined_score', ascending=False)
         evaluation_count = len(study.trials)
         
-        if results_df.empty:
-            raise ValueError("No optimization results found. Check param_grid or data.")
-        
     elif method == "optuna":
         # Optuna (TPE) implementation - dynamic based on param_grid
         def objective(trial):
@@ -310,9 +309,6 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         results_df = pd.DataFrame(results)
         sorted_results = results_df.sort_values('combined_score', ascending=False)
         evaluation_count = len(study.trials)
-        
-        if results_df.empty:
-            raise ValueError("No optimization results found. Check param_grid or data.")
         
     else:
         raise ValueError(f"Unsupported optimization method: {method}. Choose 'grid', 'bayesian', or 'optuna'.")

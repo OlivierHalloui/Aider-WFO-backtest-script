@@ -62,15 +62,17 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
     else:
         # Fetch from Binance
         base_timeframe = '1s'  # Fetch at 1s resolution
-        df_1s = vbt.BinanceData.fetch(
+        data_obj = vbt.BinanceData.fetch(
             ["BTCUSDT"], 
             start=start_date, 
             end=end_date,
             timeframe=base_timeframe
         )
+        # Extract DataFrame from the wrapper object
+        df_1s = data_obj.get()
         
         # Resample to desired timeframe
-        df = df.resample(timeframe).agg({
+        df = df_1s.resample(timeframe).agg({
             'Open': 'first',
             'High': 'max',
             'Low': 'min',

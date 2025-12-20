@@ -309,22 +309,35 @@ def run_optimization(config, status_callback: Optional[Callable[[Any], None]] = 
         final_portfolio.plot().show()
 
 def main():
-
     """Main function to run the WFO process."""
     print("=== ATDMF Strategy Walk-Forward Optimization ===")
     print("This script performs Walk-Forward Optimization on the ATDMF strategy.")
-    print("It demonstrates how to properly cross-validate trading strategies to avoid overfitting.")
     
-    if '--no-gui' in sys.argv:
+    if '--config' in sys.argv:
+        import json
+        try:
+            config_idx = sys.argv.index('--config') + 1
+            config_path = sys.argv[config_idx]
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            print(f"Loading configuration from {config_path}...")
+            run_optimization(config)
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            traceback.print_exc()
+    elif '--no-gui' in sys.argv:
         # Console mode
-        config = {}
-        start_date, end_date = get_dates(config)
-        # ... rest of original main() with inputs
-        # For brevity, assume original code here, but since it's refactored, use run_optimization with manual config
         config = {
-            'start_date': input(f"Enter start date (YYYY-MM-DD) [default: {DEFAULT_START_DATE}]: ") or DEFAULT_START_DATE,
-            'end_date': input(f"Enter end date (YYYY-MM-DD) [default: {DEFAULT_END_DATE}]: ") or DEFAULT_END_DATE,
-            # ... add all inputs manually
+            'start_date': DEFAULT_START_DATE,
+            'end_date': DEFAULT_END_DATE,
+            'timeframe': DEFAULT_TIMEFRAME,
+            'from_file': True,
+            'file_path': DEFAULT_DATA_FILE,
+            'optimization_method': 'grid',
+            'n_windows': 1,
+            'train_size': 0.5,
+            'visualize': False,
+            'generate_report': False
         }
         run_optimization(config)
     else:
