@@ -109,59 +109,62 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         for key in param_keys:
             # Check if it's a range definition [min, max, step] or list of values
             values = param_grid[key]
-            # Assuming param_grid values are already expanded lists from main.py logic
-            # If not, we might need to expand them here.
-            # In main.py: param_grid[param] = list(np.round(np.arange(min_val, max_val + step, step), 1))
-            # So they are lists.
             param_values_list.append(values)
             
         # 2. Create Cartesian Product
-        # We use itertools.product but only to generate the combinations, then unzip them into arrays
-        # This is fast enough for generating the arrays.
         combinations = list(product(*param_values_list))
         if not combinations:
              raise ValueError("No parameter combinations generated.")
              
-        print(f"Generating {len(combinations)} parameter combinations...")
+        total_combos = len(combinations)
+        print(f"Generating {total_combos} parameter combinations...")
         
-        # Transpose to get a list of values for each parameter
-        # zip(*combinations) returns a tuple of tuples, one tuple per parameter
-        transposed_combinations = list(zip(*combinations))
+        # Chunking Logic
+        chunk_size = getattr(settings, 'batch_size', 1000) # Default to 1000 if not set
+        if chunk_size <= 0: chunk_size = 1000
         
-        vectorized_params = {}
-        for i, key in enumerate(param_keys):
-            vectorized_params[key] = np.array(transposed_combinations[i])
+        all_scores = []
+        
+        # Process in chunks
+        for i in range(0, total_combos, chunk_size):
+            if control:
+                control.wait_if_paused()
+                if control.should_stop():
+                    raise OptimizationInterrupted()
             
-        # Add metrics info to the params (scalars broadcast automatically)
-        vectorized_params.update(metrics_info)
-        
-        # 3. Run Vectorized Backtest
-        start_vec = time.time()
-        
-        if control:
-            control.wait_if_paused()
-            if control.should_stop():
-                raise OptimizationInterrupted()
+            chunk_combos = combinations[i : i + chunk_size]
+            
+            # Transpose chunk
+            transposed_chunk = list(zip(*chunk_combos))
+            
+            vectorized_params = {}
+            for k_idx, key in enumerate(param_keys):
+                vectorized_params[key] = np.array(transposed_chunk[k_idx])
+            
+            # Add metrics info
+            vectorized_params.update(metrics_info)
+            
+            try:
+                # Run backtest for this chunk
+                chunk_scores = run_backtest(in_sample_df, vectorized_params, timeframe, return_portfolio=False)
                 
-        # This single call runs ALL backtests
-        try:
-            scores = run_backtest(in_sample_df, vectorized_params, timeframe, return_portfolio=False)
-        except Exception as e:
-            print(f"Error during vectorized backtest: {e}")
-            raise
-            
-        elapsed_vec = time.time() - start_vec
-        print(f"Vectorized backtest finished in {elapsed_vec:.2f}s")
+                # Handle result types (scalar vs series/array)
+                if np.isscalar(chunk_scores):
+                     all_scores.append(chunk_scores)
+                elif hasattr(chunk_scores, 'values'):
+                     all_scores.extend(chunk_scores.values)
+                else:
+                     all_scores.extend(chunk_scores)
+                     
+            except Exception as e:
+                print(f"Error during vectorized backtest chunk {i}-{i+chunk_size}: {e}")
+                # Optional: Decide whether to fail hard or continue. 
+                # For now, let's append NaNs or re-raise. Re-raising is safer to catch bugs.
+                raise
         
         # 4. Construct Results DataFrame
         results_df = pd.DataFrame(combinations, columns=param_keys)
-        
-        # Scores should be a Series or Array matching the length of combinations
-        # If single combination, it might be scalar
-        if np.isscalar(scores):
-            results_df['combined_score'] = scores
-        else:
-            results_df['combined_score'] = scores.values if hasattr(scores, 'values') else scores
+        results_df['combined_score'] = all_scores
             
         # Add metrics info columns (constant)
         for k, v in metrics_info.items():
@@ -188,9 +191,18 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         estimated_space_size = min(1000, max(1, int(np.prod(continuous_ranges))))
         total_combinations = estimated_space_size
         
-        n_calls = min(500, max(100, total_combinations))
+        # Use user-defined max_trials, capped by total search space size
+        max_trials = getattr(settings, 'max_trials', 200)
+        n_calls = min(max_trials, total_combinations)
         n_initial_points = min(50, max(10, int(0.1 * n_calls)))
-        patience = max(1, int(0.2 * n_calls))
+        
+        # Patience logic
+        patience_level = getattr(settings, 'patience_level', 'Medium')
+        patience_factor = 0.2 # Medium default
+        if patience_level == 'Low': patience_factor = 0.1
+        elif patience_level == 'High': patience_factor = 0.4
+            
+        patience = max(1, int(patience_factor * n_calls))
         
         class NoImprovementStopper:
             def __init__(self, patience_steps):
@@ -243,6 +255,11 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
                     )
             params.update(metrics_info)
             score = evaluate_params(params)
+            
+            # Handle NaN/None scores gracefully
+            if score is None or np.isnan(score) or np.isinf(score):
+                return float('inf') # Return worst possible value for minimization
+                
             noisy_value = -score + np.random.normal(0, 1e-6)
             return noisy_value
         
@@ -287,10 +304,21 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
                 else:
                     params[param_name] = trial.suggest_float(param_name, bounds[0], bounds[1])
             params.update(metrics_info)
-            return evaluate_params(params)
+            score = evaluate_params(params)
+            
+            # Handle NaN/None scores gracefully
+            if score is None or np.isnan(score) or np.isinf(score):
+                return float('-inf') # Return worst possible value for maximization
+                
+            return score
         
         study = optuna.create_study(direction='maximize')
-        n_trials = min(200, np.prod([len(values) if isinstance(values, list) else 1 for values in param_grid.values()]))
+        
+        # Calculate total combinations roughly
+        total_combos = np.prod([len(values) if isinstance(values, list) else 1 for values in param_grid.values()])
+        max_trials = getattr(settings, 'max_trials', 200)
+        n_trials = min(max_trials, total_combos)
+        
         try:
             study.optimize(objective, n_trials=n_trials)
         except OptimizationInterrupted:

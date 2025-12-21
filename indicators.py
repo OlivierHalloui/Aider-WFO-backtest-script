@@ -7,29 +7,37 @@ import vectorbtpro as vbt
 # NUMBA-OPTIMIZED INDICATOR FUNCTIONS
 # ======================================================================
 
+# Using vbt.generic.nb optimized functions where available
+# They are typically O(N) instead of O(N*W)
+
 @njit(cache=True)
 def rolling_mean(arr, window):
-    result = np.full(len(arr), np.nan)
-    for i in range(len(arr)):
-        if i >= window - 1:
-            result[i] = np.mean(arr[i - window + 1:i + 1])
-    return result
+    # vbt.generic.nb.rolling_mean_1d_nb(a, window, minp)
+    # We use min_periods=window to match previous behavior (nan until full window)
+    return vbt.generic.nb.rolling_mean_1d_nb(arr, window, window)
 
 @njit(cache=True)
 def rolling_median(arr, window):
+    # VectorBT Pro doesn't expose a public rolling_median_1d_nb in generic.nb yet.
+    # We keep the custom implementation.
+    # Standard naive implementation O(N * W * log W) or O(N * W)
     result = np.full(len(arr), np.nan)
     for i in range(len(arr)):
         if i >= window - 1:
-            result[i] = np.median(arr[i - window + 1:i + 1])
+            # We use nanmedian to be safe, or just median if we are sure no nans in slice
+            # But the slice might contain nans if input has nans.
+            # vbt usually handles nans.
+            window_slice = arr[i - window + 1:i + 1]
+            if np.isnan(window_slice).all():
+                result[i] = np.nan
+            else:
+                result[i] = np.nanmedian(window_slice)
     return result
 
 @njit(cache=True)
 def rolling_min(arr, window):
-    result = np.full(len(arr), np.nan)
-    for i in range(len(arr)):
-        if i >= window - 1:
-            result[i] = np.min(arr[i - window + 1:i + 1])
-    return result
+    # vbt.generic.nb.rolling_min_1d_nb(a, window, minp)
+    return vbt.generic.nb.rolling_min_1d_nb(arr, window, window)
 
 @njit(cache=True)
 def compute_bars_since_below(ecart_borne1, mediane, coef, Nb_bars_above):
@@ -56,16 +64,15 @@ def ecart_bollinger_borne_signal_nb(prix, upper_band, lower_band, timeperiod, lo
     return compute_bars_since_below(ecart_borne1, mediane, coef_mediane, Nb_bars_above)
 
 @njit(cache=True)
-def bollinger_horizontal_signal_nb(upper_band, lower_band, middle_band, coeff_medianeBBW):
-    BBW = (upper_band - lower_band) / middle_band
-    MMBBW = rolling_mean(BBW, 5)
-    medianeBBW = rolling_median(BBW, 200)
-    seuil = medianeBBW / coeff_medianeBBW
-    signal = np.zeros(len(BBW), dtype=np.bool_)
-    for i in range(len(BBW)):
-        if np.isnan(seuil[i]):
+def bollinger_horizontal_signal_nb(bbw, mmbbw, mediane_bbw, coeff_medianeBBW):
+    signal = np.zeros(len(bbw), dtype=np.bool_)
+    for i in range(len(bbw)):
+        if np.isnan(mediane_bbw[i]):
             continue
-        if BBW[i] < seuil[i] or MMBBW[i] < seuil[i]:
+        seuil = mediane_bbw[i] / coeff_medianeBBW
+        if np.isnan(seuil):
+            continue
+        if (not np.isnan(bbw[i]) and bbw[i] < seuil) or (not np.isnan(mmbbw[i]) and mmbbw[i] < seuil):
             signal[i] = True
     return signal
 
@@ -119,7 +126,7 @@ EcartBollingerBorne = vbt.IF(
 
 BollingerHorizontal = vbt.IF(
     class_name='BollingerHorizontal',
-    input_names=['upper_band', 'lower_band', 'middle_band'],
+    input_names=['bbw', 'mmbbw', 'mediane_bbw'],
     param_names=['coeff_medianeBBW'],
     output_names=['signal']
 ).with_apply_func(

@@ -1,0 +1,25 @@
+# Bayesian Optimization Trial Limits
+
+Yes, the Bayesian method used in this project has a limited number of trials.
+
+**1. Maximum Trials (`n_calls`):**
+The algorithm dynamically calculates the maximum number of trials based on your total parameter space, but it is capped:
+-   **Minimum:** 100 trials
+-   **Maximum:** 500 trials
+
+This means even if you have millions of combinations, the Bayesian optimizer will only test at most 500 of them.
+
+**2. Early Stopping (Patience):**
+The optimization may stop *before* reaching the maximum number of trials if the results stop improving.
+-   **Mechanism:** It monitors the "best score" found so far.
+-   **Patience:** The number of trials to wait for an improvement before giving up.
+    -   **Low:** Stops after 10% of max trials without improvement.
+    -   **Medium:** Stops after 20% of max trials without improvement (Default).
+    -   **High:** Stops after 40% of max trials without improvement.
+
+**Code Reference (`wfo.py`):**
+```python
+n_calls = min(500, max(100, total_combinations))
+# ...
+patience = max(1, int(patience_factor * n_calls))
+```

@@ -1,0 +1,35 @@
+# Configuration of Bayesian Optimization
+
+The Bayesian optimization method (using Optuna) is currently configured to run **sequentially** (single-threaded for the trials loop).
+
+**Configuration Location:** `wfo.py`, inside `optimize_parameters` function.
+
+```python
+    elif method == "bayesian":
+        # ...
+        # For Bayesian, we stick to sequential or simple parallel if needed, 
+        # but since we optimized the core, even single threaded is faster.
+        # Vectorizing Bayesian is hard because it's sequential by nature.
+        n_jobs = 1 
+        
+        # ...
+        try:
+            study.optimize(
+                objective,
+                n_trials=n_calls,
+                n_jobs=n_jobs,  # <--- HARDCODED HERE
+                callbacks=[early_stopper]
+            )
+```
+
+**Why is it hardcoded to 1?**
+
+1.  **Sequential Nature of TPE:** The Tree-structured Parzen Estimator (TPE) algorithm used by Optuna needs the result of the *previous* trial to inform the hyperparameters for the *next* trial. True parallelism is difficult without using approximation strategies (like "Constant Liar") which can reduce optimization quality.
+2.  **Vectorized Core:** The "objective function" (`run_backtest`) is already highly optimized using Numba and Vectorization. It consumes significant CPU resources. Running multiple of these heavy backtests in parallel processes often leads to CPU contention and memory overhead that outweighs the benefits.
+3.  **Parallel Backend Ignored:** The `parallel_backend` setting from the GUI is currently **ignored** for this method because `n_jobs` is manually set to 1 in the code.
+
+**How to change it?**
+To enable parallel trials, you would need to:
+1.  Change `n_jobs = 1` to `n_jobs = -1` (or a specific number).
+2.  Ensure the chosen storage backend for Optuna supports concurrency (the default in-memory storage does, but might have limitations).
+3.  Accept potentially lower optimization efficiency per trial due to the "Constant Liar" effect if TPE is forced to suggest multiple points at once.

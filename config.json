@@ -1,0 +1,32 @@
+{
+    "start_date": "2025-01-19",
+    "end_date": "2025-01-31",
+    "timeframe": "5s",
+    "from_file": true,
+    "file_path": "/home/olivier/Downloads/ATDMF_strategy_V5_long/ATDMF_strategy_long_BTCFDUSD05S/Data/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_1s/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_5S.csv",
+    "selected_params": [
+        "timeperiod",
+        "StDev",
+        "coeff_medianeBBW"
+    ],
+    "metric1_name": "sharpe_ratio",
+    "metric2_name": "total_return",
+    "weight_metric1": 1.0,
+    "weight_metric2": 0.0,
+    "n_windows": 1,
+    "train_size": 0.5,
+    "anchored": false,
+    "optimization_method": "grid",
+    "parallel_backend": "thread",
+    "max_workers": 32,
+    "use_numba": true,
+    "timeperiod_min": 10.0,
+    "timeperiod_max": 30.0,
+    "timeperiod_step": 1.0,
+    "StDev_min": 1.0,
+    "StDev_max": 2.5,
+    "StDev_step": 0.1,
+    "coeff_medianeBBW_min": 0.8,
+    "coeff_medianeBBW_max": 1.6,
+    "coeff_medianeBBW_step": 0.1
+}

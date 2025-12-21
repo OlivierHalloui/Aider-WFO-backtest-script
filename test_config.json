@@ -1,0 +1,22 @@
+{
+    "start_date": "2025-01-19",
+    "end_date": "2025-01-31",
+    "timeframe": "5s",
+    "from_file": true,
+    "file_path": "/home/olivier/Downloads/ATDMF_strategy_V5_long/ATDMF_strategy_long_BTCFDUSD05S/Data/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_1s/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_5S.csv",
+    "selected_params": ["timeperiod", "StDev"],
+    "timeperiod_min": 10,
+    "timeperiod_max": 15,
+    "timeperiod_step": 5,
+    "StDev_min": 1.0,
+    "StDev_max": 1.5,
+    "StDev_step": 0.5,
+    "n_windows": 2,
+    "train_size": 0.5,
+    "optimization_method": "grid",
+    "parallel_backend": "thread",
+    "max_workers": 4,
+    "visualize": false,
+    "generate_report": false,
+    "run_final": false
+}

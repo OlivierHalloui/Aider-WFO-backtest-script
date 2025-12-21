@@ -102,12 +102,23 @@ def create_signal_generators(df, **params):
     )
     
     # Bollinger Horizontal
-    # Needs: upper, lower, middle, coeff_medianeBBW
-    # N inputs -> N params -> N outputs. per_column=True
+    # Needs: bbw, mmbbw, mediane_bbw, coeff_medianeBBW
+    # Optimization: Calculate rolling stats using efficient Pandas/VBT backend
+    # instead of Numba loop for median
+    bbw = (bbands.upperband - bbands.lowerband) / bbands.middleband
+    
+    # Using vbt accessor for rolling if available, or pandas
+    # bbands outputs are vbt-wrapped pandas objects
+    # We explicitly access .vbt to ensure we get VBT functionality if needed, or just standard pandas
+    # Standard pandas rolling is efficient enough compared to custom Numba loop
+    mmbbw = bbw.rolling(window=5).mean()
+    mediane_bbw = bbw.rolling(window=200).median()
+    
+    # Pass pre-calculated stats to indicator logic
     bollinger_horizontal_ind = BollingerHorizontal.run(
-        upper_band=bbands.upperband,
-        lower_band=bbands.lowerband,
-        middle_band=bbands.middleband,
+        bbw=bbw,
+        mmbbw=mmbbw,
+        mediane_bbw=mediane_bbw,
         coeff_medianeBBW=coeff_medianeBBW,
         per_column=True
     )
@@ -276,8 +287,15 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
                 n_trades = port.trades.count()
                 # Handle division by zero or no trades safely
                 # n_trades can be 0.
+                if n_trades == 0:
+                    return 0.0
                 avg_pl = total_ret / n_trades
-                avg_pl = avg_pl.replace([np.inf, -np.inf], 0).fillna(0)
+                
+                if hasattr(avg_pl, 'replace'):
+                    avg_pl = avg_pl.replace([np.inf, -np.inf], 0).fillna(0)
+                else:
+                    if np.isinf(avg_pl) or np.isnan(avg_pl):
+                        avg_pl = 0.0
                 return avg_pl
             return 0.0
 

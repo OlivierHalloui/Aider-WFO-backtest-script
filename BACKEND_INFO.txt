@@ -1,0 +1,13 @@
+# Parallel Backend Options Analysis
+
+In the current implementation of the Walk-Forward Optimizer:
+
+**Useful Option:** `thread` (or `threadpool`)
+
+**Explanation:**
+The "Grid" optimization method is highly optimized using **Vectorization** and **Numba**. This means it processes thousands of parameter combinations simultaneously using highly efficient CPU instructions (SIMD) within a single process.
+
+- **`thread`**: This is the most efficient default. It keeps execution in one process, avoiding the expensive overhead of copying data between multiple processes or workers.
+- **`dask`, `ray`, `pathos`**: Currently, these options **do not provide a speedup** for the Grid method. The code processes the parameter grid in sequential "chunks" to prevent memory overflows. While we could parallelize these chunks, doing so would multiply memory usage by the number of cores (likely causing crashes) and introduce significant data transfer overhead that often outweighs the compute gains for this specific type of numerical task.
+
+**Recommendation:** Keep Parallel Backend set to **`thread`**. The recent Numba optimizations in `indicators.py` provide the primary performance boost.

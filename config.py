@@ -39,3 +39,5 @@ class WFOSettings:
         self.use_numba = True            # Whether to use Numba for accelerated computations
         self.chunk_size = 200            # Chunk size for parallelization
         self.optimization_method = "bayesian"  # Optimization method ('bayesian', 'optuna', 'grid')
+        self.patience_level = "Medium"   # Patience for Bayesian/Optuna early stopping
+        self.max_trials = 200            # Maximum number of trials for Bayesian/Optuna optimization

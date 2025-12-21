@@ -192,6 +192,8 @@ def get_wfo_settings(config):
     settings.parallel_backend = config.get('parallel_backend', 'dask')
     settings.max_workers = config.get('max_workers', os.cpu_count() or 1)
     settings.use_numba = config.get('use_numba', True)
+    settings.patience_level = config.get('patience_level', 'Medium')
+    settings.max_trials = config.get('max_trials', 200)
     
     return settings
 
@@ -342,9 +344,14 @@ def main():
         run_optimization(config)
     else:
         # GUI mode
-        from gui import ConfigGUI
-        app = ConfigGUI()
-        app.mainloop()
+        print("Launching Streamlit GUI...")
+        import subprocess
+        try:
+            subprocess.run(["streamlit", "run", "app.py"], check=True)
+        except FileNotFoundError:
+            print("Error: 'streamlit' command not found. Please install it using 'pip install streamlit'.")
+        except KeyboardInterrupt:
+            print("\nStreamlit GUI stopped.")
 
 if __name__ == "__main__":
     main()
