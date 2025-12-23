@@ -1,3 +1,0 @@
-timeperiod,StDev,coeff_medianeBBW,coef_mediane,metric1_name,metric2_name,weight_metric1,weight_metric2
-13,1.0,0.8,1.0,sharpe_ratio,total_return,0.5,0.5
-13,1.026066078898285,0.9328589307230006,1.5,sharpe_ratio,total_return,0.5,0.5

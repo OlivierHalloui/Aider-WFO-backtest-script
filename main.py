@@ -32,31 +32,23 @@ def build_default_param_grid(selected_params: Optional[list] = None) -> Dict[str
 def get_param_grid(config):
     """
     Get parameter grid from config dict.
-    
-    Parameters:
-    -----------
-    config : dict
-        Configuration dictionary
-        
-    Returns:
-    --------
-    dict
-        Parameter grid for optimization
+    Ensures all strategy parameters are present, using defaults if not selected for optimization.
     """
-    # Define parameter options
-    param_options = {
-        'timeperiod': "Période pour les Bandes de Bollinger",
-        'StDev': "Nombre d'écarts-types pour les Bandes de Bollinger",
-        'coeff_medianeBBW': "Coefficient utilisé dans le signal horizontal",
-        'coef_mediane': "Coefficient pour le signal écart BB borné",
-        'fenetre_lowest': "Fenêtre pour le signal lowest",
-        'seuil_lowest': "Seuil pour le signal lowest",
-        'longueur_mediane': "Fenêtre médiane du signal BB borné",
-        'Nb_bars_above': "Nbre de barres pour la validation du signal BB borné",
-        'user_exit_sma_length': "Longueur SMA sortie"
+    # 1. Define Defaults for ALL strategy parameters
+    strategy_defaults = {
+        'timeperiod': 20,
+        'StDev': 2.0,
+        'matype': 0,
+        'coeff_medianeBBW': 1.1,
+        'coef_mediane': 1.0,
+        'Nb_bars_above': 5,
+        'fenetre_lowest': 30,
+        'seuil_lowest': 3.5,
+        'longueur_mediane': 100,
+        'user_exit_sma_length': 20
     }
-    
-    # Default parameter ranges
+
+    # 2. Define optimization ranges (min, max, step)
     default_ranges = {
         'timeperiod': (10, 30, 5),
         'StDev': (1, 2.5, 0.5),
@@ -69,20 +61,34 @@ def get_param_grid(config):
         'user_exit_sma_length': (10, 30, 10)
     }
     
-    # Get selected parameters from config
+    # 3. Initialize grid with defaults (as single-element lists)
+    param_grid = {k: [v] for k, v in strategy_defaults.items()}
+    
+    # 4. Override with selected optimization ranges
     selected_params = config.get('selected_params', list(DEFAULT_PARAM_GRID.keys()))
     
-    param_grid = {}
     for param in selected_params:
         if param in default_ranges:
             default_min, default_max, default_step = default_ranges[param]
+            
             min_val = config.get(f'{param}_min', default_min)
             max_val = config.get(f'{param}_max', default_max)
             step = config.get(f'{param}_step', default_step)
-            if param in ['timeperiod', 'fenetre_lowest', 'user_exit_sma_length']:
-                param_grid[param] = list(range(int(min_val), int(max_val) + 1, int(step)))
+            
+            # Prevent infinite loops or errors with bad steps
+            if step <= 0: step = default_step
+
+            if param in ['timeperiod', 'fenetre_lowest', 'user_exit_sma_length', 'Nb_bars_above', 'longueur_mediane']:
+                # Integer range
+                values = list(range(int(min_val), int(max_val) + 1, int(step)))
+                if not values: values = [int(min_val)] # Ensure at least one value
+                param_grid[param] = values
             else:
-                param_grid[param] = list(np.round(np.arange(min_val, max_val + step, step), 1))
+                # Float range
+                values = list(np.round(np.arange(min_val, max_val + 1e-9, step), 2)) # +epsilon for inclusive max
+                if not values: values = [float(min_val)]
+                param_grid[param] = values
+                
     return param_grid
 
 def display_default_parameters():
@@ -344,7 +350,7 @@ def main():
         run_optimization(config)
     else:
         # GUI mode
-        print("Launching Streamlit GUI...")
+        print("Launching ATDMF Strategy Optimizer (SOTA V2)...")
         import subprocess
         try:
             subprocess.run(["streamlit", "run", "app.py"], check=True)

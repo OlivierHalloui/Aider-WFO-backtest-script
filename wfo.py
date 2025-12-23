@@ -519,7 +519,8 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
             'win_rate': in_sample_portfolio.trades.win_rate,
             'calmar_ratio': in_sample_portfolio.calmar_ratio if in_sample_portfolio.max_drawdown > 0 else np.nan,
             'sortino_ratio': in_sample_portfolio.sortino_ratio,
-            'n_trades': len(in_sample_portfolio.trades)
+            'n_trades': len(in_sample_portfolio.trades),
+            'avg_pnl': in_sample_portfolio.trades.pnl.mean() if len(in_sample_portfolio.trades) > 0 else 0
         }
         
         wfo_results['in_sample_performance'].append(in_sample_metrics)
@@ -545,7 +546,8 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
                 'win_rate': out_sample_portfolio.trades.win_rate,  #* 100,
                 'calmar_ratio': out_sample_portfolio.calmar_ratio if out_sample_portfolio.max_drawdown > 0 else np.nan,
                 'sortino_ratio': out_sample_portfolio.sortino_ratio,
-                'n_trades': len(out_sample_portfolio.trades)
+                'n_trades': len(out_sample_portfolio.trades),
+                'avg_pnl': out_sample_portfolio.trades.pnl.mean() if len(out_sample_portfolio.trades) > 0 else 0
             }
             
             log(f"Out-of-Sample Performance:")

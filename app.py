@@ -8,17 +8,18 @@ import datetime
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+import plotly.figure_factory as ff
+import vectorbtpro as vbt
 
 # Import from existing modules
 from config import (
     DEFAULT_START_DATE, DEFAULT_END_DATE, DEFAULT_TIMEFRAME, DEFAULT_DATA_FILE, DEFAULT_PARAM_GRID,
     WFOSettings
 )
-from main import get_param_grid, get_metrics_info, get_wfo_settings
-from wfo import walk_forward_optimization, OptimizationInterrupted
+from main import get_param_grid
+from wfo_v2 import run_sota_wfo
+from strategy_v2 import run_backtest_v2
 from data_loading import load_data
-from strategy import run_backtest
-
 # Set page config
 st.set_page_config(
     page_title="ATDMF Strategy Optimizer",
@@ -273,283 +274,650 @@ def run_final_backtest_logic():
         except Exception as e:
             st.error(f"Error in final backtest: {e}")
 
+def run_final_backtest_logic_v2():
+    """Runs the final backtest using averaged parameters from SOTA WFO results."""
+    if 'cv_results' not in st.session_state or 'df' not in st.session_state:
+        st.error("No SOTA WFO results available to run final backtest.")
+        return
+
+    cv_results = st.session_state['cv_results']
+    df = st.session_state['df']
+    config = get_current_config()
+    
+    # Extract parameters from cv_results
+    all_outputs = cv_results.out
+    best_params_list = [output[1] for output in all_outputs]
+    params_df = pd.DataFrame(best_params_list)
+    
+    avg_params = {}
+    
+    # Define integer parameters that should be rounded
+    int_params = ['timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']
+    
+    for param in params_df.columns:
+        if param in ['window', 'metric1_name', 'metric2_name']:
+            continue
+        try:
+            mean_val = params_df[param].mean()
+            if param in int_params:
+                avg_params[param] = int(round(mean_val))
+            else:
+                avg_params[param] = round(mean_val, 2)
+        except:
+            pass # Skip non-numeric
+            
+    st.session_state['final_params_v2'] = avg_params
+    
+    with st.spinner("Running Final Backtest on Full Dataset (SOTA Params)..."):
+        try:
+            final_portfolio = run_backtest_v2(df, avg_params, freq=config['timeframe'])
+            st.session_state['final_portfolio_v2'] = final_portfolio
+            st.success("Final Backtest Complete!")
+        except Exception as e:
+            st.error(f"Error in final backtest: {e}")
+
+def create_robustness_radar(oos_df, params_df):
+    """Calculates robustness metrics and generates a radar chart."""
+    
+    scores = {}
+    
+    # 1. Performance Consistency (lower std dev of returns is better)
+    if oos_df['return'].mean() != 0 and oos_df['return'].std() > 0:
+        perf_cv = oos_df['return'].std() / abs(oos_df['return'].mean())
+        scores['Perf. Consistency'] = max(0, 1 - perf_cv)
+    else:
+        scores['Perf. Consistency'] = 0.5 # Neutral score
+
+    # 2. Profitability (based on avg sharpe)
+    # Normalize sharpe ratio. Assume a typical range of -1 to 3.
+    sharpe_score = (oos_df['sharpe'].mean() - (-1)) / (3 - (-1))
+    scores['Profitability'] = max(0, min(1, sharpe_score))
+
+    # 3. Drawdown Robustness (lower avg drawdown is better)
+    # Normalize drawdown. Assume a typical range of 5% to 50%.
+    dd_score = 1 - ((oos_df['max_drawdown'].mean() - 5) / (50 - 5))
+    scores['DD Robustness'] = max(0, min(1, dd_score))
+
+    # 4. Parameter Stability
+    numeric_params = params_df.select_dtypes(include=np.number).columns
+    numeric_params = [c for c in numeric_params if 'window' not in c]
+    if numeric_params:
+        param_stabilities = []
+        for col in numeric_params:
+            if params_df[col].mean() != 0 and params_df[col].std() > 0:
+                cv = params_df[col].std() / abs(params_df[col].mean())
+                param_stabilities.append(max(0, 1 - cv))
+            else:
+                param_stabilities.append(0.5)
+        scores['Param. Stability'] = np.mean(param_stabilities)
+    else:
+        scores['Param. Stability'] = 0.5 # Neutral if no numeric params
+
+    # 5. Overfitting Meter (IS vs OOS performance)
+    if 'wfo_results' in st.session_state and st.session_state['wfo_results']['in_sample_performance']:
+        is_df = pd.DataFrame(st.session_state['wfo_results']['in_sample_performance'])
+        is_return_avg = is_df['return'].mean()
+        oos_return_avg = oos_df['return'].mean()
+        if is_return_avg > 0:
+            overfit_ratio = (is_return_avg - oos_return_avg) / is_return_avg
+            scores['Overfit Resistance'] = max(0, 1 - overfit_ratio)
+        else:
+            scores['Overfit Resistance'] = 0.5 # Neutral if IS return is not positive
+    else:
+        scores['Overfit Resistance'] = 0.5
+
+    # Calculate overall score
+    overall_score = np.mean(list(scores.values()))
+    
+    # Create Radar Chart
+    categories = list(scores.keys())
+    values = list(scores.values())
+    
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatterpolar(
+        r=values,
+        theta=categories,
+        fill='toself',
+        name='Robustness'
+    ))
+
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 1]
+            )),
+        showlegend=False,
+        template='plotly_dark',
+        title='Strategy Robustness Dashboard'
+    )
+    
+    return fig, overall_score
+
+
 
 # ==============================================================================
 # MAIN LOGIC
 # ==============================================================================
 
-def run_wfo(config):
-    # --- Execution ---
+# ==============================================================================
+
+# MAIN LOGIC
+
+# ==============================================================================
+
+
+
+def run_wfo_v2(config):
+
+    """
+
+    Wrapper function to execute the SOTA WFO and handle results.
+
+    """
+
     try:
-        with st.status("Running Optimization...", expanded=True) as status:
+
+        with st.status("Running State-of-the-Art Walk-Forward Optimization...", expanded=True) as status:
+
             st.write("⏳ Loading Data...")
-            
-            # Load Data
+
             if config['from_file']:
+
                 df = load_data(config['start_date'], config['end_date'], config['timeframe'], from_file=True, file_path=config['file_path'])
+
             else:
+
                 df = load_data(config['start_date'], config['end_date'], config['timeframe'], from_file=False)
+
             
+
             if df is None or df.empty:
+
                 status.update(label="Error: No data loaded.", state="error")
+
                 st.error("No data found for the specified range/source.")
+
                 return None, None
 
             st.write(f"✅ Loaded {len(df)} bars of data.")
-            
-            # Prepare WFO arguments
+
+
+
             params_grid = get_param_grid(config)
-            metrics_info = get_metrics_info(config)
-            wfo_settings = get_wfo_settings(config)
-            
+
             st.write(f"⚙️ Parameter Space: {sum(len(v) for v in params_grid.values())} raw dimensions.")
-            st.write(f"🚀 Starting {config['optimization_method'].upper()} optimization on {config['n_windows']} windows...")
+
+            st.write(f"🚀 Starting SOTA WFO on {config['n_windows']} windows...")
             
-            # Run WFO
-            start_time = time.time()
-            
-            # Create a progress placeholder
-            progress_bar = st.progress(0)
-            
-            # Define a simple callback to update status
-            def status_callback(msg):
-                if isinstance(msg, str):
-                    pass
-                elif isinstance(msg, dict) and msg.get('type') == 'stats':
-                    w = msg.get('window', 0)
-                    progress_bar.progress(min(w / max(1, config['n_windows']), 1.0))
-            
-            results = walk_forward_optimization(
-                df, 
+            # Note: The new WFO function prints its own progress to the console
+            cv_results = run_sota_wfo(
+                price_data=df,
                 param_grid=params_grid,
-                metrics_info=metrics_info,
-                timeframe=config['timeframe'],
-                settings=wfo_settings,
-                status_callback=status_callback
+                n_windows=config['n_windows'],
+                train_size=config['train_size'],
+                use_anchored=config['anchored'],
+                metric=config['metric1_name'],
+                optimization_method=config['optimization_method'],
+                max_trials=config['max_trials']
             )
             
-            elapsed = time.time() - start_time
-            st.write(f"✅ Optimization completed in {elapsed:.2f} seconds.")
-            status.update(label="Optimization Complete!", state="complete")
-            
-            return results, df
+            status.update(label="SOTA WFO Complete!", state="complete")
+
+            return cv_results, df
+
+
 
     except Exception as e:
-        st.error(f"An error occurred during optimization: {str(e)}")
+
+        st.error(f"An error occurred during SOTA WFO: {str(e)}")
+
         # st.exception(e) # Uncomment for debug stack trace
+
         return None, None
 
+
+
 # --- Action Buttons ---
+
 st.sidebar.divider()
 
+st.sidebar.markdown("### 🚀 SOTA WFO Execution")
+
+
+
 # Live Combination Count
+
 current_conf = get_current_config()
+
 total_combos = calculate_combinations(current_conf)
-st.sidebar.info(f"📊 Total Parameter Combinations: **{total_combos:,}**")
+
+st.sidebar.info(f"📊 Grid Search Combinations: **{total_combos:,}**")
+
+
 
 col_run, col_save = st.sidebar.columns([1, 1])
 
+
+
 with col_run:
-    if st.button("🚀 Start WFO", type="primary", use_container_width=True):
+
+    if st.button("🚀 Start SOTA WFO", type="primary", use_container_width=True):
+
         if not selected_params:
-            st.error("Select params!")
+
+            st.error("Select at least one parameter to optimize!")
+
         else:
-            results, df = run_wfo(current_conf)
-            if results:
-                st.session_state['wfo_results'] = results
+
+            cv_results, df = run_wfo_v2(current_conf)
+
+            if cv_results:
+
+                st.session_state['cv_results'] = cv_results
+
                 st.session_state['df'] = df
-                st.success("Finished!")
+
+                st.success("SOTA WFO Finished!")
+
+
 
 with col_save:
+
     # Save Config Button
+
     json_config = json.dumps(current_conf, indent=4)
+
     st.download_button(
+
         label="💾 Save Config",
+
         data=json_config,
+
         file_name="config.json",
+
         mime="application/json",
+
         use_container_width=True
+
     )
 
-# Run Final Backtest Button (Conditional)
-if 'wfo_results' in st.session_state:
-    st.sidebar.divider()
-    if st.sidebar.button("🏆 Run Final Backtest", use_container_width=True):
-        run_final_backtest_logic()
+
 
 # ==============================================================================
-# RESULTS VISUALIZATION
+
+# RESULTS VISUALIZATION (V2)
+
 # ==============================================================================
 
-if 'wfo_results' in st.session_state:
-    results = st.session_state['wfo_results']
-    df = st.session_state['df']
+
+
+if 'cv_results' in st.session_state:
+
+
+
+    cv_results = st.session_state['cv_results']
+
+
+
+    price_df = st.session_state['df']
+
+
+
     
+
+
+
+    # --- Proactive Fix: Manually parse results for robustness ---
+
+
+
+    # The decorated WFO function returns a tuple: (oos_pf, best_params, in_sample_perf)
+
+
+
+    # We manually unpack these results from the `out` attribute of the CrossValidator object.
+
+
+
+    # This is more robust than relying on helper methods like .get_oos_portfolios().
+
+
+
+    all_outputs = cv_results.out
+
+
+
+    oos_portfolios = [output[0] for output in all_outputs]
+
+
+
+    best_params_list = [output[1] for output in all_outputs]
+
+
+
+
+
+
+
+    # Create the stitched portfolio and the DataFrame of best parameters
+    stitched_pf = vbt.Portfolio.row_stack(oos_portfolios)
+    best_params_per_fold = pd.DataFrame(best_params_list)
+
+
+
+    best_params_per_fold.index.name = 'Split'
+
+
+
+    
+
+
+
     st.divider()
-    st.header("📊 Optimization Results")
+
+
+
+    st.header("📊 SOTA WFO Results")
+
+
+
     
-    # 1. Summary Metrics
-    if results['out_of_sample_performance']:
-        oos_df = pd.DataFrame(results['out_of_sample_performance'])
-        
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Avg Return", f"{oos_df['return'].mean():.2f}%")
-        col2.metric("Avg Sharpe", f"{oos_df['sharpe'].mean():.2f}")
-        col3.metric("Avg Max Drawdown", f"{oos_df['max_drawdown'].mean():.2f}%")
-        col4.metric("Avg Win Rate", f"{oos_df['win_rate'].mean():.2f}%")
-    
-    # Tabs for different views
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 OOS Performance", "🔍 Parameters", "📉 Drawdowns & Returns", "📋 Raw Data", "🏆 Final Backtest"])
-    
+
+
+
+    # --- Main Stitched Portfolio Stats ---
+
+
+
+    st.subheader("Stitched Out-of-Sample Performance")
+
+
+
+    stats = stitched_pf.stats()
+
+
+
+    col1, col2, col3, col4 = st.columns(4)
+
+
+
+    col1.metric("Total Return", f"{stats['Total Return [%]']:.2f}%")
+
+
+
+    col2.metric("Sharpe Ratio", f"{stats['Sharpe Ratio']:.2f}")
+
+
+
+    col3.metric("Max Drawdown", f"{stats['Max Drawdown [%]']:.2f}%")
+
+
+
+    col4.metric("Win Rate", f"{stats['Win Rate [%]']:.2f}%")
+
+
+
+
+
+
+
+    # --- Tabs for different views ---
+
+
+
+    tab1, tab2, tab3 = st.tabs(["📈 Overall Performance", "🔍 Window Analysis", "📋 Trade Details"])
+
+
+
+
+
+
+
     with tab1:
-        # Combined Chart: Price + Windows
-        st.subheader("Price Series with Walk-Forward Windows")
-        
-        # Using Plotly for interactive chart
-        fig = go.Figure()
-        
-        # Price Line
-        if 'Close' in df.columns:
-            price_col = 'Close'
-        else:
-            price_col = df.columns[0]
-            
-        fig.add_trace(go.Scatter(x=df.index, y=df[price_col], mode='lines', name='Price', line=dict(color='#1f77b4', width=1)))
-        
-        # Add Windows
-        colors = {'train': 'rgba(0, 255, 0, 0.1)', 'test': 'rgba(255, 0, 0, 0.1)'}
-        
-        for i, window in enumerate(results['window_results']):
-            info = window['window_info']
-            # IS
-            if info['in_sample_start'] and info['in_sample_end']:
-                fig.add_vrect(
-                    x0=info['in_sample_start'], x1=info['in_sample_end'],
-                    fillcolor=colors['train'], layer="below", line_width=0,
-                    annotation_text=f"W{i+1} Train" if i==0 else None
-                )
-            # OOS
-            if info['out_sample_start'] and info['out_sample_end']:
-                fig.add_vrect(
-                    x0=info['out_sample_start'], x1=info['out_sample_end'],
-                    fillcolor=colors['test'], layer="below", line_width=0,
-                    annotation_text=f"W{i+1} Test" if i==0 else None
-                )
-                
-        fig.update_layout(height=500, template="plotly_dark", title_text="Market Data & WFO Windows")
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # OOS Performance per Window
-        if results['out_of_sample_performance']:
-            st.subheader("Out-of-Sample Performance by Window")
-            oos_metrics_df = pd.DataFrame(results['out_of_sample_performance'])
-            oos_metrics_df['Window'] = oos_metrics_df['window'].astype(str)
-            
-            fig_bar = make_subplots(specs=[[{"secondary_y": True}]])
-            
-            fig_bar.add_trace(go.Bar(
-                x=oos_metrics_df['Window'], y=oos_metrics_df['return'],
-                name="Return %", marker_color='rgb(55, 83, 109)'
-            ), secondary_y=False)
-            
-            fig_bar.add_trace(go.Scatter(
-                x=oos_metrics_df['Window'], y=oos_metrics_df['sharpe'],
-                name="Sharpe Ratio", mode='lines+markers', line=dict(color='rgb(26, 118, 255)')
-            ), secondary_y=True)
-            
-            fig_bar.update_layout(height=400, template="plotly_dark", title_text="Returns & Sharpe Ratio per Window")
-            fig_bar.update_yaxes(title_text="Return %", secondary_y=False)
-            fig_bar.update_yaxes(title_text="Sharpe Ratio", secondary_y=True)
-            
-            st.plotly_chart(fig_bar, use_container_width=True)
+
+        st.subheader("Stitched Equity Curve & Drawdowns")
+
+        st.plotly_chart(stitched_pf.plot(subplots=['cum_returns', 'drawdowns']), use_container_width=True)
+
+        st.subheader("Full Period Performance Stats")
+
+        # Convert stats to string to avoid PyArrow serialization errors with Timedelta objects
+        st.dataframe(stats.astype(str))
+
+
+
+
+
+
 
     with tab2:
-        st.subheader("Parameter Stability Analysis")
-        params_df = pd.DataFrame(results['best_params'])
+
+
+
+        st.subheader("Out-of-Sample Window Performance")
+
+
+
+
+
+
+
+        # Create a dataframe of performance metrics for each OOS window
+
+
+
+        window_metrics = []
+
+
+
+        for i, pf in enumerate(oos_portfolios):
+
+
+
+            s = pf.stats()
+
+
+
+            metrics = {
+
+
+
+                'Window': i,
+
+
+
+                'Return %': s['Total Return [%]'],
+
+
+
+                'Sharpe Ratio': s['Sharpe Ratio'],
+
+
+
+                'Max DD %': s['Max Drawdown [%]'],
+
+
+
+                'Win Rate %': s['Win Rate [%]'],
+
+
+
+                '# Trades': s['Total Trades'],
+
+
+
+            }
+
+
+
+            window_metrics.append(metrics)
+
+
+
+        window_metrics_df = pd.DataFrame(window_metrics)
+
+
+
+
+
+
+
+        st.dataframe(window_metrics_df)
+
+
+
+
+
+
+
+        st.subheader("Best Parameters per Window")
+
+
+
+        st.dataframe(best_params_per_fold)
+
+
+
         
-        # Filter numeric parameters only
-        numeric_cols = params_df.select_dtypes(include=[np.number]).columns
-        numeric_cols = [c for c in numeric_cols if c not in ['window', 'metric1_name', 'metric2_name']] # Filter out non-params
-        
-        if numeric_cols:
-            # Normalize for heatmap
-            norm_df = params_df[numeric_cols].copy()
-            for col in norm_df.columns:
-                if norm_df[col].max() != norm_df[col].min():
-                    norm_df[col] = (norm_df[col] - norm_df[col].min()) / (norm_df[col].max() - norm_df[col].min())
-                else:
-                    norm_df[col] = 0.5 # Constant parameter
-            
-            fig_heat = px.imshow(
-                norm_df.T, 
-                labels=dict(x="Window", y="Parameter", color="Normalized Value"),
-                x=list(range(1, len(params_df)+1)),
-                aspect="auto",
-                color_continuous_scale="Viridis"
+
+
+
+        st.subheader("Parameter Stability")
+
+
+
+        # Check if there are any parameters to plot
+
+
+
+        if not best_params_per_fold.empty:
+
+
+
+            fig_line = go.Figure()
+
+
+
+            for param_name in best_params_per_fold.columns:
+
+
+
+                # Ensure data is numeric before plotting
+
+
+
+                if pd.api.types.is_numeric_dtype(best_params_per_fold[param_name]):
+
+
+
+                    fig_line.add_trace(go.Scatter(
+
+
+
+                        x=best_params_per_fold.index,
+
+
+
+                        y=best_params_per_fold[param_name],
+
+
+
+                        mode='lines+markers',
+
+
+
+                        name=param_name
+
+
+
+                    ))
+
+
+
+            fig_line.update_layout(
+
+
+
+                title="Optimal Parameter Evolution Across Windows",
+
+
+
+                xaxis_title="Window",
+
+
+
+                yaxis_title="Parameter Value",
+
+
+
+                template="plotly_dark",
+
+
+
+                height=500
+
+
+
             )
-            fig_heat.update_layout(title="Parameter Evolution Across Windows (Normalized)", height=500)
-            st.plotly_chart(fig_heat, use_container_width=True)
-            
-            st.markdown("**Raw Parameter Values per Window:**")
-            st.dataframe(params_df)
+
+
+
+            st.plotly_chart(fig_line, use_container_width=True)
+
+
+
         else:
-            st.warning("No numeric parameters to visualize.")
+
+
+
+            st.warning("No parameter data to display.")
+
+
+
+
+
+
 
     with tab3:
-        if results['out_of_sample_performance']:
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.subheader("Win Rate Distribution")
-                fig_hist = px.histogram(oos_df, x="win_rate", nbins=10, title="Win Rate Distribution", template="plotly_dark")
-                st.plotly_chart(fig_hist, use_container_width=True)
-            
-            with col_b:
-                st.subheader("Drawdown Distribution")
-                fig_dd = px.histogram(oos_df, x="max_drawdown", nbins=10, title="Max Drawdown Distribution", template="plotly_dark", color_discrete_sequence=['red'])
-                st.plotly_chart(fig_dd, use_container_width=True)
 
-    with tab4:
-        st.subheader("Detailed Results Data")
-        st.write("Out-of-Sample Metrics:")
-        st.dataframe(pd.DataFrame(results['out_of_sample_performance']))
-        
-        st.write("In-Sample Metrics:")
-        st.dataframe(pd.DataFrame(results['in_sample_performance']))
-        
-        st.write("Full Results Object (JSON):")
-        with st.expander("Show JSON"):
-            # Exclude large dataframes for display
-            clean_res = {k:v for k,v in results.items() if k not in ['window_results']}
-            st.json(clean_res)
+        st.subheader("All Stitched Trades")
+
+        st.dataframe(stitched_pf.trades.records_readable.astype(str))
+
+    # ==============================================================================
+    # FINAL BACKTEST (WHOLE DATASET)
+    # ==============================================================================
+    st.divider()
+    st.header("🏁 Final Backtest (Whole Dataset)")
+    st.info("Run a single backtest on the entire dataset using the average best parameters found during WFO.")
     
-    with tab5:
-        st.subheader("🏆 Final Backtest Results")
+    if st.button("▶️ Run Final Backtest", type="primary"):
+        run_final_backtest_logic_v2()
+
+    if 'final_portfolio_v2' in st.session_state:
+        fpf = st.session_state['final_portfolio_v2']
+        fparams = st.session_state.get('final_params_v2', {})
         
-        if 'final_portfolio' in st.session_state:
-            pf = st.session_state['final_portfolio']
-            params = st.session_state['final_params']
-            
-            st.markdown(f"**Used Parameters (Averaged):** `{params}`")
-            
-            # Metrics
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Total Return", f"{pf.total_return * 100:.2f}%")
-            m2.metric("Sharpe Ratio", f"{pf.sharpe_ratio:.2f}")
-            m3.metric("Max Drawdown", f"{pf.max_drawdown * 100:.2f}%")
-            m4.metric("Win Rate", f"{pf.trades.win_rate * 100:.2f}%")
-            
-            st.markdown("#### Cumulative Returns")
-            # VectorBT plot is a FigureWidget, convert to compatible format or use st.plotly_chart
-            # pf.plot() returns a FigureWidget. st.plotly_chart handles it.
-            st.plotly_chart(pf.plot(), use_container_width=True)
-            
-            st.markdown("#### Trade Stats")
-            st.dataframe(pf.trades.stats())
-            
-        else:
-            st.info("Click **Run Final Backtest** in the sidebar to generate results.")
+        st.success("Final Backtest Completed!")
+        st.write("### 🧠 Average Parameters Used:")
+        st.json(fparams)
+        
+        fstats = fpf.stats()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Final Return", f"{fstats['Total Return [%]']:.2f}%")
+        c2.metric("Final Sharpe", f"{fstats['Sharpe Ratio']:.2f}")
+        c3.metric("Final Max DD", f"{fstats['Max Drawdown [%]']:.2f}%")
+        c4.metric("Final Win Rate", f"{fstats['Win Rate [%]']:.2f}%")
+        
+        st.subheader("Final Equity Curve")
+        st.plotly_chart(fpf.plot(subplots=['cum_returns', 'drawdowns']), use_container_width=True)
 
 elif not os.path.exists(DEFAULT_DATA_FILE):
+
     st.warning(f"⚠️ Default data file not found at: `{DEFAULT_DATA_FILE}`. Please configure the data source in the sidebar.")
+
 else:
-    st.info("👈 Click **Start Optimization** in the sidebar to run the backtest.")
+
+    st.info("👈 Click **Start SOTA WFO** in the sidebar to run the new backtest.")
