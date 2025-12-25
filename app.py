@@ -65,7 +65,7 @@ with st.sidebar:
                     'use_numba': 'use_numba', 'metric1_name': 'metric1_name', 
                     'metric2_name': 'metric2_name', 'weight_metric1': 'weight_metric1',
                     'weight_metric2': 'weight_metric2', 'patience_level': 'patience_level',
-                    'max_trials': 'max_trials'
+                    'max_trials': 'max_trials', 'neighbor_count': 'neighbor_count'
                 }
                 for conf_key, widget_key in state_map.items():
                     if conf_key in loaded_config:
@@ -163,6 +163,7 @@ with st.sidebar:
         patience_level = st.selectbox("Patience Level (Bayesian/Optuna)", options=patience_levels, index=1, key='patience_level')
         
         max_trials = st.number_input("Max Trials (Bayesian/Optuna)", min_value=10, value=200, step=10, key='max_trials')
+        neighbor_count = st.number_input("Stability Neighbor Count", min_value=1, value=5, step=1, key='neighbor_count')
         
         backends = ['thread', 'dask', 'ray', 'pathos']
         parallel_backend = st.selectbox("Parallel Backend", options=backends, index=0, key='parallel_backend')
@@ -205,6 +206,7 @@ def get_current_config():
         'optimization_method': optimization_method,
         'patience_level': patience_level,
         'max_trials': max_trials,
+        'neighbor_count': neighbor_count,
         'parallel_backend': parallel_backend,
         'max_workers': max_workers,
         'use_numba': use_numba
@@ -250,31 +252,77 @@ def run_final_backtest_logic():
         best_window = None
         best_is_metrics = None
         best_oos_metrics = None
-        skip_keys = {
-            'combined_score', 'metric1_name', 'metric2_name', 'weight_metric1',
-            'weight_metric2', 'window'
-        }
+
+        metric1_name = config.get('metric1_name', 'sharpe_ratio')
+        metric2_name = config.get('metric2_name', 'total_return')
+        weight_metric1 = float(config.get('weight_metric1', 1.0))
+        weight_metric2 = float(config.get('weight_metric2', 0.0))
+
+        def get_metric_value(row, name):
+            if not row:
+                return None
+            if name == 'max_drawdown':
+                value = row.get('max_drawdown')
+                return None if value is None else -value
+            if name == 'sharpe_ratio':
+                return row.get('sharpe')
+            if name == 'total_return':
+                return row.get('return')
+            if name == 'win_rate':
+                return row.get('win_rate')
+            if name == 'avg_gain_per_trade':
+                return row.get('avg_gain_per_trade')
+            if name == 'avg_loss_per_trade':
+                value = row.get('avg_loss_per_trade')
+                return None if value is None else -value
+            if name == 'avg_pl_per_trade':
+                return row.get('avg_pl_per_trade')
+            return None
+
+        def combined_score(row):
+            total_weight = weight_metric1 + weight_metric2
+            if total_weight == 0:
+                return None
+            m1 = get_metric_value(row, metric1_name)
+            m2 = get_metric_value(row, metric2_name)
+            if weight_metric1 != 0 and m1 is None:
+                return None
+            if weight_metric2 != 0 and m2 is None:
+                return None
+            if m1 is None:
+                m1 = 0.0
+            if m2 is None:
+                m2 = 0.0
+            return (weight_metric1 * m1 + weight_metric2 * m2) / total_weight
+
+        is_map = {row.get('window'): row for row in wfo_results.get('in_sample_performance', [])}
+        oos_map = {row.get('window'): row for row in wfo_results.get('out_of_sample_performance', [])}
+
         for window in wfo_results.get('window_results', []):
-            opt_results = window.get('optimization_results') or []
-            if not opt_results:
+            window_id = window.get('window_info', {}).get('window')
+            if window_id is None:
                 continue
-            candidate = opt_results[0]
-            score = candidate.get('combined_score')
-            if score is None:
+            is_row = is_map.get(window_id)
+            oos_row = oos_map.get(window_id)
+            is_score = combined_score(is_row)
+            oos_score = combined_score(oos_row)
+
+            if is_score is None and oos_score is None:
                 continue
-            if best_score is None or score > best_score:
-                best_score = score
-                best_params = {k: v for k, v in candidate.items() if k not in skip_keys}
-                best_window = window.get('window_info', {}).get('window')
-                if best_window is not None:
-                    for row in wfo_results.get('in_sample_performance', []):
-                        if row.get('window') == best_window:
-                            best_is_metrics = row
-                            break
-                    for row in wfo_results.get('out_of_sample_performance', []):
-                        if row.get('window') == best_window:
-                            best_oos_metrics = row
-                            break
+            if is_score is None:
+                window_score = oos_score
+            elif oos_score is None:
+                window_score = is_score
+            else:
+                window_score = (is_score + oos_score) / 2
+
+            if best_score is None or window_score > best_score:
+                best_score = window_score
+                best_params = (window.get('best_params') or {}).copy()
+                best_window = window_id
+                best_is_metrics = is_row
+                best_oos_metrics = oos_row
+
         return best_params, best_score, best_window, best_is_metrics, best_oos_metrics
 
     # Use the single best parameter set across all windows (by combined_score).
@@ -294,11 +342,55 @@ def run_final_backtest_logic():
         elif isinstance(chosen_params[param], float):
             chosen_params[param] = round(chosen_params[param], 2)
 
+    metric1_name = config.get('metric1_name', 'sharpe_ratio')
+    metric2_name = config.get('metric2_name', 'total_return')
+    weight_metric1 = float(config.get('weight_metric1', 1.0))
+    weight_metric2 = float(config.get('weight_metric2', 0.0))
+
+    def get_metric_value(row, name):
+        if not row:
+            return None
+        if name == 'max_drawdown':
+            value = row.get('max_drawdown')
+            return None if value is None else -value
+        if name == 'sharpe_ratio':
+            return row.get('sharpe')
+        if name == 'total_return':
+            return row.get('return')
+        if name == 'win_rate':
+            return row.get('win_rate')
+        if name == 'avg_gain_per_trade':
+            return row.get('avg_gain_per_trade')
+        if name == 'avg_loss_per_trade':
+            value = row.get('avg_loss_per_trade')
+            return None if value is None else -value
+        if name == 'avg_pl_per_trade':
+            return row.get('avg_pl_per_trade')
+        return None
+
+    def combined_score(row):
+        total_weight = weight_metric1 + weight_metric2
+        if total_weight == 0:
+            return None
+        m1 = get_metric_value(row, metric1_name)
+        m2 = get_metric_value(row, metric2_name)
+        if weight_metric1 != 0 and m1 is None:
+            return None
+        if weight_metric2 != 0 and m2 is None:
+            return None
+        if m1 is None:
+            m1 = 0.0
+        if m2 is None:
+            m2 = 0.0
+        return (weight_metric1 * m1 + weight_metric2 * m2) / total_weight
+
     st.session_state['final_params'] = chosen_params
     st.session_state['final_params_score'] = best_score
     st.session_state['final_params_window'] = best_window
     st.session_state['final_params_is_metrics'] = best_is_metrics
     st.session_state['final_params_oos_metrics'] = best_oos_metrics
+    st.session_state['final_params_is_score'] = combined_score(best_is_metrics)
+    st.session_state['final_params_oos_score'] = combined_score(best_oos_metrics)
     
     with st.spinner("Running Final Backtest on Full Dataset..."):
         try:
@@ -614,11 +706,17 @@ if 'wfo_results' in st.session_state:
             best_window = st.session_state.get('final_params_window')
             best_is_metrics = st.session_state.get('final_params_is_metrics')
             best_oos_metrics = st.session_state.get('final_params_oos_metrics')
+            best_is_score = st.session_state.get('final_params_is_score')
+            best_oos_score = st.session_state.get('final_params_oos_score')
             
             if best_score is not None:
                 st.markdown(f"**Best Optimization Score (combined_score):** `{best_score:.4f}`")
             if best_window is not None:
                 st.markdown(f"**Best Window (WFO):** `{best_window}`")
+            if best_is_score is not None:
+                st.markdown(f"**IS Combined Score:** `{best_is_score:.4f}`")
+            if best_oos_score is not None:
+                st.markdown(f"**OOS Combined Score:** `{best_oos_score:.4f}`")
             st.markdown(f"**Used Parameters (Best Window):** `{params}`")
             if best_is_metrics:
                 st.markdown(

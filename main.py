@@ -221,6 +221,7 @@ def get_wfo_settings(config):
     settings.use_numba = config.get('use_numba', True)
     settings.patience_level = config.get('patience_level', 'Medium')
     settings.max_trials = config.get('max_trials', 200)
+    settings.neighbor_count = config.get('neighbor_count', 5)
     
     return settings
 

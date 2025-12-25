@@ -41,3 +41,4 @@ class WFOSettings:
         self.optimization_method = "bayesian"  # Optimization method ('bayesian', 'optuna', 'grid')
         self.patience_level = "Medium"   # Patience for Bayesian/Optuna early stopping
         self.max_trials = 200            # Maximum number of trials for Bayesian/Optuna optimization
+        self.neighbor_count = 5          # Neighbor count for stability selection

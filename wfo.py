@@ -367,6 +367,39 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
     
     return sorted_results, evaluation_count
 
+def get_stable_best_params(optimization_results, param_grid, neighbor_count=5, score_col='combined_score'):
+    if optimization_results is None or optimization_results.empty:
+        raise ValueError("optimization_results must be a non-empty DataFrame.")
+    if score_col not in optimization_results.columns:
+        raise ValueError(f"'{score_col}' not found in optimization_results.")
+
+    param_cols = [k for k in param_grid.keys() if k in optimization_results.columns]
+    numeric_cols = [c for c in param_cols if pd.api.types.is_numeric_dtype(optimization_results[c])]
+    if not numeric_cols:
+        return optimization_results.iloc[0], None
+
+    values = optimization_results[numeric_cols].astype(float).to_numpy()
+    mins = np.nanmin(values, axis=0)
+    maxs = np.nanmax(values, axis=0)
+    scales = np.where(maxs - mins == 0, 1.0, maxs - mins)
+    norm_vals = (values - mins) / scales
+
+    scores = pd.to_numeric(optimization_results[score_col], errors='coerce').to_numpy()
+    k = max(1, min(neighbor_count, len(optimization_results)))
+    smoothed = np.full(len(optimization_results), np.nan, dtype=float)
+
+    for i in range(len(optimization_results)):
+        dists = np.linalg.norm(norm_vals - norm_vals[i], axis=1)
+        idx = np.argpartition(dists, k - 1)[:k]
+        smoothed[i] = np.nanmean(scores[idx])
+
+    if np.all(np.isnan(smoothed)):
+        return optimization_results.iloc[0], None
+
+    best_pos = int(np.nanargmax(smoothed))
+    best_row = optimization_results.iloc[best_pos]
+    return best_row, smoothed[best_pos]
+
 def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe='5s', settings=None, status_callback=None, control=None):
     """
     Performs Walk-Forward Optimization on the given data with timing measurements.
@@ -422,6 +455,19 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     # Calculate the size of each window
     total_rows = len(df)
     window_size = total_rows // settings.n_windows
+
+    def calc_avg_pl(port):
+        total_ret = port.total_return * 100
+        n_trades = port.trades.count()
+        if n_trades is None or n_trades == 0:
+            return 0.0
+        avg_pl = total_ret / n_trades
+        if hasattr(avg_pl, 'replace'):
+            avg_pl = avg_pl.replace([np.inf, -np.inf], 0).fillna(0)
+        else:
+            if np.isinf(avg_pl) or np.isnan(avg_pl):
+                avg_pl = 0.0
+        return avg_pl
     
     # Store WFO results
     wfo_results = {
@@ -438,7 +484,8 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
             'metric_weights': settings.metric_weights,
             'parallel_backend': settings.parallel_backend,
             'use_numba': settings.use_numba,
-            'optimization_method': settings.optimization_method
+            'optimization_method': settings.optimization_method,
+            'neighbor_count': getattr(settings, 'neighbor_count', 5)
         }
     }
     
@@ -525,11 +572,22 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
         optimization_time = time.time() - optimization_start
         optimization_times.append(optimization_time)
         
-        # Get best parameters
-        best_params = optimization_results.iloc[0].drop(['combined_score', metrics_info['metric1_name'], metrics_info['metric2_name']], errors='ignore').to_dict()
+        # Get best parameters using stability selection
+        neighbor_count = getattr(settings, 'neighbor_count', 5)
+        best_row, stable_score = get_stable_best_params(
+            optimization_results,
+            param_grid,
+            neighbor_count=neighbor_count
+        )
+        best_params = best_row.drop(
+            ['combined_score', metrics_info['metric1_name'], metrics_info['metric2_name']],
+            errors='ignore'
+        ).to_dict()
         
         log(f"Best parameters found: {best_params}")
-        log(f"Score: {optimization_results.iloc[0]['combined_score']:.4f}")
+        log(f"Score: {best_row['combined_score']:.4f}")
+        if stable_score is not None:
+            log(f"Stable score (neighbor avg): {stable_score:.4f}")
         log(f"Optimization time: {timedelta(seconds=int(optimization_time))}")
         
         # Test best parameters on in-sample data
@@ -541,6 +599,9 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
             'sharpe': in_sample_portfolio.sharpe_ratio,
             'max_drawdown': in_sample_portfolio.max_drawdown * 100,
             'win_rate': in_sample_portfolio.trades.win_rate,
+            'avg_gain_per_trade': in_sample_portfolio.trades.avg_winning_trade,
+            'avg_loss_per_trade': in_sample_portfolio.trades.avg_losing_trade,
+            'avg_pl_per_trade': calc_avg_pl(in_sample_portfolio),
             'calmar_ratio': in_sample_portfolio.calmar_ratio if in_sample_portfolio.max_drawdown > 0 else np.nan,
             'sortino_ratio': in_sample_portfolio.sortino_ratio,
             'n_trades': len(in_sample_portfolio.trades)
@@ -567,6 +628,9 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
                 'sharpe': out_sample_portfolio.sharpe_ratio,
                 'max_drawdown': out_sample_portfolio.max_drawdown * 100,
                 'win_rate': out_sample_portfolio.trades.win_rate,  #* 100,
+                'avg_gain_per_trade': out_sample_portfolio.trades.avg_winning_trade,
+                'avg_loss_per_trade': out_sample_portfolio.trades.avg_losing_trade,
+                'avg_pl_per_trade': calc_avg_pl(out_sample_portfolio),
                 'calmar_ratio': out_sample_portfolio.calmar_ratio if out_sample_portfolio.max_drawdown > 0 else np.nan,
                 'sortino_ratio': out_sample_portfolio.sortino_ratio,
                 'n_trades': len(out_sample_portfolio.trades)
