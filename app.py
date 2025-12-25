@@ -243,31 +243,66 @@ def run_final_backtest_logic():
     results = st.session_state['wfo_results']
     df = st.session_state['df']
     config = get_current_config()
-    
-    # Calculate average parameters
-    params_df = pd.DataFrame(results['best_params'])
-    avg_params = {}
-    
+
+    def select_best_params(wfo_results):
+        best_params = None
+        best_score = None
+        best_window = None
+        best_is_metrics = None
+        best_oos_metrics = None
+        skip_keys = {
+            'combined_score', 'metric1_name', 'metric2_name', 'weight_metric1',
+            'weight_metric2', 'window'
+        }
+        for window in wfo_results.get('window_results', []):
+            opt_results = window.get('optimization_results') or []
+            if not opt_results:
+                continue
+            candidate = opt_results[0]
+            score = candidate.get('combined_score')
+            if score is None:
+                continue
+            if best_score is None or score > best_score:
+                best_score = score
+                best_params = {k: v for k, v in candidate.items() if k not in skip_keys}
+                best_window = window.get('window_info', {}).get('window')
+                if best_window is not None:
+                    for row in wfo_results.get('in_sample_performance', []):
+                        if row.get('window') == best_window:
+                            best_is_metrics = row
+                            break
+                    for row in wfo_results.get('out_of_sample_performance', []):
+                        if row.get('window') == best_window:
+                            best_oos_metrics = row
+                            break
+        return best_params, best_score, best_window, best_is_metrics, best_oos_metrics
+
+    # Use the single best parameter set across all windows (by combined_score).
+    chosen_params, best_score, best_window, best_is_metrics, best_oos_metrics = select_best_params(results)
+    if not chosen_params:
+        st.error("No valid parameters found for final backtest.")
+        return
+
     # Define integer parameters that should be rounded
-    int_params = ['timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']
-    
-    for param in params_df.columns:
-        if param in ['window', 'metric1_name', 'metric2_name']:
-            continue
-        try:
-            mean_val = params_df[param].mean()
-            if param in int_params:
-                avg_params[param] = int(round(mean_val))
-            else:
-                avg_params[param] = round(mean_val, 2)
-        except:
-            pass # Skip non-numeric
-            
-    st.session_state['final_params'] = avg_params
+    int_params = {'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length'}
+    for param in list(chosen_params.keys()):
+        if param in int_params:
+            try:
+                chosen_params[param] = int(round(float(chosen_params[param])))
+            except Exception:
+                pass
+        elif isinstance(chosen_params[param], float):
+            chosen_params[param] = round(chosen_params[param], 2)
+
+    st.session_state['final_params'] = chosen_params
+    st.session_state['final_params_score'] = best_score
+    st.session_state['final_params_window'] = best_window
+    st.session_state['final_params_is_metrics'] = best_is_metrics
+    st.session_state['final_params_oos_metrics'] = best_oos_metrics
     
     with st.spinner("Running Final Backtest on Full Dataset..."):
         try:
-            final_portfolio = run_backtest(df, avg_params, config['timeframe'], return_portfolio=True)
+            final_portfolio = run_backtest(df, chosen_params, config['timeframe'], return_portfolio=True)
             st.session_state['final_portfolio'] = final_portfolio
             st.success("Final Backtest Complete!")
         except Exception as e:
@@ -575,8 +610,34 @@ if 'wfo_results' in st.session_state:
         if 'final_portfolio' in st.session_state:
             pf = st.session_state['final_portfolio']
             params = st.session_state['final_params']
+            best_score = st.session_state.get('final_params_score')
+            best_window = st.session_state.get('final_params_window')
+            best_is_metrics = st.session_state.get('final_params_is_metrics')
+            best_oos_metrics = st.session_state.get('final_params_oos_metrics')
             
-            st.markdown(f"**Used Parameters (Averaged):** `{params}`")
+            if best_score is not None:
+                st.markdown(f"**Best Optimization Score (combined_score):** `{best_score:.4f}`")
+            if best_window is not None:
+                st.markdown(f"**Best Window (WFO):** `{best_window}`")
+            st.markdown(f"**Used Parameters (Best Window):** `{params}`")
+            if best_is_metrics:
+                st.markdown(
+                    f"**IS (Window {best_is_metrics['window']}):** "
+                    f"Return `{best_is_metrics['return']:.2f}%`, "
+                    f"Sharpe `{best_is_metrics['sharpe']:.2f}`, "
+                    f"Max DD `{best_is_metrics['max_drawdown']:.2f}%`, "
+                    f"Win Rate `{best_is_metrics['win_rate']:.2f}%`, "
+                    f"Trades `{best_is_metrics['n_trades']}`"
+                )
+            if best_oos_metrics:
+                st.markdown(
+                    f"**OOS (Window {best_oos_metrics['window']}):** "
+                    f"Return `{best_oos_metrics['return']:.2f}%`, "
+                    f"Sharpe `{best_oos_metrics['sharpe']:.2f}`, "
+                    f"Max DD `{best_oos_metrics['max_drawdown']:.2f}%`, "
+                    f"Win Rate `{best_oos_metrics['win_rate']:.2f}%`, "
+                    f"Trades `{best_oos_metrics['n_trades']}`"
+                )
             
             # Metrics
             m1, m2, m3, m4 = st.columns(4)

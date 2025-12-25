@@ -97,6 +97,34 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         with backtest_cache_lock:
             backtest_cache[cache_key] = score
         return score
+
+    def expand_param_values(bounds):
+        if isinstance(bounds, (list, tuple)):
+            if len(bounds) == 1 and isinstance(bounds[0], (int, float)):
+                return [bounds[0]]
+            if len(bounds) == 3 and all(isinstance(b, (int, float)) for b in bounds[:2]):
+                min_val, max_val, step = bounds
+                if step == 0:
+                    return [min_val]
+                count = int(np.floor((max_val - min_val) / step)) + 1
+                values = [min_val + step * i for i in range(max(count, 1))]
+                return values
+            if len(bounds) >= 2 and all(isinstance(b, (int, float)) for b in bounds):
+                return list(bounds)
+        raise ValueError(f"Unsupported bounds format: {bounds}")
+
+    def split_params(grid):
+        tunable = {}
+        fixed = {}
+        for key, bounds in grid.items():
+            values = expand_param_values(bounds)
+            if len(values) == 1:
+                fixed[key] = values[0]
+            else:
+                tunable[key] = values
+        return tunable, fixed
+
+    tunable_grid, fixed_params = split_params(param_grid)
     
     if method == "grid":
         print("Using Vectorized Grid Search...")
@@ -173,28 +201,15 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         
     elif method == "bayesian":
         # Bayesian optimization (Iterative)
-        def extract_bounds(bounds):
-            if isinstance(bounds, (list, tuple)):
-                if len(bounds) == 1 and isinstance(bounds[0], (int, float)):
-                    return bounds[0], bounds[0], 1
-                if len(bounds) == 3 and all(isinstance(b, (int, float)) for b in bounds[:2]):
-                    return bounds
-                if len(bounds) >= 2 and all(isinstance(b, (int, float)) for b in bounds[:2]):
-                    step = max(abs(bounds[1] - bounds[0]), 1)
-                    return bounds[0], bounds[-1], step
-            raise ValueError(f"Unsupported bounds format for Bayesian optimization: {bounds}")
-        
-        continuous_ranges = []
-        for bounds in param_grid.values():
-            min_val, max_val, _ = extract_bounds(bounds)
-            continuous_ranges.append(max(max_val - min_val, 1e-3))
-        estimated_space_size = min(1000, max(1, int(np.prod(continuous_ranges))))
-        total_combinations = estimated_space_size
+        if tunable_grid:
+            total_combinations = int(np.prod([len(values) for values in tunable_grid.values()]))
+        else:
+            total_combinations = 1
         
         # Use user-defined max_trials, capped by total search space size
         max_trials = getattr(settings, 'max_trials', 200)
-        n_calls = min(max_trials, total_combinations)
-        n_initial_points = min(50, max(10, int(0.1 * n_calls)))
+        n_calls = max(1, min(max_trials, total_combinations))
+        n_initial_points = min(50, n_calls, max(1, int(0.1 * n_calls)))
         
         # Patience logic
         patience_level = getattr(settings, 'patience_level', 'Medium')
@@ -243,18 +258,12 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
                 if control.should_stop():
                     raise OptimizationInterrupted()
             params = {}
-            for param_name, bounds in param_grid.items():
-                min_val, max_val, step = extract_bounds(bounds)
-                if min_val == max_val:
-                    params[param_name] = min_val
-                elif param_name in int_params:
-                    params[param_name] = trial.suggest_int(param_name, int(min_val), int(max_val), step=int(max(step, 1)))
+            for param_name, values in tunable_grid.items():
+                if param_name in int_params:
+                    params[param_name] = int(trial.suggest_categorical(param_name, values))
                 else:
-                    params[param_name] = trial.suggest_float(
-                        param_name,
-                        float(min_val),
-                        float(max_val)
-                    )
+                    params[param_name] = float(trial.suggest_categorical(param_name, values))
+            params.update(fixed_params)
             params.update(metrics_info)
             score = evaluate_params(params)
             
@@ -283,10 +292,8 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
             param_dict = trial.params.copy()
             
             # Re-inject fixed parameters
-            for param_name, bounds in param_grid.items():
-                min_val, max_val, step = extract_bounds(bounds)
-                if min_val == max_val:
-                    param_dict[param_name] = min_val
+            for param_name, value in fixed_params.items():
+                param_dict[param_name] = value
             
             param_dict.update(metrics_info)
             param_dict['combined_score'] = -trial.value
@@ -301,17 +308,6 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         
     elif method == "optuna":
         # Optuna (TPE) implementation - dynamic based on param_grid
-        
-        def extract_bounds(bounds):
-            if isinstance(bounds, (list, tuple)):
-                if len(bounds) == 1 and isinstance(bounds[0], (int, float)):
-                    return bounds[0], bounds[0], 1
-                if len(bounds) == 3 and all(isinstance(b, (int, float)) for b in bounds[:2]):
-                    return bounds
-                if len(bounds) >= 2 and all(isinstance(b, (int, float)) for b in bounds[:2]):
-                    step = max(abs(bounds[1] - bounds[0]), 1)
-                    return bounds[0], bounds[-1], step
-            raise ValueError(f"Unsupported bounds format for Optuna optimization: {bounds}")
             
         def objective(trial):
             if control:
@@ -319,15 +315,12 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
                 if control.should_stop():
                     raise OptimizationInterrupted()
             params = {}
-            for param_name, bounds in param_grid.items():
-                min_val, max_val, step = extract_bounds(bounds)
-                
-                if min_val == max_val:
-                    params[param_name] = min_val
-                elif param_name in ['timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']:
-                    params[param_name] = trial.suggest_int(param_name, int(min_val), int(max_val), step=int(max(step, 1)))
+            for param_name, values in tunable_grid.items():
+                if param_name in ['timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']:
+                    params[param_name] = int(trial.suggest_categorical(param_name, values))
                 else:
-                    params[param_name] = trial.suggest_float(param_name, float(min_val), float(max_val))
+                    params[param_name] = float(trial.suggest_categorical(param_name, values))
+            params.update(fixed_params)
             
             params.update(metrics_info)
             score = evaluate_params(params)
@@ -341,9 +334,9 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         study = optuna.create_study(direction='maximize')
         
         # Calculate total combinations roughly
-        total_combos = np.prod([len(values) if isinstance(values, list) else 1 for values in param_grid.values()])
+        total_combos = int(np.prod([len(values) for values in tunable_grid.values()])) if tunable_grid else 1
         max_trials = getattr(settings, 'max_trials', 200)
-        n_trials = min(max_trials, total_combos)
+        n_trials = max(1, min(max_trials, total_combos))
         
         try:
             study.optimize(objective, n_trials=n_trials)
@@ -355,10 +348,8 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
             param_dict = trial.params.copy()
             
             # Re-inject fixed parameters
-            for param_name, bounds in param_grid.items():
-                min_val, max_val, step = extract_bounds(bounds)
-                if min_val == max_val:
-                    param_dict[param_name] = min_val
+            for param_name, value in fixed_params.items():
+                param_dict[param_name] = value
             
             param_dict.update(metrics_info)
             param_dict['combined_score'] = trial.value
