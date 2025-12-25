@@ -238,7 +238,12 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
         Portfolio object or performance metric(s)
     """
     # Generate signals (vectorized)
-    signals = create_signal_generators(df, **params)
+    try:
+        signals = create_signal_generators(df, **params)
+    except KeyError as e:
+        raise ValueError(f"Missing parameter in create_signal_generators: {e}. Params keys: {list(params.keys())}")
+    except Exception as e:
+        raise RuntimeError(f"Error in create_signal_generators: {e}")
     
     # Create entry and exit conditions (vectorized)
     entry_condition, exit_condition = create_entry_exit_conditions(df, signals)

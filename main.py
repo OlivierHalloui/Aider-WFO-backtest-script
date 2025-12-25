@@ -56,6 +56,20 @@ def get_param_grid(config):
         'user_exit_sma_length': "Longueur SMA sortie"
     }
     
+    # ATDMF Strategy default parameters (Hardcoded Source of Truth)
+    strategy_params = {
+        'timeperiod': 20,
+        'StDev': 2.0,
+        'matype': 0,
+        'coeff_medianeBBW': 1.1,
+        'coef_mediane': 1.0,
+        'Nb_bars_above' : 5,
+        'fenetre_lowest': 30,
+        'seuil_lowest': 3.5,
+        'longueur_mediane': 100,
+        'user_exit_sma_length': 20
+    }
+    
     # Default parameter ranges
     default_ranges = {
         'timeperiod': (10, 30, 5),
@@ -70,9 +84,14 @@ def get_param_grid(config):
     }
     
     # Get selected parameters from config
-    selected_params = config.get('selected_params', list(DEFAULT_PARAM_GRID.keys()))
-    
+    selected_params = config.get('selected_params', [])
+    if not selected_params:
+         # Fallback if list is empty (shouldn't happen usually if app.py works right, but good for safety)
+         selected_params = list(default_ranges.keys())
+
     param_grid = {}
+    
+    # 1. Add Selected Parameters (Ranges)
     for param in selected_params:
         if param in default_ranges:
             default_min, default_max, default_step = default_ranges[param]
@@ -83,7 +102,15 @@ def get_param_grid(config):
                 param_grid[param] = list(range(int(min_val), int(max_val) + 1, int(step)))
             else:
                 param_grid[param] = list(np.round(np.arange(min_val, max_val + step, step), 1))
+    
+    # 2. Add Unselected Parameters (Fixed Defaults)
+    # Iterate over all known strategy parameters. If not in param_grid, add default as single value.
+    for param, default_val in strategy_params.items():
+        if param not in param_grid and param in default_ranges: # Only consider params that are optimizable (in ranges)
+             param_grid[param] = [default_val]
+
     return param_grid
+
 
 def display_default_parameters():
     """

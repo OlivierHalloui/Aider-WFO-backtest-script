@@ -1,2 +1,11 @@
 .aider*
 .env
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store
+.vscode/
+.idea/
+venv/
+env/
+*.swp

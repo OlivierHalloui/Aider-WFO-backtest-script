@@ -67,10 +67,8 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
     if not isinstance(param_grid, dict) or not param_grid:
         raise ValueError("param_grid must be a non-empty dict.")
     for key, bounds in param_grid.items():
-        if not isinstance(bounds, (list, tuple)) or len(bounds) < 2:
-            raise ValueError(f"param_grid['{key}'] must be a list/tuple with at least min and max.")
-        if not all(isinstance(b, (int, float)) for b in bounds[:2]):
-            raise ValueError(f"param_grid['{key}'] bounds must be numeric.")
+        if not isinstance(bounds, (list, tuple)) or len(bounds) < 1: # Modified check
+             raise ValueError(f"param_grid['{key}'] must be a list/tuple.")
     if not isinstance(in_sample_df, pd.DataFrame) or in_sample_df.empty:
         raise ValueError("in_sample_df must be a non-empty pandas DataFrame.")
     if not hasattr(settings, 'optimization_method') or settings.optimization_method.lower() not in ['grid', 'bayesian', 'optuna']:
@@ -177,6 +175,8 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         # Bayesian optimization (Iterative)
         def extract_bounds(bounds):
             if isinstance(bounds, (list, tuple)):
+                if len(bounds) == 1 and isinstance(bounds[0], (int, float)):
+                    return bounds[0], bounds[0], 1
                 if len(bounds) == 3 and all(isinstance(b, (int, float)) for b in bounds[:2]):
                     return bounds
                 if len(bounds) >= 2 and all(isinstance(b, (int, float)) for b in bounds[:2]):
@@ -245,7 +245,9 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
             params = {}
             for param_name, bounds in param_grid.items():
                 min_val, max_val, step = extract_bounds(bounds)
-                if param_name in int_params:
+                if min_val == max_val:
+                    params[param_name] = min_val
+                elif param_name in int_params:
                     params[param_name] = trial.suggest_int(param_name, int(min_val), int(max_val), step=int(max(step, 1)))
                 else:
                     params[param_name] = trial.suggest_float(
@@ -279,6 +281,13 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
             if trial.value is None:
                 continue
             param_dict = trial.params.copy()
+            
+            # Re-inject fixed parameters
+            for param_name, bounds in param_grid.items():
+                min_val, max_val, step = extract_bounds(bounds)
+                if min_val == max_val:
+                    param_dict[param_name] = min_val
+            
             param_dict.update(metrics_info)
             param_dict['combined_score'] = -trial.value
             results.append(param_dict)
@@ -292,6 +301,18 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         
     elif method == "optuna":
         # Optuna (TPE) implementation - dynamic based on param_grid
+        
+        def extract_bounds(bounds):
+            if isinstance(bounds, (list, tuple)):
+                if len(bounds) == 1 and isinstance(bounds[0], (int, float)):
+                    return bounds[0], bounds[0], 1
+                if len(bounds) == 3 and all(isinstance(b, (int, float)) for b in bounds[:2]):
+                    return bounds
+                if len(bounds) >= 2 and all(isinstance(b, (int, float)) for b in bounds[:2]):
+                    step = max(abs(bounds[1] - bounds[0]), 1)
+                    return bounds[0], bounds[-1], step
+            raise ValueError(f"Unsupported bounds format for Optuna optimization: {bounds}")
+            
         def objective(trial):
             if control:
                 control.wait_if_paused()
@@ -299,10 +320,15 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
                     raise OptimizationInterrupted()
             params = {}
             for param_name, bounds in param_grid.items():
-                if param_name in ['timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']:
-                    params[param_name] = trial.suggest_int(param_name, bounds[0], bounds[1])
+                min_val, max_val, step = extract_bounds(bounds)
+                
+                if min_val == max_val:
+                    params[param_name] = min_val
+                elif param_name in ['timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']:
+                    params[param_name] = trial.suggest_int(param_name, int(min_val), int(max_val), step=int(max(step, 1)))
                 else:
-                    params[param_name] = trial.suggest_float(param_name, bounds[0], bounds[1])
+                    params[param_name] = trial.suggest_float(param_name, float(min_val), float(max_val))
+            
             params.update(metrics_info)
             score = evaluate_params(params)
             
@@ -327,6 +353,13 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
         results = []
         for trial in study.trials:
             param_dict = trial.params.copy()
+            
+            # Re-inject fixed parameters
+            for param_name, bounds in param_grid.items():
+                min_val, max_val, step = extract_bounds(bounds)
+                if min_val == max_val:
+                    param_dict[param_name] = min_val
+            
             param_dict.update(metrics_info)
             param_dict['combined_score'] = trial.value
             results.append(param_dict)
@@ -372,7 +405,7 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
     
     if settings is None:
         settings = WFOSettings()
-    
+
     # Validate inputs
     if not isinstance(df, pd.DataFrame) or df.empty:
         raise ValueError("df must be a non-empty pandas DataFrame.")
@@ -566,6 +599,7 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
         
         wfo_results['window_results'].append(window_result)
         wfo_results['best_params'].append(best_params)
+
         
         # Record window processing time
         window_time = time.time() - window_start_time

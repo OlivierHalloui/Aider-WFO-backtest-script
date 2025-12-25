@@ -490,6 +490,53 @@ if 'wfo_results' in st.session_state:
             fig_heat.update_layout(title="Parameter Evolution Across Windows (Normalized)", height=500)
             st.plotly_chart(fig_heat, use_container_width=True)
             
+            # =========================================================================
+            # BEST PARAMETERS TABLE PER WFO WINDOW
+            # =========================================================================
+            st.subheader("Best Parameters Table per WFO Window")
+
+            # Create a table showing the best parameters for each WFO window
+            if not params_df.empty:
+                # Add a 'Window' column for clarity
+                params_df_with_window = params_df.copy()
+                params_df_with_window['Window'] = list(range(1, len(params_df) + 1))
+
+                # Use Plotly for an interactive table
+                fig_table = go.Figure(data=[go.Table(
+                    header=dict(values=['Window'] + list(params_df.columns),
+                                fill_color='paleturquoise',
+                                align='left',
+                                font=dict(size=12, color='black')),
+                    cells=dict(values=[params_df_with_window['Window']] + [params_df_with_window[col] for col in params_df.columns],
+                              fill_color='lavender',
+                              align='left',
+                              font=dict(size=11, color='black'))
+                )])
+
+                fig_table.update_layout(
+                    title='Best Parameters Used for Backtesting in Each WFO Window',
+                    title_font_size=16,
+                    width=1200,
+                    height=400
+                )
+
+                # Add description as annotation
+                fig_table.add_annotation(
+                    text="This table lists the optimal parameters selected during optimization for each Walk-Forward window.<br>"
+                         "These were used to generate the backtest results shown in the out-of-sample performance.",
+                    xref="paper", yref="paper",
+                    x=0.5, y=-0.15,
+                    showarrow=False,
+                    font=dict(size=12),
+                    align="center",
+                    bgcolor="white",
+                    bordercolor="black",
+                    borderwidth=1,
+                    borderpad=10
+                )
+
+                st.plotly_chart(fig_table, use_container_width=True)
+
             st.markdown("**Raw Parameter Values per Window:**")
             st.dataframe(params_df)
         else:
