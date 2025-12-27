@@ -529,53 +529,67 @@ if 'wfo_results' in st.session_state:
         fig.update_layout(height=500, template="plotly_dark", title_text="Market Data & WFO Windows")
         st.plotly_chart(fig, use_container_width=True)
         
-        # OOS Performance per Window
-        if results['out_of_sample_performance']:
-            st.subheader("Out-of-Sample Performance by Window")
+        # IS + OOS Performance per Window (shared scale)
+        if results['out_of_sample_performance'] or results['in_sample_performance']:
+            st.subheader("In-Sample vs Out-of-Sample Performance by Window")
             oos_metrics_df = pd.DataFrame(results['out_of_sample_performance'])
-            oos_metrics_df['Window'] = oos_metrics_df['window'].astype(str)
-            
-            fig_bar = make_subplots(specs=[[{"secondary_y": True}]])
-            
-            fig_bar.add_trace(go.Bar(
-                x=oos_metrics_df['Window'], y=oos_metrics_df['return'],
-                name="Return %", marker_color='rgb(55, 83, 109)'
-            ), secondary_y=False)
-            
-            fig_bar.add_trace(go.Scatter(
-                x=oos_metrics_df['Window'], y=oos_metrics_df['sharpe'],
-                name="Sharpe Ratio", mode='lines+markers', line=dict(color='rgb(26, 118, 255)')
-            ), secondary_y=True)
-            
-            fig_bar.update_layout(height=400, template="plotly_dark", title_text="Returns & Sharpe Ratio per Window")
-            fig_bar.update_yaxes(title_text="Return %", secondary_y=False)
-            fig_bar.update_yaxes(title_text="Sharpe Ratio", secondary_y=True)
-            
-            st.plotly_chart(fig_bar, use_container_width=True)
-        
-        # IS Performance per Window
-        if results['in_sample_performance']:
-            st.subheader("In-Sample Performance by Window")
             is_metrics_df = pd.DataFrame(results['in_sample_performance'])
-            is_metrics_df['Window'] = is_metrics_df['window'].astype(str)
-            
-            fig_is = make_subplots(specs=[[{"secondary_y": True}]])
-            
-            fig_is.add_trace(go.Bar(
-                x=is_metrics_df['Window'], y=is_metrics_df['return'],
-                name="Return %", marker_color='rgb(55, 83, 109)'
-            ), secondary_y=False)
-            
-            fig_is.add_trace(go.Scatter(
-                x=is_metrics_df['Window'], y=is_metrics_df['sharpe'],
-                name="Sharpe Ratio", mode='lines+markers', line=dict(color='rgb(255, 0, 0)')
-            ), secondary_y=True)
-            
-            fig_is.update_layout(height=400, template="plotly_dark", title_text="Returns & Sharpe Ratio per Window (In-Sample)")
-            fig_is.update_yaxes(title_text="Return %", secondary_y=False)
-            fig_is.update_yaxes(title_text="Sharpe Ratio", secondary_y=True)
-            
-            st.plotly_chart(fig_is, use_container_width=True)
+
+            if not oos_metrics_df.empty:
+                oos_metrics_df['Window'] = oos_metrics_df['window'].astype(str)
+            if not is_metrics_df.empty:
+                is_metrics_df['Window'] = is_metrics_df['window'].astype(str)
+
+            windows = sorted(
+                set(oos_metrics_df.get('Window', [])) | set(is_metrics_df.get('Window', [])),
+                key=lambda x: int(x)
+            )
+
+            fig_perf = make_subplots(specs=[[{"secondary_y": True}]])
+
+            if not oos_metrics_df.empty:
+                fig_perf.add_trace(go.Bar(
+                    x=windows,
+                    y=oos_metrics_df.set_index('Window').reindex(windows)['return'],
+                    name="OOS Return %",
+                    marker_color='rgb(55, 83, 109)'
+                ), secondary_y=False)
+
+                fig_perf.add_trace(go.Scatter(
+                    x=windows,
+                    y=oos_metrics_df.set_index('Window').reindex(windows)['sharpe'],
+                    name="OOS Sharpe",
+                    mode='lines+markers',
+                    line=dict(color='rgb(26, 118, 255)')
+                ), secondary_y=True)
+
+            if not is_metrics_df.empty:
+                fig_perf.add_trace(go.Bar(
+                    x=windows,
+                    y=is_metrics_df.set_index('Window').reindex(windows)['return'],
+                    name="IS Return %",
+                    marker_color='rgb(255, 127, 14)',
+                    opacity=0.7
+                ), secondary_y=False)
+
+                fig_perf.add_trace(go.Scatter(
+                    x=windows,
+                    y=is_metrics_df.set_index('Window').reindex(windows)['sharpe'],
+                    name="IS Sharpe",
+                    mode='lines+markers',
+                    line=dict(color='rgb(214, 39, 40)')
+                ), secondary_y=True)
+
+            fig_perf.update_layout(
+                height=450,
+                template="plotly_dark",
+                barmode="group",
+                title_text="Returns & Sharpe Ratio per Window (IS vs OOS)"
+            )
+            fig_perf.update_yaxes(title_text="Return %", secondary_y=False)
+            fig_perf.update_yaxes(title_text="Sharpe Ratio", secondary_y=True)
+
+            st.plotly_chart(fig_perf, use_container_width=True)
 
     with tab2:
         st.subheader("Parameter Stability Analysis")
@@ -651,8 +665,7 @@ if 'wfo_results' in st.session_state:
 
                 st.plotly_chart(fig_table, use_container_width=True)
 
-            st.markdown("**Raw Parameter Values per Window:**")
-            st.dataframe(params_df)
+            # Removed duplicate raw parameters table
         else:
             st.warning("No numeric parameters to visualize.")
 
