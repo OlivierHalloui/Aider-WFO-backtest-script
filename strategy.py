@@ -271,6 +271,29 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
         weight_metric1 = params.get('weight_metric1', 1.0)
         weight_metric2 = params.get('weight_metric2', 0.0)
         
+        def trade_stat(trades, attr_name, default=0.0):
+            value = getattr(trades, attr_name, None)
+            if value is not None:
+                return value
+            try:
+                stats = trades.stats()
+            except Exception:
+                return default
+            keys = [
+                attr_name,
+                attr_name.replace('_', ' '),
+                attr_name.replace('_', ' ').title(),
+                attr_name.replace('_', ' ').capitalize(),
+            ]
+            for key in keys:
+                try:
+                    value = stats.get(key) if hasattr(stats, 'get') else stats[key]
+                except Exception:
+                    value = None
+                if value is not None:
+                    return value
+            return default
+
         # Helper to get metric safely
         def get_metric(port, name):
             if name == 'max_drawdown':
@@ -280,9 +303,9 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
             elif name == 'total_return':
                 return port.total_return * 100
             elif name == 'avg_gain_per_trade':
-                return port.trades.avg_winning_trade
+                return trade_stat(port.trades, 'avg_winning_trade')
             elif name == 'avg_loss_per_trade':
-                return port.trades.avg_losing_trade * -1
+                return trade_stat(port.trades, 'avg_losing_trade') * -1
             elif name == 'win_rate':
                 return port.trades.win_rate
             elif name == 'avg_pl_per_trade':

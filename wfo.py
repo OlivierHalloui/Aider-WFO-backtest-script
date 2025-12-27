@@ -468,6 +468,29 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
             if np.isinf(avg_pl) or np.isnan(avg_pl):
                 avg_pl = 0.0
         return avg_pl
+
+    def trade_stat(trades, attr_name, default=0.0):
+        value = getattr(trades, attr_name, None)
+        if value is not None:
+            return value
+        try:
+            stats = trades.stats()
+        except Exception:
+            return default
+        keys = [
+            attr_name,
+            attr_name.replace('_', ' '),
+            attr_name.replace('_', ' ').title(),
+            attr_name.replace('_', ' ').capitalize(),
+        ]
+        for key in keys:
+            try:
+                value = stats.get(key) if hasattr(stats, 'get') else stats[key]
+            except Exception:
+                value = None
+            if value is not None:
+                return value
+        return default
     
     # Store WFO results
     wfo_results = {
@@ -599,8 +622,8 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
             'sharpe': in_sample_portfolio.sharpe_ratio,
             'max_drawdown': in_sample_portfolio.max_drawdown * 100,
             'win_rate': in_sample_portfolio.trades.win_rate,
-            'avg_gain_per_trade': in_sample_portfolio.trades.avg_winning_trade,
-            'avg_loss_per_trade': in_sample_portfolio.trades.avg_losing_trade,
+            'avg_gain_per_trade': trade_stat(in_sample_portfolio.trades, 'avg_winning_trade'),
+            'avg_loss_per_trade': trade_stat(in_sample_portfolio.trades, 'avg_losing_trade'),
             'avg_pl_per_trade': calc_avg_pl(in_sample_portfolio),
             'calmar_ratio': in_sample_portfolio.calmar_ratio if in_sample_portfolio.max_drawdown > 0 else np.nan,
             'sortino_ratio': in_sample_portfolio.sortino_ratio,
@@ -628,8 +651,8 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
                 'sharpe': out_sample_portfolio.sharpe_ratio,
                 'max_drawdown': out_sample_portfolio.max_drawdown * 100,
                 'win_rate': out_sample_portfolio.trades.win_rate,  #* 100,
-                'avg_gain_per_trade': out_sample_portfolio.trades.avg_winning_trade,
-                'avg_loss_per_trade': out_sample_portfolio.trades.avg_losing_trade,
+                'avg_gain_per_trade': trade_stat(out_sample_portfolio.trades, 'avg_winning_trade'),
+                'avg_loss_per_trade': trade_stat(out_sample_portfolio.trades, 'avg_losing_trade'),
                 'avg_pl_per_trade': calc_avg_pl(out_sample_portfolio),
                 'calmar_ratio': out_sample_portfolio.calmar_ratio if out_sample_portfolio.max_drawdown > 0 else np.nan,
                 'sortino_ratio': out_sample_portfolio.sortino_ratio,

@@ -246,54 +246,54 @@ def run_final_backtest_logic():
     df = st.session_state['df']
     config = get_current_config()
 
+    metric1_name = config.get('metric1_name', 'sharpe_ratio')
+    metric2_name = config.get('metric2_name', 'total_return')
+    weight_metric1 = float(config.get('weight_metric1', 1.0))
+    weight_metric2 = float(config.get('weight_metric2', 0.0))
+
+    def get_metric_value(row, name):
+        if not row:
+            return None
+        if name == 'max_drawdown':
+            value = row.get('max_drawdown')
+            return None if value is None else -value
+        if name == 'sharpe_ratio':
+            return row.get('sharpe')
+        if name == 'total_return':
+            return row.get('return')
+        if name == 'win_rate':
+            return row.get('win_rate')
+        if name == 'avg_gain_per_trade':
+            return row.get('avg_gain_per_trade')
+        if name == 'avg_loss_per_trade':
+            value = row.get('avg_loss_per_trade')
+            return None if value is None else -value
+        if name == 'avg_pl_per_trade':
+            return row.get('avg_pl_per_trade')
+        return None
+
+    def combined_score(row):
+        total_weight = weight_metric1 + weight_metric2
+        if total_weight == 0:
+            return None
+        m1 = get_metric_value(row, metric1_name)
+        m2 = get_metric_value(row, metric2_name)
+        if weight_metric1 != 0 and m1 is None:
+            return None
+        if weight_metric2 != 0 and m2 is None:
+            return None
+        if m1 is None:
+            m1 = 0.0
+        if m2 is None:
+            m2 = 0.0
+        return (weight_metric1 * m1 + weight_metric2 * m2) / total_weight
+
     def select_best_params(wfo_results):
         best_params = None
         best_score = None
         best_window = None
         best_is_metrics = None
         best_oos_metrics = None
-
-        metric1_name = config.get('metric1_name', 'sharpe_ratio')
-        metric2_name = config.get('metric2_name', 'total_return')
-        weight_metric1 = float(config.get('weight_metric1', 1.0))
-        weight_metric2 = float(config.get('weight_metric2', 0.0))
-
-        def get_metric_value(row, name):
-            if not row:
-                return None
-            if name == 'max_drawdown':
-                value = row.get('max_drawdown')
-                return None if value is None else -value
-            if name == 'sharpe_ratio':
-                return row.get('sharpe')
-            if name == 'total_return':
-                return row.get('return')
-            if name == 'win_rate':
-                return row.get('win_rate')
-            if name == 'avg_gain_per_trade':
-                return row.get('avg_gain_per_trade')
-            if name == 'avg_loss_per_trade':
-                value = row.get('avg_loss_per_trade')
-                return None if value is None else -value
-            if name == 'avg_pl_per_trade':
-                return row.get('avg_pl_per_trade')
-            return None
-
-        def combined_score(row):
-            total_weight = weight_metric1 + weight_metric2
-            if total_weight == 0:
-                return None
-            m1 = get_metric_value(row, metric1_name)
-            m2 = get_metric_value(row, metric2_name)
-            if weight_metric1 != 0 and m1 is None:
-                return None
-            if weight_metric2 != 0 and m2 is None:
-                return None
-            if m1 is None:
-                m1 = 0.0
-            if m2 is None:
-                m2 = 0.0
-            return (weight_metric1 * m1 + weight_metric2 * m2) / total_weight
 
         is_map = {row.get('window'): row for row in wfo_results.get('in_sample_performance', [])}
         oos_map = {row.get('window'): row for row in wfo_results.get('out_of_sample_performance', [])}
@@ -342,48 +342,6 @@ def run_final_backtest_logic():
         elif isinstance(chosen_params[param], float):
             chosen_params[param] = round(chosen_params[param], 2)
 
-    metric1_name = config.get('metric1_name', 'sharpe_ratio')
-    metric2_name = config.get('metric2_name', 'total_return')
-    weight_metric1 = float(config.get('weight_metric1', 1.0))
-    weight_metric2 = float(config.get('weight_metric2', 0.0))
-
-    def get_metric_value(row, name):
-        if not row:
-            return None
-        if name == 'max_drawdown':
-            value = row.get('max_drawdown')
-            return None if value is None else -value
-        if name == 'sharpe_ratio':
-            return row.get('sharpe')
-        if name == 'total_return':
-            return row.get('return')
-        if name == 'win_rate':
-            return row.get('win_rate')
-        if name == 'avg_gain_per_trade':
-            return row.get('avg_gain_per_trade')
-        if name == 'avg_loss_per_trade':
-            value = row.get('avg_loss_per_trade')
-            return None if value is None else -value
-        if name == 'avg_pl_per_trade':
-            return row.get('avg_pl_per_trade')
-        return None
-
-    def combined_score(row):
-        total_weight = weight_metric1 + weight_metric2
-        if total_weight == 0:
-            return None
-        m1 = get_metric_value(row, metric1_name)
-        m2 = get_metric_value(row, metric2_name)
-        if weight_metric1 != 0 and m1 is None:
-            return None
-        if weight_metric2 != 0 and m2 is None:
-            return None
-        if m1 is None:
-            m1 = 0.0
-        if m2 is None:
-            m2 = 0.0
-        return (weight_metric1 * m1 + weight_metric2 * m2) / total_weight
-
     st.session_state['final_params'] = chosen_params
     st.session_state['final_params_score'] = best_score
     st.session_state['final_params_window'] = best_window
@@ -394,7 +352,12 @@ def run_final_backtest_logic():
     
     with st.spinner("Running Final Backtest on Full Dataset..."):
         try:
-            final_portfolio = run_backtest(df, chosen_params, config['timeframe'], return_portfolio=True)
+            final_portfolio = run_backtest(
+                df,
+                chosen_params,
+                config.get('timeframe', DEFAULT_TIMEFRAME),
+                return_portfolio=True
+            )
             st.session_state['final_portfolio'] = final_portfolio
             st.success("Final Backtest Complete!")
         except Exception as e:
@@ -589,6 +552,30 @@ if 'wfo_results' in st.session_state:
             fig_bar.update_yaxes(title_text="Sharpe Ratio", secondary_y=True)
             
             st.plotly_chart(fig_bar, use_container_width=True)
+        
+        # IS Performance per Window
+        if results['in_sample_performance']:
+            st.subheader("In-Sample Performance by Window")
+            is_metrics_df = pd.DataFrame(results['in_sample_performance'])
+            is_metrics_df['Window'] = is_metrics_df['window'].astype(str)
+            
+            fig_is = make_subplots(specs=[[{"secondary_y": True}]])
+            
+            fig_is.add_trace(go.Bar(
+                x=is_metrics_df['Window'], y=is_metrics_df['return'],
+                name="Return %", marker_color='rgb(55, 83, 109)'
+            ), secondary_y=False)
+            
+            fig_is.add_trace(go.Scatter(
+                x=is_metrics_df['Window'], y=is_metrics_df['sharpe'],
+                name="Sharpe Ratio", mode='lines+markers', line=dict(color='rgb(255, 0, 0)')
+            ), secondary_y=True)
+            
+            fig_is.update_layout(height=400, template="plotly_dark", title_text="Returns & Sharpe Ratio per Window (In-Sample)")
+            fig_is.update_yaxes(title_text="Return %", secondary_y=False)
+            fig_is.update_yaxes(title_text="Sharpe Ratio", secondary_y=True)
+            
+            st.plotly_chart(fig_is, use_container_width=True)
 
     with tab2:
         st.subheader("Parameter Stability Analysis")
@@ -754,6 +741,51 @@ if 'wfo_results' in st.session_state:
             
         else:
             st.info("Click **Run Final Backtest** in the sidebar to generate results.")
+        
+        # Manual re-run using a selected WFO window
+        if results.get('window_results'):
+            st.markdown("#### Re-run Final Backtest by WFO Window")
+            window_options = [w.get('window_info', {}).get('window') for w in results['window_results']]
+            window_options = [w for w in window_options if w is not None]
+            if window_options:
+                with st.form("final_backtest_window_form"):
+                    selected_window = st.selectbox("Select WFO Window", options=window_options, key='final_selected_window')
+                    submitted = st.form_submit_button("Run Final Backtest (Selected Window)")
+
+                if submitted:
+                    selected_entry = None
+                    for window in results['window_results']:
+                        if window.get('window_info', {}).get('window') == selected_window:
+                            selected_entry = window
+                            break
+
+                    if selected_entry:
+                        selected_params = (selected_entry.get('best_params') or {}).copy()
+                        int_params = {'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length'}
+                        for param in list(selected_params.keys()):
+                            if param in int_params:
+                                try:
+                                    selected_params[param] = int(round(float(selected_params[param])))
+                                except Exception:
+                                    pass
+                            elif isinstance(selected_params[param], float):
+                                selected_params[param] = round(selected_params[param], 2)
+
+                        config_local = get_current_config()
+                        with st.spinner("Running Final Backtest on Full Dataset..."):
+                            try:
+                                selected_portfolio = run_backtest(
+                                    df,
+                                    selected_params,
+                                    config_local.get('timeframe', DEFAULT_TIMEFRAME),
+                                    return_portfolio=True
+                                )
+                                st.session_state['final_portfolio'] = selected_portfolio
+                                st.session_state['final_params'] = selected_params
+                                st.session_state['final_params_window'] = selected_window
+                                st.success("Final Backtest Complete!")
+                            except Exception as e:
+                                st.error(f"Error in final backtest: {e}")
 
 elif not os.path.exists(DEFAULT_DATA_FILE):
     st.warning(f"⚠️ Default data file not found at: `{DEFAULT_DATA_FILE}`. Please configure the data source in the sidebar.")
