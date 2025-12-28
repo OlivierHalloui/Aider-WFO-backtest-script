@@ -103,6 +103,66 @@ def calculate_exit_sma_nb(close, user_exit_sma_length):
             signal[i] = True   
     return signal
 
+@njit(cache=True)
+def parabolic_sar_nb(high, low, sar_start, sar_increment, sar_maximum):
+    n = len(high)
+    sar = np.full(n, np.nan)
+    if n == 0:
+        return sar
+
+    # Initialize trend based on early price action
+    trend = 1
+    if n > 1 and high[1] < high[0]:
+        trend = -1
+
+    if trend == 1:
+        ep = high[0]
+        sar[0] = low[0]
+    else:
+        ep = low[0]
+        sar[0] = high[0]
+
+    af = sar_start
+
+    for i in range(1, n):
+        prev_sar = sar[i - 1]
+        sar_i = prev_sar + af * (ep - prev_sar)
+
+        if trend == 1:
+            if i >= 2:
+                sar_i = min(sar_i, low[i - 1], low[i - 2])
+            else:
+                sar_i = min(sar_i, low[i - 1])
+
+            if low[i] < sar_i:
+                trend = -1
+                sar_i = ep
+                ep = low[i]
+                af = sar_start
+            else:
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + sar_increment, sar_maximum)
+        else:
+            if i >= 2:
+                sar_i = max(sar_i, high[i - 1], high[i - 2])
+            else:
+                sar_i = max(sar_i, high[i - 1])
+
+            if high[i] > sar_i:
+                trend = 1
+                sar_i = ep
+                ep = high[i]
+                af = sar_start
+            else:
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + sar_increment, sar_maximum)
+
+        sar[i] = sar_i
+
+    return sar
+
 # ======================================================================
 # INDICATOR FACTORIES (Vectorized)
 # ======================================================================
@@ -156,4 +216,17 @@ SMAExit = vbt.IF(
     calculate_exit_sma_nb,
     takes_1d=True,
     user_exit_sma_length=20
+)
+
+ParabolicSAR = vbt.IF(
+    class_name='ParabolicSAR',
+    input_names=['high', 'low'],
+    param_names=['sar_start', 'sar_increment', 'sar_maximum'],
+    output_names=['sar']
+).with_apply_func(
+    parabolic_sar_nb,
+    takes_1d=True,
+    sar_start=0.02,
+    sar_increment=0.02,
+    sar_maximum=0.2
 )

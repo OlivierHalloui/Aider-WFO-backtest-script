@@ -4,7 +4,7 @@ import numpy as np
 import vectorbtpro as vbt
 from indicators import (
     EcartBollingerBorne, BollingerHorizontal,
-    CrossBBWLowSignal, SMAExit
+    CrossBBWLowSignal, SMAExit, ParabolicSAR
 )
 
 # ======================================================================
@@ -38,12 +38,19 @@ def create_signal_generators(df, **params):
     fenetre_lowest = params.get('fenetre_lowest', 30)
     seuil_lowest = params.get('seuil_lowest', 3.5)
     user_exit_sma_length = params.get('user_exit_sma_length', 20)
+    sar_start = params.get('sar_start', 0.02)
+    sar_increment = params.get('sar_increment', 0.02)
+    sar_maximum = params.get('sar_maximum', 0.2)
+    exit_sar_enabled = params.get('exit_sar_enabled', True)
     
     # Vectorization handling
     # Check if any parameter is an array/list to determine if we are in a vectorized run
     vector_len = 1
-    all_params = [timeperiod, StDev, matype, coeff_medianeBBW, coef_mediane, 
-                  Nb_bars_above, fenetre_lowest, seuil_lowest, user_exit_sma_length]
+    all_params = [
+        timeperiod, StDev, matype, coeff_medianeBBW, coef_mediane,
+        Nb_bars_above, fenetre_lowest, seuil_lowest, user_exit_sma_length,
+        sar_start, sar_increment, sar_maximum, exit_sar_enabled
+    ]
     
     for p in all_params:
         if hasattr(p, '__len__') and not isinstance(p, str):
@@ -65,6 +72,10 @@ def create_signal_generators(df, **params):
         fenetre_lowest = broadcast(fenetre_lowest, vector_len)
         seuil_lowest = broadcast(seuil_lowest, vector_len)
         user_exit_sma_length = broadcast(user_exit_sma_length, vector_len)
+        sar_start = broadcast(sar_start, vector_len)
+        sar_increment = broadcast(sar_increment, vector_len)
+        sar_maximum = broadcast(sar_maximum, vector_len)
+        exit_sar_enabled = broadcast(exit_sar_enabled, vector_len)
 
     # We use 'Close' for most calculations
     # VBT's run methods accept Series or DataFrame. 
@@ -142,13 +153,43 @@ def create_signal_generators(df, **params):
         close=close_price,
         user_exit_sma_length=user_exit_sma_length
     )
-    
+
+    # Parabolic SAR
+    psar_ind = ParabolicSAR.run(
+        high=df['High'],
+        low=df['Low'],
+        sar_start=sar_start,
+        sar_increment=sar_increment,
+        sar_maximum=sar_maximum,
+        per_column=True
+    )
+
+    sar_signal = psar_ind.sar
+    prev_sar = sar_signal.shift(1)
+    prev_close = close_price.shift(1)
+    sar_exit_signal = (
+        prev_close.gt(prev_sar, axis=0) &
+        sar_signal.gt(close_price, axis=0)
+    ).fillna(False).astype(bool)
+
     def clean_cols(obj):
         """Helper to replace complex MultiIndex columns with simple RangeIndex for alignment."""
         if hasattr(obj, 'columns'):
             obj = obj.copy()
             obj.columns = pd.RangeIndex(len(obj.columns))
         return obj
+
+    sar_exit_signal = clean_cols(sar_exit_signal)
+    if hasattr(exit_sar_enabled, '__len__') and not isinstance(exit_sar_enabled, str):
+        exit_mask = pd.DataFrame(
+            np.tile(np.asarray(exit_sar_enabled, dtype=bool), (len(sar_exit_signal), 1)),
+            index=sar_exit_signal.index,
+            columns=sar_exit_signal.columns
+        )
+        sar_exit_signal = sar_exit_signal & exit_mask
+    else:
+        if not bool(exit_sar_enabled):
+            sar_exit_signal[:] = False
 
     return {
         'upper_band': clean_cols(bbands.upperband),
@@ -157,7 +198,8 @@ def create_signal_generators(df, **params):
         'nb_bars_above_signal': clean_cols(nb_bars_above_ind.signal),
         'bollinger_horizontal_signal': clean_cols(bollinger_horizontal_ind.signal).astype(bool),
         'cross_bbw_low_signal': clean_cols(cross_bbw_low_ind.signal),
-        'sma_exit_signal': clean_cols(sma_exit_ind.signal)
+        'sma_exit_signal': clean_cols(sma_exit_ind.signal),
+        'sar_exit_signal': sar_exit_signal
     }
 
 def create_entry_exit_conditions(df, signals):
@@ -211,7 +253,10 @@ def create_entry_exit_conditions(df, signals):
     ).fillna(False).astype(bool)
     
     # Exit Condition
-    exit_condition = signals['sma_exit_signal'].fillna(False).astype(bool)
+    exit_condition = (
+        signals['sma_exit_signal'] |
+        signals['sar_exit_signal']
+    ).fillna(False).astype(bool)
     
     return entry_condition, exit_condition
 

@@ -40,5 +40,42 @@ ATDMF Strategy Optimizer is a professional backtesting framework designed for ev
 -   **Modularity**: Strategy logic is decoupled from the UI and optimization engine.
 -   **Performance**: Utilizes `numba` and `parallel` backends where applicable for speed.
 
+## Current Strategy Status vs. Pine Script (Gap Analysis)
+*As of Dec 27, 2025*
+
+The Python implementation (`strategy.py`, `indicators.py`) is currently a subset of the reference TradingView Pine Script (`ATDMF_strategy long BTCUSDC_05S-MEXC V6_01.pine`).
+
+### Implemented Features
+- **Signal T0 Core**:
+  - `BollingerHorizontal` (Flatness check)
+  - `EcartBollingerBorne` (Bandwidth expansion check)
+  - `CrossBBWLowSignal` (Low volatility threshold)
+- **Basic Exits**:
+  - `SMAExit` (Simple Moving Average cross exit)
+
+### Missing Features (To Be Implemented)
+1.  **Indicators**:
+    -   **RoC (Rate of Change)**: `depassement_RoC_long` validation.
+    -   **Linear Regression**: `pente_regline_bull` (Slope trend filter).
+    -   **Stochastic**: `Sto_overbought`, Cross Types A & B (Bull/Bear).
+    -   **MACD**: Cross Types A & B (Bull/Bear).
+    -   **SMA 7/23**: Anticipated crossover logic.
+    -   **Parabolic SAR**: Trend direction and trailing stop values.
+    -   **Pivot Points**: For `BB_retournement` logic.
+
+2.  **Entry Logic (T1 & T2)**:
+    -   **Multi-Timeframe Trend**: `UT_principale_SMA_Bullish` (e.g., 1m trend filter for 5s strategy).
+    -   **T1 Confirmation**: Combining T0 with RoC, RegLine, and Oscillator filters.
+    -   **T2 Signal**: Re-entry/Confirmation logic based on High breakout and Divergence.
+    -   **Duration Logic**: `NB_bars_under_BBW` loop (counting persistent low volatility) and `BBandcrossBarssince`.
+
+3.  **Exit Strategies**:
+    -   **BB UTC**: Close on Lower BB cross (Timeframe Courte).
+    -   **SMA UTC**: Close on SMA cross (Timeframe Courte).
+    -   **Oscillator Exits**: Stochastic and MACD Bearish crosses.
+    -   **TAC**: "Time And Change" aggressive exit.
+    -   **Return to BB**: Exit on return to lower band.
+    -   **Volat Down**: Exit on bandwidth contraction (%B).
+
 ---
-*Last updated: December 23, 2025*
+*Last updated: December 27, 2025*

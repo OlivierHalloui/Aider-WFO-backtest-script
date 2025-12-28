@@ -19,7 +19,10 @@ DEFAULT_PARAM_GRID = {
     'seuil_lowest': (1.0, 3.5, 0.5),
     'longueur_mediane': (50, 150, 50),
     'Nb_bars_above': (2, 6, 2),
-    'user_exit_sma_length': (10, 30, 10)
+    'user_exit_sma_length': (10, 30, 10),
+    'sar_start': (0.02, 0.05, 0.01),
+    'sar_increment': (0.02, 0.05, 0.01),
+    'sar_maximum': (0.1, 0.3, 0.05)
 }
 
 # ======================================================================
@@ -42,3 +45,4 @@ class WFOSettings:
         self.patience_level = "Medium"   # Patience for Bayesian/Optuna early stopping
         self.max_trials = 200            # Maximum number of trials for Bayesian/Optuna optimization
         self.neighbor_count = 5          # Neighbor count for stability selection
+        self.exit_sar_enabled = True     # Enable Parabolic SAR exit

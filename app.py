@@ -65,7 +65,8 @@ with st.sidebar:
                     'use_numba': 'use_numba', 'metric1_name': 'metric1_name', 
                     'metric2_name': 'metric2_name', 'weight_metric1': 'weight_metric1',
                     'weight_metric2': 'weight_metric2', 'patience_level': 'patience_level',
-                    'max_trials': 'max_trials', 'neighbor_count': 'neighbor_count'
+                    'max_trials': 'max_trials', 'neighbor_count': 'neighbor_count',
+                    'exit_sar_enabled': 'exit_sar_enabled'
                 }
                 for conf_key, widget_key in state_map.items():
                     if conf_key in loaded_config:
@@ -116,33 +117,58 @@ with st.sidebar:
         else:
             file_path = DEFAULT_DATA_FILE
 
-    # --- Strategy Parameters ---
-    with st.expander("2. Strategy Parameters", expanded=False):
-        st.info("Configure the search space for each parameter.")
+    # Helper to create param inputs
+    def param_input(key, label, default_min, default_max, default_step):
+        c1, c2, c3, c4 = st.columns([0.6, 1, 1, 1])
         
-        # Helper to create param inputs
-        def param_input(key, label, default_min, default_max, default_step):
-            c1, c2, c3, c4 = st.columns([0.6, 1, 1, 1])
-            
-            # Checkbox state handled by st.session_state via key
-            # Default value is True (checked) if not in state
-            
-            with c1:
-                enabled = st.checkbox(key, value=True, key=f"check_{key}")
-            
-            with c2:
-                min_val = st.number_input(f"Min", value=float(default_min), key=f"min_{key}", disabled=not enabled)
-            with c3:
-                max_val = st.number_input(f"Max", value=float(default_max), key=f"max_{key}", disabled=not enabled)
-            with c4:
-                step_val = st.number_input(f"Step", value=float(default_step), key=f"step_{key}", disabled=not enabled)
-            return enabled, min_val, max_val, step_val
+        # Checkbox state handled by st.session_state via key
+        # Default value is True (checked) if not in state
+        
+        with c1:
+            enabled = st.checkbox(key, value=True, key=f"check_{key}")
+        
+        with c2:
+            min_val = st.number_input(f"Min", value=float(default_min), key=f"min_{key}", disabled=not enabled)
+        with c3:
+            max_val = st.number_input(f"Max", value=float(default_max), key=f"max_{key}", disabled=not enabled)
+        with c4:
+            step_val = st.number_input(f"Step", value=float(default_step), key=f"step_{key}", disabled=not enabled)
+        return enabled, min_val, max_val, step_val
 
-        # Generate inputs for all params in DEFAULT_PARAM_GRID
+    # --- Entry Parameters ---
+    with st.expander("2. Entry Parameters", expanded=False):
+        st.info("Configure the search space for entry parameters.")
+        
+        entry_params = [
+            'timeperiod', 'StDev', 'coeff_medianeBBW', 'coef_mediane',
+            'fenetre_lowest', 'seuil_lowest', 'longueur_mediane', 'Nb_bars_above'
+        ]
+
         config_params = {}
         selected_params = []
-        
-        for param, (d_min, d_max, d_step) in DEFAULT_PARAM_GRID.items():
+
+        for param in entry_params:
+            d_min, d_max, d_step = DEFAULT_PARAM_GRID[param]
+            enabled, p_min, p_max, p_step = param_input(param, param, d_min, d_max, d_step)
+            if enabled:
+                selected_params.append(param)
+                config_params[f'{param}_min'] = p_min
+                config_params[f'{param}_max'] = p_max
+                config_params[f'{param}_step'] = p_step
+
+    # --- Exit Parameters ---
+    with st.expander("3. Exit Parameters", expanded=False):
+        st.info("Configure the search space for exit parameters.")
+
+        exit_sar_enabled = st.checkbox(
+            "Enable Parabolic SAR Exit",
+            value=True,
+            key='exit_sar_enabled'
+        )
+
+        exit_params = ['user_exit_sma_length', 'sar_start', 'sar_increment', 'sar_maximum']
+        for param in exit_params:
+            d_min, d_max, d_step = DEFAULT_PARAM_GRID[param]
             enabled, p_min, p_max, p_step = param_input(param, param, d_min, d_max, d_step)
             if enabled:
                 selected_params.append(param)
@@ -151,7 +177,7 @@ with st.sidebar:
                 config_params[f'{param}_step'] = p_step
 
     # --- WFO Settings ---
-    with st.expander("3. WFO Engine Settings", expanded=False):
+    with st.expander("4. WFO Engine Settings", expanded=False):
         n_windows = st.number_input("Number of Windows", min_value=1, value=1, help="Number of Walk-Forward windows", key='n_windows')
         train_size = st.slider("Train Size Ratio", 0.1, 0.9, 0.5, 0.05, help="Proportion of data used for optimization vs validation", key='train_size')
         anchored = st.checkbox("Anchored WFO", value=False, help="If checked, training window grows. If unchecked, it slides.", key='anchored')
@@ -172,7 +198,7 @@ with st.sidebar:
         use_numba = st.checkbox("Use Numba Acceleration", value=True, key='use_numba')
 
     # --- Metrics ---
-    with st.expander("4. Performance Metrics", expanded=False):
+    with st.expander("5. Performance Metrics", expanded=False):
         metric_options = ['sharpe_ratio', 'total_return', 'max_drawdown', 'win_rate', 'avg_gain_per_trade', 'avg_loss_per_trade', 'avg_pl_per_trade']
         
         m1_idx = 0 # Default sharpe
@@ -187,6 +213,20 @@ with st.sidebar:
 # HELPER FUNCTIONS
 # ==============================================================================
 
+class WFOControl:
+    def __init__(self):
+        self._stop_requested = False
+
+    def request_stop(self):
+        self._stop_requested = True
+
+    def should_stop(self):
+        return self._stop_requested
+
+    def wait_if_paused(self, log=None):
+        if self._stop_requested:
+            raise OptimizationInterrupted()
+
 def get_current_config():
     """Collects all sidebar widgets into a configuration dictionary."""
     config = {
@@ -200,6 +240,7 @@ def get_current_config():
         'metric2_name': metric2,
         'weight_metric1': weight1,
         'weight_metric2': weight2,
+        'exit_sar_enabled': exit_sar_enabled,
         'n_windows': n_windows,
         'train_size': train_size,
         'anchored': anchored,
@@ -368,7 +409,7 @@ def run_final_backtest_logic():
 # MAIN LOGIC
 # ==============================================================================
 
-def run_wfo(config):
+def run_wfo(config, control=None):
     # --- Execution ---
     try:
         with st.status("Running Optimization...", expanded=True) as status:
@@ -415,7 +456,8 @@ def run_wfo(config):
                 metrics_info=metrics_info,
                 timeframe=config['timeframe'],
                 settings=wfo_settings,
-                status_callback=status_callback
+                status_callback=status_callback,
+                control=control
             )
             
             elapsed = time.time() - start_time
@@ -424,6 +466,9 @@ def run_wfo(config):
             
             return results, df
 
+    except OptimizationInterrupted:
+        st.warning("Optimization cancelled by user.")
+        return None, None
     except Exception as e:
         st.error(f"An error occurred during optimization: {str(e)}")
         # st.exception(e) # Uncomment for debug stack trace
@@ -444,11 +489,22 @@ with col_run:
         if not selected_params:
             st.error("Select params!")
         else:
-            results, df = run_wfo(current_conf)
+            st.session_state['wfo_control'] = WFOControl()
+            st.session_state['wfo_running'] = True
+            results, df = run_wfo(current_conf, control=st.session_state['wfo_control'])
+            st.session_state['wfo_running'] = False
             if results:
                 st.session_state['wfo_results'] = results
                 st.session_state['df'] = df
                 st.success("Finished!")
+
+# Cancel button for running optimization
+if st.session_state.get('wfo_running'):
+    if st.sidebar.button("🛑 Cancel WFO", use_container_width=True):
+        control = st.session_state.get('wfo_control')
+        if control:
+            control.request_stop()
+        st.sidebar.warning("Cancel requested. Stopping after current step...")
 
 with col_save:
     # Save Config Button

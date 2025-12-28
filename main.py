@@ -53,7 +53,10 @@ def get_param_grid(config):
         'seuil_lowest': "Seuil pour le signal lowest",
         'longueur_mediane': "Fenêtre médiane du signal BB borné",
         'Nb_bars_above': "Nbre de barres pour la validation du signal BB borné",
-        'user_exit_sma_length': "Longueur SMA sortie"
+        'user_exit_sma_length': "Longueur SMA sortie",
+        'sar_start': "Parabolic SAR start",
+        'sar_increment': "Parabolic SAR increment",
+        'sar_maximum': "Parabolic SAR maximum"
     }
     
     # ATDMF Strategy default parameters (Hardcoded Source of Truth)
@@ -67,7 +70,10 @@ def get_param_grid(config):
         'fenetre_lowest': 30,
         'seuil_lowest': 3.5,
         'longueur_mediane': 100,
-        'user_exit_sma_length': 20
+        'user_exit_sma_length': 20,
+        'sar_start': 0.02,
+        'sar_increment': 0.02,
+        'sar_maximum': 0.2
     }
     
     # Default parameter ranges
@@ -80,7 +86,10 @@ def get_param_grid(config):
         'seuil_lowest': (1.0, 3.5, 0.5),
         'longueur_mediane': (50, 150, 50),
         'Nb_bars_above': (2, 6, 2),
-        'user_exit_sma_length': (10, 30, 10)
+        'user_exit_sma_length': (10, 30, 10),
+        'sar_start': (0.02, 0.05, 0.01),
+        'sar_increment': (0.02, 0.05, 0.01),
+        'sar_maximum': (0.1, 0.3, 0.05)
     }
     
     # Get selected parameters from config
@@ -101,13 +110,18 @@ def get_param_grid(config):
             if param in ['timeperiod', 'fenetre_lowest', 'user_exit_sma_length']:
                 param_grid[param] = list(range(int(min_val), int(max_val) + 1, int(step)))
             else:
-                param_grid[param] = list(np.round(np.arange(min_val, max_val + step, step), 1))
+                decimals = max(0, int(round(-np.log10(step)))) if step > 0 else 0
+                values = np.arange(min_val, max_val + step, step)
+                param_grid[param] = list(np.round(values, decimals))
     
     # 2. Add Unselected Parameters (Fixed Defaults)
     # Iterate over all known strategy parameters. If not in param_grid, add default as single value.
     for param, default_val in strategy_params.items():
         if param not in param_grid and param in default_ranges: # Only consider params that are optimizable (in ranges)
              param_grid[param] = [default_val]
+
+    # Exit toggles (fixed)
+    param_grid['exit_sar_enabled'] = [bool(config.get('exit_sar_enabled', True))]
 
     return param_grid
 
@@ -222,6 +236,7 @@ def get_wfo_settings(config):
     settings.patience_level = config.get('patience_level', 'Medium')
     settings.max_trials = config.get('max_trials', 200)
     settings.neighbor_count = config.get('neighbor_count', 5)
+    settings.exit_sar_enabled = config.get('exit_sar_enabled', True)
     
     return settings
 
