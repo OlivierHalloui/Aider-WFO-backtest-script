@@ -1,8 +1,10 @@
 # Import necessary libraries for configuration
 import os
+from datetime import date
 
-DEFAULT_START_DATE = "2025-01-19"
-DEFAULT_END_DATE = "2025-01-31"
+TODAY = date.today().isoformat()
+DEFAULT_START_DATE = TODAY
+DEFAULT_END_DATE = TODAY
 DEFAULT_TIMEFRAME = '5s'
 DEFAULT_DATA_FILE = (
     "/home/olivier/Downloads/ATDMF_strategy_V5_long/ATDMF_strategy_long_"
@@ -22,7 +24,10 @@ DEFAULT_PARAM_GRID = {
     'user_exit_sma_length': (10, 30, 10),
     'sar_start': (0.02, 0.05, 0.01),
     'sar_increment': (0.02, 0.05, 0.01),
-    'sar_maximum': (0.1, 0.3, 0.05)
+    'sar_maximum': (0.1, 0.3, 0.05),
+    'macd_fast_length': (8, 16, 2),
+    'macd_slow_length': (20, 40, 2),
+    'macd_signal_length': (5, 15, 2)
 }
 
 # ======================================================================
@@ -46,3 +51,6 @@ class WFOSettings:
         self.max_trials = 200            # Maximum number of trials for Bayesian/Optuna optimization
         self.neighbor_count = 5          # Neighbor count for stability selection
         self.exit_sar_enabled = True     # Enable Parabolic SAR exit
+        self.exit_macd_enabled = True    # Enable MACD exit
+        self.exit_macd_type_a = True     # MACD exit type A (crossunder + signal falling)
+        self.exit_macd_type_b = True     # MACD exit type B (crossunder)

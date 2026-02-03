@@ -4,7 +4,7 @@ import numpy as np
 import vectorbtpro as vbt
 from indicators import (
     EcartBollingerBorne, BollingerHorizontal,
-    CrossBBWLowSignal, SMAExit, ParabolicSAR
+    CrossBBWLowSignal, SMAExit, ParabolicSAR, MACDExit
 )
 
 # ======================================================================
@@ -42,6 +42,12 @@ def create_signal_generators(df, **params):
     sar_increment = params.get('sar_increment', 0.02)
     sar_maximum = params.get('sar_maximum', 0.2)
     exit_sar_enabled = params.get('exit_sar_enabled', True)
+    macd_fast_length = params.get('macd_fast_length', 12)
+    macd_slow_length = params.get('macd_slow_length', 26)
+    macd_signal_length = params.get('macd_signal_length', 9)
+    exit_macd_enabled = params.get('exit_macd_enabled', True)
+    exit_macd_type_a = params.get('exit_macd_type_a', True)
+    exit_macd_type_b = params.get('exit_macd_type_b', True)
     
     # Vectorization handling
     # Check if any parameter is an array/list to determine if we are in a vectorized run
@@ -49,7 +55,9 @@ def create_signal_generators(df, **params):
     all_params = [
         timeperiod, StDev, matype, coeff_medianeBBW, coef_mediane,
         Nb_bars_above, fenetre_lowest, seuil_lowest, user_exit_sma_length,
-        sar_start, sar_increment, sar_maximum, exit_sar_enabled
+        sar_start, sar_increment, sar_maximum, exit_sar_enabled,
+        macd_fast_length, macd_slow_length, macd_signal_length, exit_macd_enabled,
+        exit_macd_type_a, exit_macd_type_b
     ]
     
     for p in all_params:
@@ -76,6 +84,12 @@ def create_signal_generators(df, **params):
         sar_increment = broadcast(sar_increment, vector_len)
         sar_maximum = broadcast(sar_maximum, vector_len)
         exit_sar_enabled = broadcast(exit_sar_enabled, vector_len)
+        macd_fast_length = broadcast(macd_fast_length, vector_len)
+        macd_slow_length = broadcast(macd_slow_length, vector_len)
+        macd_signal_length = broadcast(macd_signal_length, vector_len)
+        exit_macd_enabled = broadcast(exit_macd_enabled, vector_len)
+        exit_macd_type_a = broadcast(exit_macd_type_a, vector_len)
+        exit_macd_type_b = broadcast(exit_macd_type_b, vector_len)
 
     # We use 'Close' for most calculations
     # VBT's run methods accept Series or DataFrame. 
@@ -154,6 +168,16 @@ def create_signal_generators(df, **params):
         user_exit_sma_length=user_exit_sma_length
     )
 
+    macd_exit_ind = MACDExit.run(
+        close=close_price,
+        fast_length=macd_fast_length,
+        slow_length=macd_slow_length,
+        signal_length=macd_signal_length,
+        use_type_a=exit_macd_type_a,
+        use_type_b=exit_macd_type_b,
+        per_column=True
+    )
+
     # Parabolic SAR
     psar_ind = ParabolicSAR.run(
         high=df['High'],
@@ -180,6 +204,7 @@ def create_signal_generators(df, **params):
         return obj
 
     sar_exit_signal = clean_cols(sar_exit_signal)
+    macd_exit_signal = clean_cols(macd_exit_ind.signal)
     if hasattr(exit_sar_enabled, '__len__') and not isinstance(exit_sar_enabled, str):
         exit_mask = pd.DataFrame(
             np.tile(np.asarray(exit_sar_enabled, dtype=bool), (len(sar_exit_signal), 1)),
@@ -191,6 +216,17 @@ def create_signal_generators(df, **params):
         if not bool(exit_sar_enabled):
             sar_exit_signal[:] = False
 
+    if hasattr(exit_macd_enabled, '__len__') and not isinstance(exit_macd_enabled, str):
+        exit_mask = pd.DataFrame(
+            np.tile(np.asarray(exit_macd_enabled, dtype=bool), (len(macd_exit_signal), 1)),
+            index=macd_exit_signal.index,
+            columns=macd_exit_signal.columns
+        )
+        macd_exit_signal = macd_exit_signal & exit_mask
+    else:
+        if not bool(exit_macd_enabled):
+            macd_exit_signal[:] = False
+
     return {
         'upper_band': clean_cols(bbands.upperband),
         'lower_band': clean_cols(bbands.lowerband),
@@ -199,7 +235,8 @@ def create_signal_generators(df, **params):
         'bollinger_horizontal_signal': clean_cols(bollinger_horizontal_ind.signal).astype(bool),
         'cross_bbw_low_signal': clean_cols(cross_bbw_low_ind.signal),
         'sma_exit_signal': clean_cols(sma_exit_ind.signal),
-        'sar_exit_signal': sar_exit_signal
+        'sar_exit_signal': sar_exit_signal,
+        'macd_exit_signal': macd_exit_signal
     }
 
 def create_entry_exit_conditions(df, signals):
@@ -255,7 +292,8 @@ def create_entry_exit_conditions(df, signals):
     # Exit Condition
     exit_condition = (
         signals['sma_exit_signal'] |
-        signals['sar_exit_signal']
+        signals['sar_exit_signal'] |
+        signals['macd_exit_signal']
     ).fillna(False).astype(bool)
     
     return entry_condition, exit_condition
@@ -292,16 +330,29 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
     
     # Create entry and exit conditions (vectorized)
     entry_condition, exit_condition = create_entry_exit_conditions(df, signals)
-    
+
+    order_sizing_mode = params.get('order_sizing_mode', 'percent_equity')
+    order_fixed_cash = float(params.get('order_fixed_cash', 10000.0))
+    fees_pct = float(params.get('fees_pct', 0.0))
+    fees = fees_pct / 100.0
+
     # Create portfolio (vectorized)
     # from_signals automatically handles multi-column boolean dataframes
+    if order_sizing_mode == 'fixed_cash':
+        size = order_fixed_cash
+        size_type = 'value'
+    else:
+        size = 1.0
+        size_type = 'percent'
+
     portfolio = vbt.Portfolio.from_signals(
         close=df['Close'],
         entries=entry_condition,
         exits=exit_condition,
-        max_size=10000,
+        size=size,
+        size_type=size_type,
         init_cash=10000,
-        fees=0.0,
+        fees=fees,
         freq=timeframe
     )
     

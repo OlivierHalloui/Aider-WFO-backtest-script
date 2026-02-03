@@ -56,7 +56,10 @@ def get_param_grid(config):
         'user_exit_sma_length': "Longueur SMA sortie",
         'sar_start': "Parabolic SAR start",
         'sar_increment': "Parabolic SAR increment",
-        'sar_maximum': "Parabolic SAR maximum"
+        'sar_maximum': "Parabolic SAR maximum",
+        'macd_fast_length': "MACD fast length",
+        'macd_slow_length': "MACD slow length",
+        'macd_signal_length': "MACD signal length"
     }
     
     # ATDMF Strategy default parameters (Hardcoded Source of Truth)
@@ -73,7 +76,10 @@ def get_param_grid(config):
         'user_exit_sma_length': 20,
         'sar_start': 0.02,
         'sar_increment': 0.02,
-        'sar_maximum': 0.2
+        'sar_maximum': 0.2,
+        'macd_fast_length': 12,
+        'macd_slow_length': 26,
+        'macd_signal_length': 9
     }
     
     # Default parameter ranges
@@ -89,7 +95,10 @@ def get_param_grid(config):
         'user_exit_sma_length': (10, 30, 10),
         'sar_start': (0.02, 0.05, 0.01),
         'sar_increment': (0.02, 0.05, 0.01),
-        'sar_maximum': (0.1, 0.3, 0.05)
+        'sar_maximum': (0.1, 0.3, 0.05),
+        'macd_fast_length': (8, 16, 2),
+        'macd_slow_length': (20, 40, 2),
+        'macd_signal_length': (5, 15, 2)
     }
     
     # Get selected parameters from config
@@ -107,7 +116,7 @@ def get_param_grid(config):
             min_val = config.get(f'{param}_min', default_min)
             max_val = config.get(f'{param}_max', default_max)
             step = config.get(f'{param}_step', default_step)
-            if param in ['timeperiod', 'fenetre_lowest', 'user_exit_sma_length']:
+            if param in ['timeperiod', 'fenetre_lowest', 'user_exit_sma_length', 'macd_fast_length', 'macd_slow_length', 'macd_signal_length']:
                 param_grid[param] = list(range(int(min_val), int(max_val) + 1, int(step)))
             else:
                 decimals = max(0, int(round(-np.log10(step)))) if step > 0 else 0
@@ -120,8 +129,26 @@ def get_param_grid(config):
         if param not in param_grid and param in default_ranges: # Only consider params that are optimizable (in ranges)
              param_grid[param] = [default_val]
 
-    # Exit toggles (fixed)
-    param_grid['exit_sar_enabled'] = [bool(config.get('exit_sar_enabled', True))]
+    # Exit toggles (include with/without when checked)
+    exit_sar_checked = bool(config.get('exit_sar_enabled', True))
+    exit_macd_checked = bool(config.get('exit_macd_enabled', True))
+    exit_macd_type_a_checked = bool(config.get('exit_macd_type_a', True))
+    exit_macd_type_b_checked = bool(config.get('exit_macd_type_b', True))
+
+    param_grid['exit_sar_enabled'] = [True, False] if exit_sar_checked else [False]
+    if exit_macd_checked:
+        param_grid['exit_macd_enabled'] = [True, False]
+        param_grid['exit_macd_type_a'] = [True, False] if exit_macd_type_a_checked else [False]
+        param_grid['exit_macd_type_b'] = [True, False] if exit_macd_type_b_checked else [False]
+    else:
+        param_grid['exit_macd_enabled'] = [False]
+        param_grid['exit_macd_type_a'] = [False]
+        param_grid['exit_macd_type_b'] = [False]
+
+    # Fixed execution settings (not optimized)
+    param_grid['order_sizing_mode'] = [config.get('order_sizing_mode', 'percent_equity')]
+    param_grid['order_fixed_cash'] = [float(config.get('order_fixed_cash', 10000.0))]
+    param_grid['fees_pct'] = [float(config.get('fees_pct', 0.0))]
 
     return param_grid
 
@@ -237,6 +264,9 @@ def get_wfo_settings(config):
     settings.max_trials = config.get('max_trials', 200)
     settings.neighbor_count = config.get('neighbor_count', 5)
     settings.exit_sar_enabled = config.get('exit_sar_enabled', True)
+    settings.exit_macd_enabled = config.get('exit_macd_enabled', True)
+    settings.exit_macd_type_a = config.get('exit_macd_type_a', True)
+    settings.exit_macd_type_b = config.get('exit_macd_type_b', True)
     
     return settings
 

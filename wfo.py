@@ -100,7 +100,7 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
 
     def expand_param_values(bounds):
         if isinstance(bounds, (list, tuple)):
-            if len(bounds) == 1 and isinstance(bounds[0], (int, float)):
+            if len(bounds) == 1:
                 return [bounds[0]]
             if len(bounds) == 3 and all(isinstance(b, (int, float)) for b in bounds[:2]):
                 min_val, max_val, step = bounds
@@ -508,7 +508,11 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
             'parallel_backend': settings.parallel_backend,
             'use_numba': settings.use_numba,
             'optimization_method': settings.optimization_method,
-            'neighbor_count': getattr(settings, 'neighbor_count', 5)
+            'neighbor_count': getattr(settings, 'neighbor_count', 5),
+            'exit_sar_enabled': getattr(settings, 'exit_sar_enabled', True),
+            'exit_macd_enabled': getattr(settings, 'exit_macd_enabled', True),
+            'exit_macd_type_a': getattr(settings, 'exit_macd_type_a', True),
+            'exit_macd_type_b': getattr(settings, 'exit_macd_type_b', True)
         }
     }
     
@@ -742,11 +746,18 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
         for param in param_grid.keys():
             log(f"{param}: {params_df[param].value_counts().to_dict()}")
         
-        # Calculate parameter stability
+        # Calculate parameter stability (numeric only)
         param_stability = {}
         for param in param_grid.keys():
-            param_values = params_df[param].values
-            param_stability[param] = 1.0 - (np.std(param_values) / np.mean(param_values)) if np.mean(param_values) > 0 else 0.0
+            series = pd.to_numeric(params_df[param], errors='coerce')
+            series = series.dropna()
+            if series.empty:
+                continue
+            mean_val = series.mean()
+            if mean_val > 0:
+                param_stability[param] = 1.0 - (series.std() / mean_val)
+            else:
+                param_stability[param] = 0.0
             
         log("\n=== Parameter Stability (higher is better) ===")
         for param, stability in param_stability.items():

@@ -5,6 +5,13 @@ import os
 import time
 import json
 import datetime
+import io
+import zipfile
+
+# Plotly expects np.bool8 on older releases; alias for numpy>=2.0 compatibility.
+if not hasattr(np, "bool8"):
+    np.bool8 = np.bool_
+
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
@@ -16,7 +23,7 @@ from config import (
 )
 from main import get_param_grid, get_metrics_info, get_wfo_settings
 from wfo import walk_forward_optimization, OptimizationInterrupted
-from data_loading import load_data
+from data_loading import load_data, get_csv_date_range
 from strategy import run_backtest
 
 # Set page config
@@ -37,6 +44,304 @@ Configure your data, strategy parameters, and optimization settings in the sideb
 # ==============================================================================
 # SIDEBAR CONFIGURATION
 # ==============================================================================
+
+def _downsample_series(series, max_points=20000):
+    if series is None or len(series) <= max_points:
+        return series
+    step = max(1, len(series) // max_points)
+    return series.iloc[::step]
+
+def _downsample_df(df, max_rows=200000):
+    if df is None or df.empty or len(df) <= max_rows:
+        return df
+    step = max(1, len(df) // max_rows)
+    return df.iloc[::step]
+
+def _get_return_series(trades_df):
+    if trades_df is None or trades_df.empty:
+        return None
+
+    if "return" in trades_df.columns:
+        return pd.to_numeric(trades_df["return"], errors="coerce")
+
+    if "pnl" in trades_df.columns and "entry_value" in trades_df.columns:
+        denom = pd.to_numeric(trades_df["entry_value"], errors="coerce")
+        pnl = pd.to_numeric(trades_df["pnl"], errors="coerce")
+        return pnl / denom.replace(0, np.nan)
+
+    if "pnl" in trades_df.columns and "entry_price" in trades_df.columns and "size" in trades_df.columns:
+        denom = pd.to_numeric(trades_df["entry_price"], errors="coerce") * pd.to_numeric(trades_df["size"], errors="coerce")
+        pnl = pd.to_numeric(trades_df["pnl"], errors="coerce")
+        return pnl / denom.replace(0, np.nan)
+
+    return None
+
+def _trimmed_mean(series, trim=0.05):
+    if series is None:
+        return None
+    s = series.dropna()
+    if s.empty:
+        return None
+    lower = s.quantile(trim)
+    upper = s.quantile(1 - trim)
+    return s[(s >= lower) & (s <= upper)].mean()
+
+def _winsorized_mean(series, trim=0.05):
+    if series is None:
+        return None
+    s = series.dropna()
+    if s.empty:
+        return None
+    lower = s.quantile(trim)
+    upper = s.quantile(1 - trim)
+    return s.clip(lower=lower, upper=upper).mean()
+
+def _compute_trade_pnl_metrics(trades_df, trim=0.05):
+    if trades_df is None or trades_df.empty:
+        return pd.DataFrame()
+
+    pnl = pd.to_numeric(trades_df.get("pnl"), errors="coerce") if "pnl" in trades_df.columns else None
+    ret = _get_return_series(trades_df)
+
+    rows = []
+
+    def add_row(name, value=None, pct=None, value_std=None, pct_std=None, n_trades=None):
+        rows.append({
+            "Metric": name,
+            "P&L Value": value,
+            "P&L %": pct,
+            "Std Value": value_std,
+            "Std %": pct_std,
+            "n trades": n_trades,
+        })
+
+    if pnl is not None:
+        add_row("Mean P&L", pnl.mean(), None, pnl.std(ddof=0), None, pnl.dropna().shape[0])
+        add_row("Median P&L", pnl.median(), None, pnl.std(ddof=0), None, pnl.dropna().shape[0])
+        trimmed = pnl.dropna()
+        if not trimmed.empty:
+            lower = trimmed.quantile(trim)
+            upper = trimmed.quantile(1 - trim)
+            trimmed_vals = trimmed[(trimmed >= lower) & (trimmed <= upper)]
+        else:
+            trimmed_vals = trimmed
+        add_row(
+            f"Trimmed Mean P&L ({int(trim*100)}%)",
+            _trimmed_mean(pnl, trim),
+            None,
+            trimmed_vals.std(ddof=0) if not trimmed_vals.empty else None,
+            None,
+            trimmed_vals.dropna().shape[0] if trimmed_vals is not None else None
+        )
+        wins_vals = pnl.dropna()
+        if not wins_vals.empty:
+            lower = wins_vals.quantile(trim)
+            upper = wins_vals.quantile(1 - trim)
+            wins_vals = wins_vals.clip(lower=lower, upper=upper)
+        add_row(
+            f"Winsorized Mean P&L ({int(trim*100)}%)",
+            _winsorized_mean(pnl, trim),
+            None,
+            wins_vals.std(ddof=0) if not wins_vals.empty else None,
+            None,
+            wins_vals.dropna().shape[0] if wins_vals is not None else None
+        )
+        abs_pnl = pnl.abs()
+        add_row("Mean |P&L|", abs_pnl.mean(), None, abs_pnl.std(ddof=0), None, abs_pnl.dropna().shape[0])
+
+        if "size" in trades_df.columns:
+            size = pd.to_numeric(trades_df["size"], errors="coerce")
+            per_unit = pnl / size.replace(0, np.nan)
+            add_row("Mean P&L per Unit", per_unit.mean(), None, per_unit.std(ddof=0), None, per_unit.dropna().shape[0])
+
+    if ret is not None:
+        add_row("Mean P&L %", None, ret.mean(), None, ret.std(ddof=0), ret.dropna().shape[0])
+        add_row("Median P&L %", None, ret.median(), None, ret.std(ddof=0), ret.dropna().shape[0])
+        trimmed_ret = ret.dropna()
+        if not trimmed_ret.empty:
+            lower = trimmed_ret.quantile(trim)
+            upper = trimmed_ret.quantile(1 - trim)
+            trimmed_ret_vals = trimmed_ret[(trimmed_ret >= lower) & (trimmed_ret <= upper)]
+        else:
+            trimmed_ret_vals = trimmed_ret
+        add_row(
+            f"Trimmed Mean P&L % ({int(trim*100)}%)",
+            None,
+            _trimmed_mean(ret, trim),
+            None,
+            trimmed_ret_vals.std(ddof=0) if not trimmed_ret_vals.empty else None,
+            trimmed_ret_vals.dropna().shape[0] if trimmed_ret_vals is not None else None
+        )
+        wins_ret = ret.dropna()
+        if not wins_ret.empty:
+            lower = wins_ret.quantile(trim)
+            upper = wins_ret.quantile(1 - trim)
+            wins_ret = wins_ret.clip(lower=lower, upper=upper)
+        add_row(
+            f"Winsorized Mean P&L % ({int(trim*100)}%)",
+            None,
+            _winsorized_mean(ret, trim),
+            None,
+            wins_ret.std(ddof=0) if not wins_ret.empty else None,
+            wins_ret.dropna().shape[0] if wins_ret is not None else None
+        )
+        abs_ret = ret.abs()
+        add_row("Mean |P&L %|", None, abs_ret.mean(), None, abs_ret.std(ddof=0), abs_ret.dropna().shape[0])
+
+        ret_clean = ret.dropna()
+        ret_clean = ret_clean[ret_clean > -1]
+        if not ret_clean.empty:
+            log_mean = np.log1p(ret_clean).mean()
+            geo_mean = np.expm1(log_mean)
+            add_row("Geometric Mean P&L %", None, geo_mean, None, None, ret_clean.dropna().shape[0])
+
+    if not rows:
+        return pd.DataFrame()
+
+    df_metrics = pd.DataFrame(rows)
+    if "P&L Value" in df_metrics.columns:
+        df_metrics["P&L Value"] = df_metrics["P&L Value"].apply(
+            lambda x: f"{x:,.2f}" if pd.notna(x) else ""
+        )
+    if "P&L %" in df_metrics.columns:
+        df_metrics["P&L %"] = df_metrics["P&L %"].apply(
+            lambda x: f"{x * 100:.3f}%" if pd.notna(x) else ""
+        )
+    if "Std Value" in df_metrics.columns:
+        df_metrics["Std Value"] = df_metrics["Std Value"].apply(
+            lambda x: f"{x:,.2f}" if pd.notna(x) else ""
+        )
+    if "Std %" in df_metrics.columns:
+        df_metrics["Std %"] = df_metrics["Std %"].apply(
+            lambda x: f"{x * 100:.3f}%" if pd.notna(x) else ""
+        )
+    if "n trades" in df_metrics.columns:
+        df_metrics["n trades"] = df_metrics["n trades"].apply(
+            lambda x: f"{int(x)}" if pd.notna(x) else ""
+        )
+    return df_metrics
+
+def _json_safe(obj):
+    if isinstance(obj, (np.integer, np.floating)):
+        return obj.item()
+    if isinstance(obj, (np.ndarray,)):
+        return obj.tolist()
+    if isinstance(obj, (pd.Timestamp, datetime.datetime, datetime.date)):
+        return obj.isoformat()
+    return str(obj)
+
+def _sanitize_for_json(value):
+    if isinstance(value, dict):
+        return {k: _sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_for_json(v) for v in value]
+    if isinstance(value, (np.integer, np.floating, np.ndarray, pd.Timestamp, datetime.datetime, datetime.date)):
+        return _json_safe(value)
+    return value
+
+def _build_results_payload():
+    payload = {
+        "exported_at": datetime.datetime.now().isoformat(),
+        "config": get_current_config(),
+        "wfo_results": st.session_state.get("wfo_results"),
+        "has_final_portfolio": "final_portfolio" in st.session_state,
+    }
+    return _sanitize_for_json(payload)
+
+def _export_results_zip(df_mode="none", df_max_rows=200000):
+    if "wfo_results" not in st.session_state:
+        st.error("No results available to export.")
+        return None
+
+    results = st.session_state["wfo_results"]
+    df = st.session_state.get("df")
+
+    payload = _build_results_payload()
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("results.json", json.dumps(payload, indent=2))
+
+        if results.get("out_of_sample_performance"):
+            oos_df = pd.DataFrame(results["out_of_sample_performance"])
+            zf.writestr("out_of_sample_performance.csv", oos_df.to_csv(index=False))
+        if results.get("in_sample_performance"):
+            is_df = pd.DataFrame(results["in_sample_performance"])
+            zf.writestr("in_sample_performance.csv", is_df.to_csv(index=False))
+        if results.get("best_params"):
+            params_df = pd.DataFrame(results["best_params"])
+            zf.writestr("best_params.csv", params_df.to_csv(index=False))
+
+        if df is not None and not df.empty and df_mode in ("full", "downsampled"):
+            df_out = df.copy()
+            if df_mode == "downsampled":
+                df_out = _downsample_df(df_out, max_rows=df_max_rows)
+            df_out.index.name = "Open time"
+            zf.writestr("df.csv", df_out.to_csv())
+
+        if "final_portfolio" in st.session_state:
+            pf = st.session_state["final_portfolio"]
+            try:
+                trades_df = pd.DataFrame(pf.trades.records)
+                zf.writestr("final_trades.csv", trades_df.to_csv(index=False))
+            except Exception:
+                pass
+            try:
+                stats_df = pf.trades.stats().reset_index()
+                stats_df.columns = ["metric", "value"]
+                zf.writestr("final_trade_stats.csv", stats_df.to_csv(index=False))
+            except Exception:
+                pass
+
+    zip_buffer.seek(0)
+    return zip_buffer
+
+def _save_results_zip_to_disk(zip_buffer):
+    reports_dir = os.path.join(os.path.dirname(__file__), "reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"wfo_results_{timestamp}.zip"
+    path = os.path.join(reports_dir, filename)
+    with open(path, "wb") as f:
+        f.write(zip_buffer.getvalue())
+    return path
+
+def _load_results_zip(zip_file):
+    try:
+        with zipfile.ZipFile(zip_file) as zf:
+            if "results.json" in zf.namelist():
+                payload = json.loads(zf.read("results.json").decode("utf-8"))
+                if payload.get("wfo_results"):
+                    st.session_state["wfo_results"] = payload["wfo_results"]
+            if "df.csv" in zf.namelist():
+                df = pd.read_csv(io.BytesIO(zf.read("df.csv")))
+                if "Open time" in df.columns:
+                    df["Open time"] = pd.to_datetime(df["Open time"], errors="coerce")
+                    df.set_index("Open time", inplace=True)
+                st.session_state["df"] = df
+
+            # Optional: load backtest artifacts for display
+            if "final_trades.csv" in zf.namelist():
+                trades_df = pd.read_csv(io.BytesIO(zf.read("final_trades.csv")))
+                st.session_state["final_trades_df"] = trades_df
+            if "final_trade_stats.csv" in zf.namelist():
+                stats_df = pd.read_csv(io.BytesIO(zf.read("final_trade_stats.csv")))
+                st.session_state["final_trade_stats_df"] = stats_df
+    except Exception as e:
+        st.error(f"Error loading results ZIP: {e}")
+
+def sync_dates_from_file(force=False):
+    file_path = st.session_state.get('file_path')
+    if not file_path or not os.path.exists(file_path):
+        return
+
+    if not force and st.session_state.get('last_data_file_path') == file_path:
+        return
+
+    min_date, max_date = get_csv_date_range(file_path)
+    if min_date and max_date:
+        st.session_state['start_date'] = min_date
+        st.session_state['end_date'] = max_date
+        st.session_state['last_data_file_path'] = file_path
 
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -66,7 +371,10 @@ with st.sidebar:
                     'metric2_name': 'metric2_name', 'weight_metric1': 'weight_metric1',
                     'weight_metric2': 'weight_metric2', 'patience_level': 'patience_level',
                     'max_trials': 'max_trials', 'neighbor_count': 'neighbor_count',
-                    'exit_sar_enabled': 'exit_sar_enabled'
+                    'exit_sar_enabled': 'exit_sar_enabled', 'exit_macd_enabled': 'exit_macd_enabled',
+                    'exit_macd_type_a': 'exit_macd_type_a', 'exit_macd_type_b': 'exit_macd_type_b',
+                    'order_sizing_mode': 'order_sizing_mode', 'order_fixed_cash': 'order_fixed_cash',
+                    'fees_pct': 'fees_pct'
                 }
                 for conf_key, widget_key in state_map.items():
                     if conf_key in loaded_config:
@@ -87,9 +395,17 @@ with st.sidebar:
                     if f'{param}_max' in loaded_config: st.session_state[f"max_{param}"] = loaded_config[f'{param}_max']
                     if f'{param}_step' in loaded_config: st.session_state[f"step_{param}"] = loaded_config[f'{param}_step']
 
+                if loaded_config.get('from_file'):
+                    sync_dates_from_file(force=True)
+
                 st.success(f"Loaded config: {uploaded_config.name}")
         except Exception as e:
             st.error(f"Error loading config: {e}")
+
+    # --- Results Loader ---
+    uploaded_results = st.file_uploader("📦 Load Results (ZIP)", type=['zip'])
+    if uploaded_results is not None:
+        _load_results_zip(uploaded_results)
     
     # --- Data Settings ---
     with st.expander("1. Data Configuration", expanded=True):
@@ -111,7 +427,12 @@ with st.sidebar:
         data_source = st.radio("Data Source", options=ds_options, index=0, key='data_source')
         
         if data_source == "Local File":
-            file_path = st.text_input("File Path", value=DEFAULT_DATA_FILE, key='file_path')
+            file_path = st.text_input(
+                "File Path",
+                value=DEFAULT_DATA_FILE,
+                key='file_path',
+                on_change=sync_dates_from_file
+            )
             if not os.path.exists(file_path):
                 st.error("File not found! Please check the path.")
         else:
@@ -166,7 +487,26 @@ with st.sidebar:
             key='exit_sar_enabled'
         )
 
-        exit_params = ['user_exit_sma_length', 'sar_start', 'sar_increment', 'sar_maximum']
+        exit_macd_enabled = st.checkbox(
+            "Enable MACD Exit",
+            value=True,
+            key='exit_macd_enabled'
+        )
+        exit_macd_type_a = st.checkbox(
+            "MACD Exit Type A (signal falling)",
+            value=True,
+            key='exit_macd_type_a'
+        )
+        exit_macd_type_b = st.checkbox(
+            "MACD Exit Type B (simple crossunder)",
+            value=True,
+            key='exit_macd_type_b'
+        )
+
+        exit_params = [
+            'user_exit_sma_length', 'sar_start', 'sar_increment', 'sar_maximum',
+            'macd_fast_length', 'macd_slow_length', 'macd_signal_length'
+        ]
         for param in exit_params:
             d_min, d_max, d_step = DEFAULT_PARAM_GRID[param]
             enabled, p_min, p_max, p_step = param_input(param, param, d_min, d_max, d_step)
@@ -209,6 +549,40 @@ with st.sidebar:
         metric2 = st.selectbox("Secondary Metric", options=metric_options, index=m2_idx, key='metric2_name')
         weight2 = st.number_input("Weight 2", value=0.0, key='weight_metric2')
 
+    # --- Execution Settings ---
+    with st.expander("6. Execution Settings", expanded=False):
+        sizing_options = {
+            "percent_equity": "100% capital",
+            "fixed_cash": "Fixed amount (10000)"
+        }
+        sizing_values = list(sizing_options.keys())
+        default_idx = 0
+        order_sizing_mode = st.selectbox(
+            "Order sizing",
+            options=sizing_values,
+            index=default_idx,
+            key="order_sizing_mode",
+            format_func=lambda v: sizing_options.get(v, v)
+        )
+
+        order_fixed_cash = st.number_input(
+            "Fixed amount per trade",
+            min_value=0.0,
+            value=10000.0,
+            step=100.0,
+            key="order_fixed_cash",
+            disabled=(order_sizing_mode != "fixed_cash")
+        )
+
+        fees_pct = st.number_input(
+            "Brokerage fees (%)",
+            min_value=0.0,
+            value=0.0,
+            step=0.001,
+            format="%.3f",
+            key="fees_pct"
+        )
+
 # ==============================================================================
 # HELPER FUNCTIONS
 # ==============================================================================
@@ -241,6 +615,12 @@ def get_current_config():
         'weight_metric1': weight1,
         'weight_metric2': weight2,
         'exit_sar_enabled': exit_sar_enabled,
+        'exit_macd_enabled': exit_macd_enabled,
+        'exit_macd_type_a': exit_macd_type_a,
+        'exit_macd_type_b': exit_macd_type_b,
+        'order_sizing_mode': order_sizing_mode,
+        'order_fixed_cash': order_fixed_cash,
+        'fees_pct': fees_pct,
         'n_windows': n_windows,
         'train_size': train_size,
         'anchored': anchored,
@@ -284,8 +664,31 @@ def run_final_backtest_logic():
         return
 
     results = st.session_state['wfo_results']
-    df = st.session_state['df']
     config = get_current_config()
+    final_start_date = st.session_state.get('final_start_date', config.get('start_date'))
+    final_end_date = st.session_state.get('final_end_date', config.get('end_date'))
+    final_file_path = st.session_state.get('final_file_path', config.get('file_path'))
+
+    with st.spinner("Loading data for final backtest..."):
+        if config.get('from_file'):
+            df = load_data(
+                final_start_date,
+                final_end_date,
+                config.get('timeframe', DEFAULT_TIMEFRAME),
+                from_file=True,
+                file_path=final_file_path
+            )
+        else:
+            df = load_data(
+                final_start_date,
+                final_end_date,
+                config.get('timeframe', DEFAULT_TIMEFRAME),
+                from_file=False
+            )
+
+    if df is None or df.empty:
+        st.error("No data loaded for the final backtest range.")
+        return
 
     metric1_name = config.get('metric1_name', 'sharpe_ratio')
     metric2_name = config.get('metric2_name', 'total_return')
@@ -390,6 +793,11 @@ def run_final_backtest_logic():
     st.session_state['final_params_oos_metrics'] = best_oos_metrics
     st.session_state['final_params_is_score'] = combined_score(best_is_metrics)
     st.session_state['final_params_oos_score'] = combined_score(best_oos_metrics)
+
+    # Inject execution settings into params for the final backtest
+    chosen_params['order_sizing_mode'] = config.get('order_sizing_mode', 'percent_equity')
+    chosen_params['order_fixed_cash'] = float(config.get('order_fixed_cash', 10000.0))
+    chosen_params['fees_pct'] = float(config.get('fees_pct', 0.0))
     
     with st.spinner("Running Final Backtest on Full Dataset..."):
         try:
@@ -427,6 +835,8 @@ def run_wfo(config, control=None):
                 return None, None
 
             st.write(f"✅ Loaded {len(df)} bars of data.")
+            st.session_state['opt_start_date'] = config.get('start_date')
+            st.session_state['opt_end_date'] = config.get('end_date')
             
             # Prepare WFO arguments
             params_grid = get_param_grid(config)
@@ -517,9 +927,65 @@ with col_save:
         use_container_width=True
     )
 
+st.sidebar.divider()
+st.sidebar.subheader("📤 Export Results")
+if "wfo_results" in st.session_state:
+    df_export_mode = st.sidebar.selectbox(
+        "df.csv export",
+        options=["none", "downsampled", "full"],
+        index=0,
+        help="Include price data in the ZIP. Downsampled reduces size."
+    )
+    df_max_rows = 200000
+    if df_export_mode == "downsampled":
+        df_max_rows = st.sidebar.slider(
+            "Max rows for df.csv",
+            min_value=10000,
+            max_value=1000000,
+            value=200000,
+            step=10000,
+            help="Approximate maximum rows to keep in df.csv."
+        )
+    if st.sidebar.button("💾 Save Results to Disk", use_container_width=True):
+        zip_buffer = _export_results_zip(df_mode=df_export_mode, df_max_rows=df_max_rows)
+        if zip_buffer is not None:
+            saved_path = _save_results_zip_to_disk(zip_buffer)
+            st.session_state["results_zip_bytes"] = zip_buffer.getvalue()
+            st.session_state["results_zip_path"] = saved_path
+            st.sidebar.success(f"Saved: {saved_path}")
+
+    if st.session_state.get("results_zip_bytes"):
+        st.sidebar.download_button(
+            label="⬇️ Download Results (ZIP)",
+            data=st.session_state["results_zip_bytes"],
+            file_name=os.path.basename(st.session_state.get("results_zip_path", "wfo_results.zip")),
+            mime="application/zip",
+            use_container_width=True
+        )
+else:
+    st.sidebar.info("Run an optimization or load a results ZIP to enable export.")
+
 # Run Final Backtest Button (Conditional)
 if 'wfo_results' in st.session_state:
     st.sidebar.divider()
+    st.sidebar.subheader("🗓️ Final Backtest Range")
+    default_final_start = st.session_state.get('opt_start_date', st.session_state.get('start_date', DEFAULT_START_DATE))
+    default_final_end = st.session_state.get('opt_end_date', st.session_state.get('end_date', DEFAULT_END_DATE))
+    final_start_date = st.sidebar.text_input(
+        "Final Start Date (YYYY-MM-DD)",
+        value=default_final_start,
+        key="final_start_date"
+    )
+    final_end_date = st.sidebar.text_input(
+        "Final End Date (YYYY-MM-DD)",
+        value=default_final_end,
+        key="final_end_date"
+    )
+    final_file_path = st.sidebar.text_input(
+        "Final Data File Path",
+        value=st.session_state.get('file_path', DEFAULT_DATA_FILE),
+        key="final_file_path"
+    )
     if st.sidebar.button("🏆 Run Final Backtest", use_container_width=True):
         run_final_backtest_logic()
 
@@ -529,7 +995,7 @@ if 'wfo_results' in st.session_state:
 
 if 'wfo_results' in st.session_state:
     results = st.session_state['wfo_results']
-    df = st.session_state['df']
+    df = st.session_state.get('df')
     
     st.divider()
     st.header("📊 Optimization Results")
@@ -551,39 +1017,42 @@ if 'wfo_results' in st.session_state:
         # Combined Chart: Price + Windows
         st.subheader("Price Series with Walk-Forward Windows")
         
-        # Using Plotly for interactive chart
-        fig = go.Figure()
-        
-        # Price Line
-        if 'Close' in df.columns:
-            price_col = 'Close'
+        if df is None or df.empty:
+            st.warning("Price data (df) not available. Re-run optimization or include df.csv in the results ZIP.")
         else:
-            price_col = df.columns[0]
+            # Using Plotly for interactive chart
+            fig = go.Figure()
             
-        fig.add_trace(go.Scatter(x=df.index, y=df[price_col], mode='lines', name='Price', line=dict(color='#1f77b4', width=1)))
-        
-        # Add Windows
-        colors = {'train': 'rgba(0, 255, 0, 0.1)', 'test': 'rgba(255, 0, 0, 0.1)'}
-        
-        for i, window in enumerate(results['window_results']):
-            info = window['window_info']
-            # IS
-            if info['in_sample_start'] and info['in_sample_end']:
-                fig.add_vrect(
-                    x0=info['in_sample_start'], x1=info['in_sample_end'],
-                    fillcolor=colors['train'], layer="below", line_width=0,
-                    annotation_text=f"W{i+1} Train" if i==0 else None
-                )
-            # OOS
-            if info['out_sample_start'] and info['out_sample_end']:
-                fig.add_vrect(
-                    x0=info['out_sample_start'], x1=info['out_sample_end'],
-                    fillcolor=colors['test'], layer="below", line_width=0,
-                    annotation_text=f"W{i+1} Test" if i==0 else None
-                )
+            # Price Line
+            if 'Close' in df.columns:
+                price_col = 'Close'
+            else:
+                price_col = df.columns[0]
                 
-        fig.update_layout(height=500, template="plotly_dark", title_text="Market Data & WFO Windows")
-        st.plotly_chart(fig, use_container_width=True)
+            fig.add_trace(go.Scatter(x=df.index, y=df[price_col], mode='lines', name='Price', line=dict(color='#1f77b4', width=1)))
+            
+            # Add Windows
+            colors = {'train': 'rgba(0, 255, 0, 0.1)', 'test': 'rgba(255, 0, 0, 0.1)'}
+            
+            for i, window in enumerate(results['window_results']):
+                info = window['window_info']
+                # IS
+                if info['in_sample_start'] and info['in_sample_end']:
+                    fig.add_vrect(
+                        x0=info['in_sample_start'], x1=info['in_sample_end'],
+                        fillcolor=colors['train'], layer="below", line_width=0,
+                        annotation_text=f"W{i+1} Train" if i==0 else None
+                    )
+                # OOS
+                if info['out_sample_start'] and info['out_sample_end']:
+                    fig.add_vrect(
+                        x0=info['out_sample_start'], x1=info['out_sample_end'],
+                        fillcolor=colors['test'], layer="below", line_width=0,
+                        annotation_text=f"W{i+1} Test" if i==0 else None
+                    )
+                    
+            fig.update_layout(height=500, template="plotly_dark", title_text="Market Data & WFO Windows")
+            st.plotly_chart(fig, use_container_width=True)
         
         # IS + OOS Performance per Window (shared scale)
         if results['out_of_sample_performance'] or results['in_sample_performance']:
@@ -603,22 +1072,6 @@ if 'wfo_results' in st.session_state:
 
             fig_perf = make_subplots(specs=[[{"secondary_y": True}]])
 
-            if not oos_metrics_df.empty:
-                fig_perf.add_trace(go.Bar(
-                    x=windows,
-                    y=oos_metrics_df.set_index('Window').reindex(windows)['return'],
-                    name="OOS Return %",
-                    marker_color='rgb(55, 83, 109)'
-                ), secondary_y=False)
-
-                fig_perf.add_trace(go.Scatter(
-                    x=windows,
-                    y=oos_metrics_df.set_index('Window').reindex(windows)['sharpe'],
-                    name="OOS Sharpe",
-                    mode='lines+markers',
-                    line=dict(color='rgb(26, 118, 255)')
-                ), secondary_y=True)
-
             if not is_metrics_df.empty:
                 fig_perf.add_trace(go.Bar(
                     x=windows,
@@ -634,6 +1087,22 @@ if 'wfo_results' in st.session_state:
                     name="IS Sharpe",
                     mode='lines+markers',
                     line=dict(color='rgb(214, 39, 40)')
+                ), secondary_y=True)
+
+            if not oos_metrics_df.empty:
+                fig_perf.add_trace(go.Bar(
+                    x=windows,
+                    y=oos_metrics_df.set_index('Window').reindex(windows)['return'],
+                    name="OOS Return %",
+                    marker_color='rgb(55, 83, 109)'
+                ), secondary_y=False)
+
+                fig_perf.add_trace(go.Scatter(
+                    x=windows,
+                    y=oos_metrics_df.set_index('Window').reindex(windows)['sharpe'],
+                    name="OOS Sharpe",
+                    mode='lines+markers',
+                    line=dict(color='rgb(26, 118, 255)')
                 ), secondary_y=True)
 
             fig_perf.update_layout(
@@ -654,6 +1123,9 @@ if 'wfo_results' in st.session_state:
         # Filter numeric parameters only
         numeric_cols = params_df.select_dtypes(include=[np.number]).columns
         numeric_cols = [c for c in numeric_cols if c not in ['window', 'metric1_name', 'metric2_name']] # Filter out non-params
+        selected_for_opt = st.session_state.get('selected_params', [])
+        if selected_for_opt:
+            numeric_cols = [c for c in numeric_cols if c in selected_for_opt]
         
         if numeric_cols:
             # Normalize for heatmap
@@ -764,6 +1236,10 @@ if 'wfo_results' in st.session_state:
             best_oos_metrics = st.session_state.get('final_params_oos_metrics')
             best_is_score = st.session_state.get('final_params_is_score')
             best_oos_score = st.session_state.get('final_params_oos_score')
+            macd_type_a = st.session_state.get('exit_macd_type_a')
+            macd_type_b = st.session_state.get('exit_macd_type_b')
+            exit_sar_enabled = st.session_state.get('exit_sar_enabled')
+            exit_macd_enabled = st.session_state.get('exit_macd_enabled')
             
             if best_score is not None:
                 st.markdown(f"**Best Optimization Score (combined_score):** `{best_score:.4f}`")
@@ -773,6 +1249,16 @@ if 'wfo_results' in st.session_state:
                 st.markdown(f"**IS Combined Score:** `{best_is_score:.4f}`")
             if best_oos_score is not None:
                 st.markdown(f"**OOS Combined Score:** `{best_oos_score:.4f}`")
+            if macd_type_a is not None or macd_type_b is not None:
+                st.markdown(
+                    f"**MACD Exit Types:** "
+                    f"Type A = `{bool(macd_type_a)}`, "
+                    f"Type B = `{bool(macd_type_b)}`"
+                )
+            if exit_macd_enabled is not None:
+                st.markdown(f"**MACD Exit Enabled:** `{bool(exit_macd_enabled)}`")
+            if exit_sar_enabled is not None:
+                st.markdown(f"**PSAR Exit Enabled:** `{bool(exit_sar_enabled)}`")
             st.markdown(f"**Used Parameters (Best Window):** `{params}`")
             if best_is_metrics:
                 st.markdown(
@@ -801,60 +1287,261 @@ if 'wfo_results' in st.session_state:
             m4.metric("Win Rate", f"{pf.trades.win_rate * 100:.2f}%")
             
             st.markdown("#### Cumulative Returns")
-            # VectorBT plot is a FigureWidget, convert to compatible format or use st.plotly_chart
-            # pf.plot() returns a FigureWidget. st.plotly_chart handles it.
-            st.plotly_chart(pf.plot(), use_container_width=True)
+            max_points = st.slider(
+                "Max points to plot",
+                min_value=1000,
+                max_value=200000,
+                value=20000,
+                step=1000,
+                key="max_plot_points",
+                help="Downsample large series to avoid Streamlit message size limits."
+            )
+            # Avoid sending huge figures to the browser.
+            try:
+                value_series = pf.value() if callable(getattr(pf, "value", None)) else pf.value
+                value_series = _downsample_series(value_series, max_points=max_points)
+                fig_value = go.Figure()
+                fig_value.add_trace(go.Scatter(x=value_series.index, y=value_series.values, mode="lines", name="Portfolio Value"))
+                fig_value.update_layout(height=400, template="plotly_dark", title="Portfolio Value (Downsampled)")
+                st.plotly_chart(fig_value, use_container_width=True)
+            except Exception:
+                # Fallback to pf.plot() if needed, but warn about size.
+                st.warning("Large portfolio plot skipped due to size; consider using a smaller date range.")
             
             st.markdown("#### Trade Stats")
             st.dataframe(pf.trades.stats())
+            trim_pct = st.slider(
+                "Trim % for P&L metrics",
+                min_value=1,
+                max_value=20,
+                value=5,
+                step=1,
+                key="pnl_trim_pct",
+                help="Percent trimmed/winsorized from each tail."
+            )
+            pnl_metrics_df = _compute_trade_pnl_metrics(pd.DataFrame(pf.trades.records), trim=trim_pct / 100.0)
+            if not pnl_metrics_df.empty:
+                st.markdown("#### Average P&L per Trade (Multiple Methods)")
+                st.dataframe(pnl_metrics_df, use_container_width=True)
+
+            st.markdown("#### Performance by Time of Day and Day of Week")
+
+            # Extract trade data
+            trades_df = pd.DataFrame(pf.trades.records)
+            had_trades = not trades_df.empty
+
+            if had_trades:
+                if len(trades_df) > 200000:
+                    st.warning("Trade records are very large; displaying a sampled subset for charts.")
+                    trades_df = trades_df.sample(200000, random_state=42).sort_index()
+                if 'entry_ts' in trades_df.columns:
+                    trades_df['entry_ts'] = pd.to_datetime(trades_df['entry_ts'])
+                elif 'entry_idx' in trades_df.columns:
+                    entry_index = pf.wrapper.index
+                    try:
+                        trades_df['entry_ts'] = pd.to_datetime(
+                            entry_index.take(trades_df['entry_idx'].to_numpy())
+                        )
+                    except Exception:
+                        st.warning("Unable to derive entry timestamps; skipping time-based charts.")
+                        trades_df = pd.DataFrame()
+                else:
+                    st.warning("Trade records missing entry timestamps; skipping time-based charts.")
+                    trades_df = pd.DataFrame()
+
+            if not trades_df.empty:
+                # Extract time components
+                trades_df['day_of_week'] = trades_df['entry_ts'].dt.day_name()
+                trades_df['hour_of_day'] = trades_df['entry_ts'].dt.hour
+
+                # --- Heatmap of PnL by Day and Hour ---
+                st.markdown("##### Profit & Loss Heatmap (by Entry Time)")
+                
+                pnl_by_time = trades_df.groupby(['day_of_week', 'hour_of_day'])['pnl'].sum().unstack(fill_value=0)
+                
+                # Order days of week correctly
+                day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                pnl_by_time = pnl_by_time.reindex(day_order)
+
+                fig_heatmap_time = px.imshow(
+                    pnl_by_time,
+                    labels=dict(x="Hour of Day", y="Day of Week", color="Total PnL"),
+                    x=pnl_by_time.columns,
+                    y=pnl_by_time.index,
+                    aspect="auto",
+                    color_continuous_scale="RdYlGn",
+                    title="Total PnL by Day of Week and Hour of Day"
+                )
+                fig_heatmap_time.update_xaxes(title_text='Hour of Day')
+                fig_heatmap_time.update_yaxes(title_text='Day of Week')
+                st.plotly_chart(fig_heatmap_time, use_container_width=True)
+
+                # --- Bar charts ---
+                col_time1, col_time2 = st.columns(2)
+
+                with col_time1:
+                    st.markdown("##### Total PnL by Day of Week")
+                    pnl_by_day = trades_df.groupby('day_of_week')['pnl'].sum().reindex(day_order)
+                    fig_bar_day = px.bar(
+                        pnl_by_day,
+                        x=pnl_by_day.index,
+                        y='pnl',
+                        labels={'pnl': 'Total Profit & Loss'},
+                        title="Total PnL per Day of Week"
+                    )
+                    st.plotly_chart(fig_bar_day, use_container_width=True)
+
+                with col_time2:
+                    st.markdown("##### Total PnL by Hour of Day")
+                    pnl_by_hour = trades_df.groupby('hour_of_day')['pnl'].sum()
+                    fig_bar_hour = px.bar(
+                        pnl_by_hour,
+                        x=pnl_by_hour.index,
+                        y='pnl',
+                        labels={'pnl': 'Total Profit & Loss'},
+                        title="Total PnL per Hour of Day"
+                    )
+                    st.plotly_chart(fig_bar_hour, use_container_width=True)
+            elif not had_trades:
+                st.warning("No trades were made in this backtest, so no time-based analysis can be shown.")
+
+            st.markdown("#### Rolling Performance Metrics")
             
+            rolling_window = st.number_input("Rolling Window Size (periods)", min_value=1, value=30, step=1, key='rolling_window_size')
+
+            if rolling_window:
+                returns = pf.returns() if callable(getattr(pf, "returns", None)) else pf.returns
+                returns = _downsample_series(returns, max_points=max(max_points, 5000))
+                if pf.trades.records.size == 0:
+                    st.warning("No trades were made, cannot calculate rolling performance.")
+                elif len(returns) < rolling_window:
+                    st.warning(f"Rolling window ({rolling_window}) is larger than the number of return periods ({len(returns)}). Please choose a smaller window.")
+                else:
+                    try:
+                        # Calculate rolling metrics
+                        if hasattr(pf, "rolling_returns"):
+                            rolling_returns = pf.rolling_returns(window=rolling_window, annualize=False) * 100
+                        else:
+                            rolling_returns = ((1 + returns).rolling(window=rolling_window).apply(np.prod, raw=True) - 1) * 100
+
+                        if hasattr(pf, "rolling_sharpe"):
+                            rolling_sharpe = pf.rolling_sharpe(window=rolling_window)
+                        else:
+                            rolling_mean = returns.rolling(window=rolling_window).mean()
+                            rolling_std = returns.rolling(window=rolling_window).std(ddof=0)
+                            rolling_sharpe = rolling_mean.divide(rolling_std).multiply(np.sqrt(rolling_window))
+
+                        # Drop NaNs which appear at the beginning of the series
+                        rolling_returns = rolling_returns.dropna()
+                        rolling_sharpe = rolling_sharpe.dropna()
+
+                        if rolling_returns.empty or rolling_sharpe.empty:
+                            st.warning("Not enough data to calculate rolling performance for the chosen window.")
+                        else:
+                            # Create figure with secondary y-axis
+                            fig_rolling = make_subplots(specs=[[{"secondary_y": True}]])
+
+                            # Add rolling returns trace
+                            fig_rolling.add_trace(
+                                go.Scatter(x=rolling_returns.index, y=rolling_returns, name="Rolling Returns (%)"),
+                                secondary_y=False,
+                            )
+
+                            # Add rolling sharpe ratio trace
+                            fig_rolling.add_trace(
+                                go.Scatter(x=rolling_sharpe.index, y=rolling_sharpe, name="Rolling Sharpe Ratio"),
+                                secondary_y=True,
+                            )
+
+                            # Add figure title
+                            fig_rolling.update_layout(
+                                title_text=f"{rolling_window}-Period Rolling Performance"
+                            )
+
+                            # Set y-axes titles
+                            fig_rolling.update_yaxes(title_text="Rolling Returns (%)", secondary_y=False)
+                            fig_rolling.update_yaxes(title_text="Rolling Sharpe Ratio", secondary_y=True)
+                            st.plotly_chart(fig_rolling, use_container_width=True)
+
+                    except Exception as e:
+                        st.error(f"Could not generate rolling performance plots for window size {rolling_window}. Error: {e}")
         else:
-            st.info("Click **Run Final Backtest** in the sidebar to generate results.")
+            trades_df = st.session_state.get("final_trades_df")
+            stats_df = st.session_state.get("final_trade_stats_df")
+            if trades_df is not None or stats_df is not None:
+                st.info("Loaded from results ZIP (portfolio object not available).")
+                if stats_df is not None:
+                    st.markdown("#### Trade Stats")
+                    st.dataframe(stats_df)
+                if trades_df is not None:
+                    trim_pct = st.slider(
+                        "Trim % for P&L metrics",
+                        min_value=1,
+                        max_value=20,
+                        value=5,
+                        step=1,
+                        key="pnl_trim_pct_import",
+                        help="Percent trimmed/winsorized from each tail."
+                    )
+                    pnl_metrics_df = _compute_trade_pnl_metrics(trades_df, trim=trim_pct / 100.0)
+                    if not pnl_metrics_df.empty:
+                        st.markdown("#### Average P&L per Trade (Multiple Methods)")
+                        st.dataframe(pnl_metrics_df, use_container_width=True)
+                    st.markdown("#### Trades")
+                    st.dataframe(trades_df)
+            else:
+                st.info("Run the final backtest or load a results ZIP that includes final backtest data.")
         
         # Manual re-run using a selected WFO window
         if results.get('window_results'):
             st.markdown("#### Re-run Final Backtest by WFO Window")
-            window_options = [w.get('window_info', {}).get('window') for w in results['window_results']]
-            window_options = [w for w in window_options if w is not None]
-            if window_options:
-                with st.form("final_backtest_window_form"):
-                    selected_window = st.selectbox("Select WFO Window", options=window_options, key='final_selected_window')
-                    submitted = st.form_submit_button("Run Final Backtest (Selected Window)")
+            if df is None or df.empty:
+                st.info("Price data (df) not available. Re-run optimization or include df.csv in the results ZIP.")
+            else:
+                window_options = [w.get('window_info', {}).get('window') for w in results['window_results']]
+                window_options = [w for w in window_options if w is not None]
+                if window_options:
+                    with st.form("final_backtest_window_form"):
+                        selected_window = st.selectbox("Select WFO Window", options=window_options, key='final_selected_window')
+                        submitted = st.form_submit_button("Run Final Backtest (Selected Window)")
 
-                if submitted:
-                    selected_entry = None
-                    for window in results['window_results']:
-                        if window.get('window_info', {}).get('window') == selected_window:
-                            selected_entry = window
-                            break
+                    if submitted:
+                        selected_entry = None
+                        for window in results['window_results']:
+                            if window.get('window_info', {}).get('window') == selected_window:
+                                selected_entry = window
+                                break
 
-                    if selected_entry:
-                        selected_params = (selected_entry.get('best_params') or {}).copy()
-                        int_params = {'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length'}
-                        for param in list(selected_params.keys()):
-                            if param in int_params:
+                        if selected_entry:
+                            selected_params = (selected_entry.get('best_params') or {}).copy()
+                            int_params = {'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length'}
+                            for param in list(selected_params.keys()):
+                                if param in int_params:
+                                    try:
+                                        selected_params[param] = int(round(float(selected_params[param])))
+                                    except Exception:
+                                        pass
+                                elif isinstance(selected_params[param], float):
+                                    selected_params[param] = round(selected_params[param], 2)
+
+                            config_local = get_current_config()
+                            selected_params['order_sizing_mode'] = config_local.get('order_sizing_mode', 'percent_equity')
+                            selected_params['order_fixed_cash'] = float(config_local.get('order_fixed_cash', 10000.0))
+                            selected_params['fees_pct'] = float(config_local.get('fees_pct', 0.0))
+                            with st.spinner("Running Final Backtest on Full Dataset..."):
                                 try:
-                                    selected_params[param] = int(round(float(selected_params[param])))
-                                except Exception:
-                                    pass
-                            elif isinstance(selected_params[param], float):
-                                selected_params[param] = round(selected_params[param], 2)
-
-                        config_local = get_current_config()
-                        with st.spinner("Running Final Backtest on Full Dataset..."):
-                            try:
-                                selected_portfolio = run_backtest(
-                                    df,
-                                    selected_params,
-                                    config_local.get('timeframe', DEFAULT_TIMEFRAME),
-                                    return_portfolio=True
-                                )
-                                st.session_state['final_portfolio'] = selected_portfolio
-                                st.session_state['final_params'] = selected_params
-                                st.session_state['final_params_window'] = selected_window
-                                st.success("Final Backtest Complete!")
-                            except Exception as e:
-                                st.error(f"Error in final backtest: {e}")
+                                    selected_portfolio = run_backtest(
+                                        df,
+                                        selected_params,
+                                        config_local.get('timeframe', DEFAULT_TIMEFRAME),
+                                        return_portfolio=True
+                                    )
+                                    st.session_state['final_portfolio'] = selected_portfolio
+                                    st.session_state['final_params'] = selected_params
+                                    st.session_state['final_params_window'] = selected_window
+                                    st.success("Final Backtest Complete!")
+                                except Exception as e:
+                                    st.error(f"Error in final backtest: {e}")
 
 elif not os.path.exists(DEFAULT_DATA_FILE):
     st.warning(f"⚠️ Default data file not found at: `{DEFAULT_DATA_FILE}`. Please configure the data source in the sidebar.")
