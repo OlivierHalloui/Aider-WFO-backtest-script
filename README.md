@@ -9,6 +9,8 @@ Streamlit app to run walk-forward optimization (WFO) and backtests for the ATDMF
 - In-sample vs out-of-sample performance visualization
 - Final backtest on the best window or a user-selected window
 - Config import/export (JSON)
+- Results export/import (ZIP with JSON/CSV)
+- Order sizing controls (100% equity or fixed cash) + brokerage fees
 
 ## Requirements
 - Python 3.10+
@@ -45,6 +47,8 @@ You can save the current configuration as JSON and reload it later.
 ## Notes
 - Bayesian and Optuna methods operate on discrete parameter grids.
 - The final backtest can use the best overall window or a selected window.
+- Final backtest range and data source can be adjusted independently of optimization.
+- Results ZIP can optionally include `df.csv` (large); use downsampled export to reduce size.
 - Some metrics rely on trade stats; ensure your VectorBT Pro version exposes these stats.
 
 ## Project Structure
