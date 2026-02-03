@@ -51,6 +51,9 @@ You can save the current configuration as JSON and reload it later.
 - Results ZIP can optionally include `df.csv` (large); use downsampled export to reduce size.
 - Some metrics rely on trade stats; ensure your VectorBT Pro version exposes these stats.
 
+## Changelog
+- 2026-02-03: Results export/import (ZIP), sizing/fees controls, independent final backtest range.
+
 ## Project Structure
 - `app.py`: Streamlit UI
 - `wfo.py`: WFO engine and optimization logic
