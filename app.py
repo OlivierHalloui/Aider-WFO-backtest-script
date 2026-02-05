@@ -239,6 +239,85 @@ def _sanitize_for_json(value):
         return _json_safe(value)
     return value
 
+def _select_best_params_from_results(results, config):
+    metric1_name = config.get('metric1_name', 'sharpe_ratio')
+    metric2_name = config.get('metric2_name', 'total_return')
+    weight_metric1 = float(config.get('weight_metric1', 1.0))
+    weight_metric2 = float(config.get('weight_metric2', 0.0))
+
+    def get_metric_value(row, name):
+        if not row:
+            return None
+        if name == 'max_drawdown':
+            value = row.get('max_drawdown')
+            return None if value is None else -value
+        if name == 'sharpe_ratio':
+            return row.get('sharpe')
+        if name == 'total_return':
+            return row.get('return')
+        if name == 'win_rate':
+            return row.get('win_rate')
+        if name == 'avg_gain_per_trade':
+            return row.get('avg_gain_per_trade')
+        if name == 'avg_loss_per_trade':
+            value = row.get('avg_loss_per_trade')
+            return None if value is None else -value
+        if name == 'avg_pl_per_trade':
+            return row.get('avg_pl_per_trade')
+        return None
+
+    def combined_score(row):
+        total_weight = weight_metric1 + weight_metric2
+        if total_weight == 0:
+            return None
+        m1 = get_metric_value(row, metric1_name)
+        m2 = get_metric_value(row, metric2_name)
+        if weight_metric1 != 0 and m1 is None:
+            return None
+        if weight_metric2 != 0 and m2 is None:
+            return None
+        if m1 is None:
+            m1 = 0.0
+        if m2 is None:
+            m2 = 0.0
+        return (weight_metric1 * m1 + weight_metric2 * m2) / total_weight
+
+    best_params = None
+    best_score = None
+    best_window = None
+    best_is_metrics = None
+    best_oos_metrics = None
+
+    is_map = {row.get('window'): row for row in results.get('in_sample_performance', [])}
+    oos_map = {row.get('window'): row for row in results.get('out_of_sample_performance', [])}
+
+    for window in results.get('window_results', []):
+        window_id = window.get('window_info', {}).get('window')
+        if window_id is None:
+            continue
+        is_row = is_map.get(window_id)
+        oos_row = oos_map.get(window_id)
+        is_score = combined_score(is_row)
+        oos_score = combined_score(oos_row)
+
+        if is_score is None and oos_score is None:
+            continue
+        if is_score is None:
+            window_score = oos_score
+        elif oos_score is None:
+            window_score = is_score
+        else:
+            window_score = (is_score + oos_score) / 2
+
+        if best_score is None or window_score > best_score:
+            best_score = window_score
+            best_params = (window.get('best_params') or {}).copy()
+            best_window = window_id
+            best_is_metrics = is_row
+            best_oos_metrics = oos_row
+
+    return best_params, best_score, best_window, best_is_metrics, best_oos_metrics
+
 def _build_results_payload():
     payload = {
         "exported_at": datetime.datetime.now().isoformat(),
@@ -343,8 +422,63 @@ def sync_dates_from_file(force=False):
         st.session_state['end_date'] = max_date
         st.session_state['last_data_file_path'] = file_path
 
+def load_best_params_into_inputs():
+    final_params = st.session_state.get("final_params")
+    if not final_params and 'wfo_results' in st.session_state:
+        best_params, best_score, best_window, best_is, best_oos = _select_best_params_from_results(
+            st.session_state['wfo_results'],
+            get_current_config()
+        )
+        if best_params:
+            st.session_state['final_params'] = best_params
+            st.session_state['final_params_score'] = best_score
+            st.session_state['final_params_window'] = best_window
+            st.session_state['final_params_is_metrics'] = best_is
+            st.session_state['final_params_oos_metrics'] = best_oos
+            final_params = best_params
+    if not final_params:
+        st.sidebar.error("No final parameters available.")
+        return
+
+    int_params = {'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length',
+                  'macd_fast_length', 'macd_slow_length', 'macd_signal_length'}
+    for param in DEFAULT_PARAM_GRID:
+        st.session_state[f"check_{param}"] = False
+
+    for param, value in final_params.items():
+        if param not in DEFAULT_PARAM_GRID:
+            continue
+        try:
+            if param in int_params:
+                value = int(round(float(value)))
+            else:
+                value = float(value)
+        except Exception:
+            continue
+
+        st.session_state[f"check_{param}"] = True
+        st.session_state[f"min_{param}"] = value
+        st.session_state[f"max_{param}"] = value
+        st.session_state[f"step_{param}"] = 1 if param in int_params else 0.01
+
+    window_id = st.session_state.get('final_params_window')
+    if window_id is not None:
+        st.sidebar.success(f"Loaded best parameters from window {window_id}.")
+    else:
+        st.sidebar.success("Loaded best parameters.")
+
 with st.sidebar:
     st.header("⚙️ Configuration")
+
+    has_final_params = 'final_params' in st.session_state or 'wfo_results' in st.session_state
+    st.sidebar.button(
+        "📥 Load Best Params into Inputs",
+        use_container_width=True,
+        on_click=load_best_params_into_inputs if has_final_params else None,
+        disabled=not has_final_params
+    )
+    if not has_final_params:
+        st.sidebar.info("Run the final backtest to enable loading best parameters.")
     
     # --- File Uploader for Config ---
     uploaded_config = st.file_uploader("📂 Load Config (JSON)", type=['json'])
@@ -689,88 +823,10 @@ def run_final_backtest_logic():
     if df is None or df.empty:
         st.error("No data loaded for the final backtest range.")
         return
-
-    metric1_name = config.get('metric1_name', 'sharpe_ratio')
-    metric2_name = config.get('metric2_name', 'total_return')
-    weight_metric1 = float(config.get('weight_metric1', 1.0))
-    weight_metric2 = float(config.get('weight_metric2', 0.0))
-
-    def get_metric_value(row, name):
-        if not row:
-            return None
-        if name == 'max_drawdown':
-            value = row.get('max_drawdown')
-            return None if value is None else -value
-        if name == 'sharpe_ratio':
-            return row.get('sharpe')
-        if name == 'total_return':
-            return row.get('return')
-        if name == 'win_rate':
-            return row.get('win_rate')
-        if name == 'avg_gain_per_trade':
-            return row.get('avg_gain_per_trade')
-        if name == 'avg_loss_per_trade':
-            value = row.get('avg_loss_per_trade')
-            return None if value is None else -value
-        if name == 'avg_pl_per_trade':
-            return row.get('avg_pl_per_trade')
-        return None
-
-    def combined_score(row):
-        total_weight = weight_metric1 + weight_metric2
-        if total_weight == 0:
-            return None
-        m1 = get_metric_value(row, metric1_name)
-        m2 = get_metric_value(row, metric2_name)
-        if weight_metric1 != 0 and m1 is None:
-            return None
-        if weight_metric2 != 0 and m2 is None:
-            return None
-        if m1 is None:
-            m1 = 0.0
-        if m2 is None:
-            m2 = 0.0
-        return (weight_metric1 * m1 + weight_metric2 * m2) / total_weight
-
-    def select_best_params(wfo_results):
-        best_params = None
-        best_score = None
-        best_window = None
-        best_is_metrics = None
-        best_oos_metrics = None
-
-        is_map = {row.get('window'): row for row in wfo_results.get('in_sample_performance', [])}
-        oos_map = {row.get('window'): row for row in wfo_results.get('out_of_sample_performance', [])}
-
-        for window in wfo_results.get('window_results', []):
-            window_id = window.get('window_info', {}).get('window')
-            if window_id is None:
-                continue
-            is_row = is_map.get(window_id)
-            oos_row = oos_map.get(window_id)
-            is_score = combined_score(is_row)
-            oos_score = combined_score(oos_row)
-
-            if is_score is None and oos_score is None:
-                continue
-            if is_score is None:
-                window_score = oos_score
-            elif oos_score is None:
-                window_score = is_score
-            else:
-                window_score = (is_score + oos_score) / 2
-
-            if best_score is None or window_score > best_score:
-                best_score = window_score
-                best_params = (window.get('best_params') or {}).copy()
-                best_window = window_id
-                best_is_metrics = is_row
-                best_oos_metrics = oos_row
-
-        return best_params, best_score, best_window, best_is_metrics, best_oos_metrics
+    st.session_state['final_backtest_df'] = df
 
     # Use the single best parameter set across all windows (by combined_score).
-    chosen_params, best_score, best_window, best_is_metrics, best_oos_metrics = select_best_params(results)
+    chosen_params, best_score, best_window, best_is_metrics, best_oos_metrics = _select_best_params_from_results(results, config)
     if not chosen_params:
         st.error("No valid parameters found for final backtest.")
         return
@@ -791,8 +847,50 @@ def run_final_backtest_logic():
     st.session_state['final_params_window'] = best_window
     st.session_state['final_params_is_metrics'] = best_is_metrics
     st.session_state['final_params_oos_metrics'] = best_oos_metrics
-    st.session_state['final_params_is_score'] = combined_score(best_is_metrics)
-    st.session_state['final_params_oos_score'] = combined_score(best_oos_metrics)
+    def _combined_score_local(row):
+        metric1_name = config.get('metric1_name', 'sharpe_ratio')
+        metric2_name = config.get('metric2_name', 'total_return')
+        weight_metric1 = float(config.get('weight_metric1', 1.0))
+        weight_metric2 = float(config.get('weight_metric2', 0.0))
+
+        def get_metric_value(row, name):
+            if not row:
+                return None
+            if name == 'max_drawdown':
+                value = row.get('max_drawdown')
+                return None if value is None else -value
+            if name == 'sharpe_ratio':
+                return row.get('sharpe')
+            if name == 'total_return':
+                return row.get('return')
+            if name == 'win_rate':
+                return row.get('win_rate')
+            if name == 'avg_gain_per_trade':
+                return row.get('avg_gain_per_trade')
+            if name == 'avg_loss_per_trade':
+                value = row.get('avg_loss_per_trade')
+                return None if value is None else -value
+            if name == 'avg_pl_per_trade':
+                return row.get('avg_pl_per_trade')
+            return None
+
+        total_weight = weight_metric1 + weight_metric2
+        if total_weight == 0:
+            return None
+        m1 = get_metric_value(row, metric1_name)
+        m2 = get_metric_value(row, metric2_name)
+        if weight_metric1 != 0 and m1 is None:
+            return None
+        if weight_metric2 != 0 and m2 is None:
+            return None
+        if m1 is None:
+            m1 = 0.0
+        if m2 is None:
+            m2 = 0.0
+        return (weight_metric1 * m1 + weight_metric2 * m2) / total_weight
+
+    st.session_state['final_params_is_score'] = _combined_score_local(best_is_metrics)
+    st.session_state['final_params_oos_score'] = _combined_score_local(best_oos_metrics)
 
     # Inject execution settings into params for the final backtest
     chosen_params['order_sizing_mode'] = config.get('order_sizing_mode', 'percent_equity')
@@ -1299,14 +1397,49 @@ if 'wfo_results' in st.session_state:
             # Avoid sending huge figures to the browser.
             try:
                 value_series = pf.value() if callable(getattr(pf, "value", None)) else pf.value
+                if value_series is None:
+                    raise ValueError("Portfolio value series not available.")
+                if not isinstance(value_series, pd.Series):
+                    value_series = pd.Series(value_series)
                 value_series = _downsample_series(value_series, max_points=max_points)
-                fig_value = go.Figure()
-                fig_value.add_trace(go.Scatter(x=value_series.index, y=value_series.values, mode="lines", name="Portfolio Value"))
-                fig_value.update_layout(height=400, template="plotly_dark", title="Portfolio Value (Downsampled)")
+
+                fig_value = make_subplots(specs=[[{"secondary_y": True}]])
+                fig_value.add_trace(
+                    go.Scatter(x=value_series.index, y=value_series.values, mode="lines", name="Portfolio Value"),
+                    secondary_y=False
+                )
+
+                # Overlay price on secondary axis if available
+                price_series = None
+                price_df = st.session_state.get('final_backtest_df')
+                if price_df is None or price_df.empty:
+                    price_df = df
+                if price_df is not None and not price_df.empty:
+                    if 'Close' in price_df.columns:
+                        price_series = price_df['Close']
+                    elif len(price_df.columns) > 0:
+                        price_series = price_df.iloc[:, 0]
+                if price_series is not None:
+                    if not isinstance(price_series, pd.Series):
+                        price_series = pd.Series(price_series)
+                    price_series = _downsample_series(price_series, max_points=max_points)
+                    fig_value.add_trace(
+                        go.Scatter(
+                            x=price_series.index,
+                            y=price_series.values,
+                            mode="lines",
+                            name="Asset Price",
+                            line=dict(color="#FF7F0E", width=1)
+                        ),
+                        secondary_y=True
+                    )
+
+                fig_value.update_layout(height=400, template="plotly_dark", title="Portfolio Value + Asset Price (Downsampled)")
+                fig_value.update_yaxes(title_text="Portfolio Value", secondary_y=False)
+                fig_value.update_yaxes(title_text="Asset Price", secondary_y=True)
                 st.plotly_chart(fig_value, use_container_width=True)
-            except Exception:
-                # Fallback to pf.plot() if needed, but warn about size.
-                st.warning("Large portfolio plot skipped due to size; consider using a smaller date range.")
+            except Exception as e:
+                st.warning(f"Plot skipped due to size or data issue: {e}")
             
             st.markdown("#### Trade Stats")
             st.dataframe(pf.trades.stats())
@@ -1525,23 +1658,46 @@ if 'wfo_results' in st.session_state:
                                     selected_params[param] = round(selected_params[param], 2)
 
                             config_local = get_current_config()
-                            selected_params['order_sizing_mode'] = config_local.get('order_sizing_mode', 'percent_equity')
-                            selected_params['order_fixed_cash'] = float(config_local.get('order_fixed_cash', 10000.0))
-                            selected_params['fees_pct'] = float(config_local.get('fees_pct', 0.0))
-                            with st.spinner("Running Final Backtest on Full Dataset..."):
-                                try:
-                                    selected_portfolio = run_backtest(
-                                        df,
-                                        selected_params,
+                            final_start_date = st.session_state.get('final_start_date', config_local.get('start_date'))
+                            final_end_date = st.session_state.get('final_end_date', config_local.get('end_date'))
+                            final_file_path = st.session_state.get('final_file_path', config_local.get('file_path'))
+                            with st.spinner("Loading data for final backtest range..."):
+                                if config_local.get('from_file'):
+                                    df_final = load_data(
+                                        final_start_date,
+                                        final_end_date,
                                         config_local.get('timeframe', DEFAULT_TIMEFRAME),
-                                        return_portfolio=True
+                                        from_file=True,
+                                        file_path=final_file_path
                                     )
-                                    st.session_state['final_portfolio'] = selected_portfolio
-                                    st.session_state['final_params'] = selected_params
-                                    st.session_state['final_params_window'] = selected_window
-                                    st.success("Final Backtest Complete!")
-                                except Exception as e:
-                                    st.error(f"Error in final backtest: {e}")
+                                else:
+                                    df_final = load_data(
+                                        final_start_date,
+                                        final_end_date,
+                                        config_local.get('timeframe', DEFAULT_TIMEFRAME),
+                                        from_file=False
+                                    )
+                            if df_final is None or df_final.empty:
+                                st.error("No data loaded for the final backtest range.")
+                            else:
+                                selected_params['order_sizing_mode'] = config_local.get('order_sizing_mode', 'percent_equity')
+                                selected_params['order_fixed_cash'] = float(config_local.get('order_fixed_cash', 10000.0))
+                                selected_params['fees_pct'] = float(config_local.get('fees_pct', 0.0))
+                                with st.spinner("Running Final Backtest on Full Dataset..."):
+                                    try:
+                                        selected_portfolio = run_backtest(
+                                            df_final,
+                                            selected_params,
+                                            config_local.get('timeframe', DEFAULT_TIMEFRAME),
+                                            return_portfolio=True
+                                        )
+                                        st.session_state['final_backtest_df'] = df_final
+                                        st.session_state['final_portfolio'] = selected_portfolio
+                                        st.session_state['final_params'] = selected_params
+                                        st.session_state['final_params_window'] = selected_window
+                                        st.success("Final Backtest Complete!")
+                                    except Exception as e:
+                                        st.error(f"Error in final backtest: {e}")
 
 elif not os.path.exists(DEFAULT_DATA_FILE):
     st.warning(f"⚠️ Default data file not found at: `{DEFAULT_DATA_FILE}`. Please configure the data source in the sidebar.")
