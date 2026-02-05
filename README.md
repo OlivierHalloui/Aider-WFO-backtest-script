@@ -53,6 +53,7 @@ You can save the current configuration as JSON and reload it later.
 
 ## Changelog
 - 2026-02-03: Results export/import (ZIP), sizing/fees controls, independent final backtest range.
+- 2026-02-05: Final backtest re-run respects custom date range, portfolio + price overlay chart, and best-params loader fixes.
 
 ## Project Structure
 - `app.py`: Streamlit UI
