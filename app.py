@@ -8,6 +8,8 @@ import datetime
 import io
 import zipfile
 import threading
+import hashlib
+import subprocess
 
 # Plotly expects np.bool8 on older releases; alias for numpy>=2.0 compatibility.
 if not hasattr(np, "bool8"):
@@ -241,6 +243,51 @@ def _sanitize_for_json(value):
         return _json_safe(value)
     return value
 
+def _utc_now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+def _sha256_json(value):
+    try:
+        normalized = _sanitize_for_json(value)
+        serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    except Exception:
+        return None
+
+def _safe_git_command(args):
+    try:
+        output = subprocess.check_output(
+            ["git", *args],
+            cwd=os.path.dirname(__file__),
+            stderr=subprocess.DEVNULL,
+            text=True
+        ).strip()
+        return output or None
+    except Exception:
+        return None
+
+def _get_git_traceability_info():
+    status = _safe_git_command(["status", "--porcelain"])
+    return {
+        "branch": _safe_git_command(["branch", "--show-current"]),
+        "commit": _safe_git_command(["rev-parse", "HEAD"]),
+        "commit_short": _safe_git_command(["rev-parse", "--short", "HEAD"]),
+        "remote_origin": _safe_git_command(["remote", "get-url", "origin"]),
+        "working_tree_dirty": bool(status) if status is not None else None
+    }
+
+def _build_traceability_payload(config_snapshot=None, results_snapshot=None, run_metadata=None):
+    # Centralized audit payload used in UI and exports.
+    payload = {
+        "generated_at_utc": _utc_now_iso(),
+        "app_name": "ATDMF Strategy Walk-Forward Optimizer",
+        "config_sha256": _sha256_json(config_snapshot) if config_snapshot is not None else None,
+        "results_sha256": _sha256_json(results_snapshot) if results_snapshot is not None else None,
+        "git": _get_git_traceability_info(),
+        "run": run_metadata or {}
+    }
+    return _sanitize_for_json(payload)
+
 def _select_best_params_from_results(results, config):
     metric1_name = config.get('metric1_name', 'sharpe_ratio')
     metric2_name = config.get('metric2_name', 'total_return')
@@ -321,11 +368,20 @@ def _select_best_params_from_results(results, config):
     return best_params, best_score, best_window, best_is_metrics, best_oos_metrics
 
 def _build_results_payload():
+    config_snapshot = get_current_config()
+    results_snapshot = st.session_state.get("wfo_results")
+    run_metadata = st.session_state.get("wfo_run_metadata")
+    traceability = _build_traceability_payload(
+        config_snapshot=config_snapshot,
+        results_snapshot=results_snapshot,
+        run_metadata=run_metadata
+    )
     payload = {
         "exported_at": datetime.datetime.now().isoformat(),
-        "config": get_current_config(),
-        "wfo_results": st.session_state.get("wfo_results"),
+        "config": config_snapshot,
+        "wfo_results": results_snapshot,
         "has_final_portfolio": "final_portfolio" in st.session_state,
+        "traceability": traceability,
     }
     return _sanitize_for_json(payload)
 
@@ -341,6 +397,7 @@ def _export_results_zip(df_mode="none", df_max_rows=200000):
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("results.json", json.dumps(payload, indent=2))
+        zf.writestr("audit_trace.json", json.dumps(payload.get("traceability", {}), indent=2))
 
         if results.get("out_of_sample_performance"):
             oos_df = pd.DataFrame(results["out_of_sample_performance"])
@@ -389,10 +446,20 @@ def _save_results_zip_to_disk(zip_buffer):
 def _load_results_zip(zip_file):
     try:
         with zipfile.ZipFile(zip_file) as zf:
+            payload = {}
             if "results.json" in zf.namelist():
                 payload = json.loads(zf.read("results.json").decode("utf-8"))
                 if payload.get("wfo_results"):
                     st.session_state["wfo_results"] = payload["wfo_results"]
+            if "audit_trace.json" in zf.namelist():
+                traceability = json.loads(zf.read("audit_trace.json").decode("utf-8"))
+                st.session_state["wfo_traceability"] = traceability
+                if isinstance(traceability, dict) and isinstance(traceability.get("run"), dict):
+                    st.session_state["wfo_run_metadata"] = traceability["run"]
+            elif isinstance(payload, dict) and payload.get("traceability"):
+                st.session_state["wfo_traceability"] = payload.get("traceability")
+                if isinstance(payload["traceability"], dict) and isinstance(payload["traceability"].get("run"), dict):
+                    st.session_state["wfo_run_metadata"] = payload["traceability"]["run"]
             if "df.csv" in zf.namelist():
                 df = pd.read_csv(io.BytesIO(zf.read("df.csv")))
                 if "Open time" in df.columns:
@@ -1442,10 +1509,20 @@ if st.session_state.get('wfo_running'):
     wfo_job_state = st.session_state.get('wfo_job_state')
     if wfo_thread is not None and not wfo_thread.is_alive() and wfo_job_state is not None:
         status = wfo_job_state.get('status')
+        job_conf = st.session_state.get('wfo_job_config', {})
+        run_metadata = {
+            "run_id": wfo_job_state.get("run_id"),
+            "status": status,
+            "started_at_utc": wfo_job_state.get("started_at_utc"),
+            "ended_at_utc": wfo_job_state.get("ended_at_utc"),
+            "elapsed_seconds": wfo_job_state.get("elapsed"),
+            "config_sha256": wfo_job_state.get("config_sha256"),
+            "results_sha256": wfo_job_state.get("results_sha256")
+        }
+        st.session_state["wfo_run_metadata"] = _sanitize_for_json(run_metadata)
         if status == 'completed' and wfo_job_state.get('results') is not None:
             st.session_state['wfo_results'] = wfo_job_state['results']
             st.session_state['df'] = wfo_job_state['df']
-            job_conf = st.session_state.get('wfo_job_config', {})
             st.session_state['opt_start_date'] = job_conf.get('start_date')
             st.session_state['opt_end_date'] = job_conf.get('end_date')
             st.session_state['wfo_notice'] = ("success", "Optimization finished.")
@@ -1456,6 +1533,12 @@ if st.session_state.get('wfo_running'):
             _restore_state_snapshot(st.session_state.get('wfo_prev_state', {}))
             err = wfo_job_state.get('error') or "Unknown optimization error."
             st.session_state['wfo_notice'] = ("error", f"An error occurred during optimization: {err}")
+
+        st.session_state["wfo_traceability"] = _build_traceability_payload(
+            config_snapshot=job_conf,
+            results_snapshot=wfo_job_state.get('results'),
+            run_metadata=st.session_state.get("wfo_run_metadata")
+        )
 
         for key in ['wfo_thread', 'wfo_control', 'wfo_job_state', 'wfo_prev_state', 'wfo_job_config']:
             st.session_state.pop(key, None)
@@ -1475,6 +1558,9 @@ with col_run:
             if not selected_params:
                 st.error("Select params!")
             else:
+                run_started_at = _utc_now_iso()
+                run_id = f"wfo-{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+                config_sha = _sha256_json(current_conf)
                 job_state = {
                     'status': 'running',
                     'progress': 0.0,
@@ -1482,7 +1568,12 @@ with col_run:
                     'results': None,
                     'df': None,
                     'error': None,
-                    'elapsed': None
+                    'elapsed': None,
+                    'run_id': run_id,
+                    'started_at_utc': run_started_at,
+                    'ended_at_utc': None,
+                    'config_sha256': config_sha,
+                    'results_sha256': None
                 }
                 control = WFOControl()
                 st.session_state['wfo_prev_state'] = _capture_state_snapshot()
@@ -1490,21 +1581,49 @@ with col_run:
                 st.session_state['wfo_control'] = control
                 st.session_state['wfo_job_config'] = current_conf.copy()
                 st.session_state['wfo_running'] = True
+                st.session_state['wfo_traceability'] = _build_traceability_payload(
+                    config_snapshot=current_conf,
+                    results_snapshot=None,
+                    run_metadata={
+                        "run_id": run_id,
+                        "status": "running",
+                        "started_at_utc": run_started_at,
+                        "config_sha256": config_sha
+                    }
+                )
 
                 def _wfo_worker():
                     results, df, elapsed = run_wfo(current_conf, control=control, job_state=job_state)
                     if control.should_stop():
                         job_state['status'] = 'stopped'
+                        job_state['ended_at_utc'] = _utc_now_iso()
                     elif results is not None and df is not None:
                         job_state['status'] = 'completed'
+                        run_meta_completed = {
+                            "run_id": job_state.get("run_id"),
+                            "status": "completed",
+                            "started_at_utc": job_state.get("started_at_utc"),
+                            "ended_at_utc": _utc_now_iso(),
+                            "elapsed_seconds": elapsed,
+                            "config_sha256": job_state.get("config_sha256")
+                        }
+                        # Bind audit metadata to the produced results so the trace follows the data.
+                        results['traceability'] = _build_traceability_payload(
+                            config_snapshot=current_conf,
+                            results_snapshot=results,
+                            run_metadata=run_meta_completed
+                        )
                         job_state['results'] = results
                         job_state['df'] = df
                         job_state['elapsed'] = elapsed
+                        job_state['ended_at_utc'] = run_meta_completed["ended_at_utc"]
+                        job_state['results_sha256'] = _sha256_json(results)
                     else:
                         if job_state.get('status') != 'stopped':
                             job_state['status'] = 'error'
                             if not job_state.get('error'):
                                 job_state['error'] = "No data found for the specified range/source."
+                            job_state['ended_at_utc'] = _utc_now_iso()
 
                 worker = threading.Thread(target=_wfo_worker, daemon=True)
                 st.session_state['wfo_thread'] = worker
@@ -1627,9 +1746,20 @@ if 'wfo_results' in st.session_state:
 if 'wfo_results' in st.session_state:
     results = st.session_state['wfo_results']
     df = st.session_state.get('df')
+    traceability = results.get("traceability") or st.session_state.get("wfo_traceability")
     
     st.divider()
     st.header("📊 Optimization Results")
+    if traceability:
+        with st.expander("🧾 Traçabilité du run", expanded=False):
+            run_meta = traceability.get("run", {}) if isinstance(traceability, dict) else {}
+            config_sha = run_meta.get("config_sha256")
+            config_sha_display = f"{config_sha[:12]}..." if isinstance(config_sha, str) and config_sha else "n/a"
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Run ID", str(run_meta.get("run_id", "n/a")))
+            c2.metric("Status", str(run_meta.get("status", "n/a")))
+            c3.metric("Config SHA256", config_sha_display)
+            st.json(traceability)
     
     # 1. Summary Metrics
     if results['out_of_sample_performance']:

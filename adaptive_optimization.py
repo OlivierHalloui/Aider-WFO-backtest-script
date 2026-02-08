@@ -1,3 +1,9 @@
+"""Adaptive continuous optimization engine.
+
+This module keeps a rolling memory of parameter-value performance and
+progressively narrows/refreshes the active grid without fixed WFO windows.
+"""
+
 import time
 from datetime import timedelta
 
@@ -155,6 +161,8 @@ def _portfolio_metrics(portfolio, cycle_id):
 
 
 class AdaptiveValueModel:
+    """Tracks per-parameter value statistics and builds the next active grid."""
+
     def __init__(self, base_param_grid, settings, rng):
         self.base_param_grid = {k: list(v) for k, v in base_param_grid.items()}
         self.param_names = list(self.base_param_grid.keys())
@@ -193,6 +201,7 @@ class AdaptiveValueModel:
         return mean, var, w
 
     def apply_decay(self):
+        """Apply exponential forgetting so recent trials matter more."""
         decay = min(max(self.decay, 0.0), 1.0)
         if decay >= 0.999999:
             return
@@ -203,6 +212,7 @@ class AdaptiveValueModel:
         self.total_trials *= decay
 
     def update_single(self, params, score, weight=1.0):
+        """Update statistics for one evaluated parameter combination."""
         score_f = _to_scalar_score(score)
         if np.isnan(score_f) or np.isinf(score_f):
             return
@@ -265,6 +275,7 @@ class AdaptiveValueModel:
         return {k: float(v / total) for k, v in raw.items()}
 
     def build_active_grid(self, last_best_params=None):
+        """Build next-cycle grid by balancing exploitation and exploration."""
         baseline_combos = _param_grid_combinations(self.base_param_grid)
         if self.total_trials < self.warmup_trials:
             return self.base_param_grid, {
@@ -297,6 +308,7 @@ class AdaptiveValueModel:
                 if best_idx is not None:
                     selected_idx.add(int(best_idx))
 
+            # Keep some random values to avoid premature collapse of the search space.
             explore_n = max(1, int(np.ceil(len(values) * self.exploration_ratio)))
             remaining = [i for i in range(len(values)) if i not in selected_idx]
             if remaining:
@@ -344,6 +356,7 @@ def adaptive_continuous_optimization(
     status_callback=None,
     control=None,
 ):
+    """Run adaptive cycles on a rolling train/OOS split until data is exhausted."""
     if settings is None:
         settings = WFOSettings()
     if not isinstance(df, pd.DataFrame) or df.empty:
@@ -446,6 +459,7 @@ def adaptive_continuous_optimization(
         if train_df.empty or oos_df.empty:
             break
 
+        # Step 1: age historical memory, then derive the active grid for this cycle.
         model.apply_decay()
         active_grid, guidance_info = model.build_active_grid(last_best_params=last_best_params)
         active_combinations = _param_grid_combinations(active_grid)
@@ -454,6 +468,7 @@ def adaptive_continuous_optimization(
         if not candidates:
             break
 
+        # Step 2: rank candidates using stochastic value estimates (Thompson-style).
         ranked = [(model.score_candidate_thompson(c), c) for c in candidates]
         ranked.sort(key=lambda x: x[0], reverse=True)
 
@@ -492,6 +507,7 @@ def adaptive_continuous_optimization(
                 if len(selected) >= trials_per_cycle:
                     break
 
+        # Step 3: evaluate a mixed batch (top-ranked + exploration).
         selected = selected[:trials_per_cycle]
         trials_rows = []
         for candidate in selected:
@@ -525,6 +541,7 @@ def adaptive_continuous_optimization(
         results["out_of_sample_performance"].append(out_sample_metrics)
         results["best_params"].append(best_params)
 
+        # Step 4: update memory with in-sample trials, then reinforce with OOS result.
         model.update_from_trials(trials_df, score_col="combined_score")
         oos_eval_params = best_params.copy()
         oos_eval_params.update(metrics_info)
