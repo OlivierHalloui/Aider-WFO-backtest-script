@@ -104,6 +104,40 @@ def calculate_exit_sma_nb(close, user_exit_sma_length):
     return signal
 
 @njit(cache=True)
+def ema_nb(arr, length):
+    if length <= 0:
+        return arr
+    n = len(arr)
+    out = np.empty(n)
+    if n == 0:
+        return out
+    alpha = 2.0 / (length + 1.0)
+    out[0] = arr[0]
+    for i in range(1, n):
+        out[i] = alpha * arr[i] + (1.0 - alpha) * out[i - 1]
+    return out
+
+@njit(cache=True)
+def macd_exit_signal_nb(close, fast_length, slow_length, signal_length, use_type_a, use_type_b):
+    n = len(close)
+    signal = np.zeros(n, dtype=np.bool_)
+    if n < 2:
+        return signal
+
+    ema_fast = ema_nb(close, fast_length)
+    ema_slow = ema_nb(close, slow_length)
+    macd = ema_fast - ema_slow
+    macd_signal = ema_nb(macd, signal_length)
+
+    for i in range(1, n):
+        cross_under = macd[i - 1] > macd_signal[i - 1] and macd[i] < macd_signal[i]
+        type_a = cross_under and macd_signal[i] < macd_signal[i - 1]
+        type_b = cross_under
+        signal[i] = (use_type_a and type_a) or (use_type_b and type_b)
+
+    return signal
+
+@njit(cache=True)
 def parabolic_sar_nb(high, low, sar_start, sar_increment, sar_maximum):
     n = len(high)
     sar = np.full(n, np.nan)
@@ -229,4 +263,19 @@ ParabolicSAR = vbt.IF(
     sar_start=0.02,
     sar_increment=0.02,
     sar_maximum=0.2
+)
+
+MACDExit = vbt.IF(
+    class_name='MACDExit',
+    input_names=['close'],
+    param_names=['fast_length', 'slow_length', 'signal_length', 'use_type_a', 'use_type_b'],
+    output_names=['signal']
+).with_apply_func(
+    macd_exit_signal_nb,
+    takes_1d=True,
+    fast_length=12,
+    slow_length=26,
+    signal_length=9,
+    use_type_a=True,
+    use_type_b=True
 )

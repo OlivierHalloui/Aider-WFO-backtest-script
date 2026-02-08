@@ -7,6 +7,7 @@ import json
 import datetime
 import io
 import zipfile
+import threading
 
 # Plotly expects np.bool8 on older releases; alias for numpy>=2.0 compatibility.
 if not hasattr(np, "bool8"):
@@ -23,6 +24,7 @@ from config import (
 )
 from main import get_param_grid, get_metrics_info, get_wfo_settings
 from wfo import walk_forward_optimization, OptimizationInterrupted
+from adaptive_optimization import adaptive_continuous_optimization
 from data_loading import load_data, get_csv_date_range
 from strategy import run_backtest
 
@@ -467,6 +469,25 @@ def load_best_params_into_inputs():
     else:
         st.sidebar.success("Loaded best parameters.")
 
+
+PARAMETER_HELP = {
+    'timeperiod': "Période des bandes de Bollinger (lookback).",
+    'StDev': "Nombre d'écarts-types utilisé pour les bandes de Bollinger.",
+    'coeff_medianeBBW': "Coefficient du signal de compression/horizontalité BBW.",
+    'coef_mediane': "Coefficient du signal écart Bollinger borné.",
+    'fenetre_lowest': "Fenêtre utilisée pour détecter les plus bas de BBW.",
+    'seuil_lowest': "Seuil appliqué sur le signal 'lowest' de BBW.",
+    'longueur_mediane': "Longueur de fenêtre pour la médiane de référence.",
+    'Nb_bars_above': "Nombre de barres de validation du signal d'entrée.",
+    'user_exit_sma_length': "Longueur de SMA pour le signal de sortie.",
+    'sar_start': "Valeur initiale du Parabolic SAR.",
+    'sar_increment': "Incrément du Parabolic SAR.",
+    'sar_maximum': "Valeur maximale du facteur d'accélération SAR.",
+    'macd_fast_length': "Période EMA rapide du MACD.",
+    'macd_slow_length': "Période EMA lente du MACD.",
+    'macd_signal_length': "Période de la ligne signal MACD."
+}
+
 with st.sidebar:
     st.header("⚙️ Configuration")
 
@@ -475,13 +496,18 @@ with st.sidebar:
         "📥 Load Best Params into Inputs",
         use_container_width=True,
         on_click=load_best_params_into_inputs if has_final_params else None,
-        disabled=not has_final_params
+        disabled=not has_final_params,
+        help="Charge les meilleurs paramètres trouvés dans les champs Min/Max/Step pour préparer un nouveau run."
     )
     if not has_final_params:
         st.sidebar.info("Run the final backtest to enable loading best parameters.")
     
     # --- File Uploader for Config ---
-    uploaded_config = st.file_uploader("📂 Load Config (JSON)", type=['json'])
+    uploaded_config = st.file_uploader(
+        "📂 Load Config (JSON)",
+        type=['json'],
+        help="Importe une configuration sauvegardée et met à jour les contrôles de la sidebar."
+    )
     
     if uploaded_config is not None:
         try:
@@ -500,11 +526,32 @@ with st.sidebar:
                     'start_date': 'start_date', 'end_date': 'end_date', 'timeframe': 'timeframe',
                     'file_path': 'file_path', 'n_windows': 'n_windows', 'train_size': 'train_size',
                     'anchored': 'anchored', 'optimization_method': 'optimization_method',
+                    'optimization_regime': 'optimization_regime',
                     'parallel_backend': 'parallel_backend', 'max_workers': 'max_workers',
                     'use_numba': 'use_numba', 'metric1_name': 'metric1_name', 
                     'metric2_name': 'metric2_name', 'weight_metric1': 'weight_metric1',
                     'weight_metric2': 'weight_metric2', 'patience_level': 'patience_level',
                     'max_trials': 'max_trials', 'neighbor_count': 'neighbor_count',
+                    'nn_min_samples': 'nn_min_samples',
+                    'nn_candidate_pool_size': 'nn_candidate_pool_size',
+                    'nn_top_k': 'nn_top_k',
+                    'nn_exploration_ratio': 'nn_exploration_ratio',
+                    'nn_hidden_size': 'nn_hidden_size',
+                    'nn_epochs': 'nn_epochs',
+                    'nn_learning_rate': 'nn_learning_rate',
+                    'nn_l2': 'nn_l2',
+                    'adaptive_train_bars': 'adaptive_train_bars',
+                    'adaptive_cycle_bars': 'adaptive_cycle_bars',
+                    'adaptive_trials_per_cycle': 'adaptive_trials_per_cycle',
+                    'adaptive_candidate_pool_size': 'adaptive_candidate_pool_size',
+                    'adaptive_keep_ratio': 'adaptive_keep_ratio',
+                    'adaptive_exploration_ratio': 'adaptive_exploration_ratio',
+                    'adaptive_min_values_per_param': 'adaptive_min_values_per_param',
+                    'adaptive_decay': 'adaptive_decay',
+                    'adaptive_ucb_beta': 'adaptive_ucb_beta',
+                    'adaptive_warmup_trials': 'adaptive_warmup_trials',
+                    'adaptive_max_cycles': 'adaptive_max_cycles',
+                    'adaptive_oos_weight': 'adaptive_oos_weight',
                     'exit_sar_enabled': 'exit_sar_enabled', 'exit_macd_enabled': 'exit_macd_enabled',
                     'exit_macd_type_a': 'exit_macd_type_a', 'exit_macd_type_b': 'exit_macd_type_b',
                     'order_sizing_mode': 'order_sizing_mode', 'order_fixed_cash': 'order_fixed_cash',
@@ -537,7 +584,11 @@ with st.sidebar:
             st.error(f"Error loading config: {e}")
 
     # --- Results Loader ---
-    uploaded_results = st.file_uploader("📦 Load Results (ZIP)", type=['zip'])
+    uploaded_results = st.file_uploader(
+        "📦 Load Results (ZIP)",
+        type=['zip'],
+        help="Recharge des résultats exportés (métriques, paramètres, éventuellement trades et df)."
+    )
     if uploaded_results is not None:
         _load_results_zip(uploaded_results)
     
@@ -547,25 +598,48 @@ with st.sidebar:
         # when key is NOT in session_state. If key IS in session_state (e.g. from loader above), 
         # Streamlit ignores value=. This allows user edits to persist.
         
-        start_date = st.text_input("Start Date (YYYY-MM-DD)", value=DEFAULT_START_DATE, key='start_date')
-        end_date = st.text_input("End Date (YYYY-MM-DD)", value=DEFAULT_END_DATE, key='end_date')
+        start_date = st.text_input(
+            "Start Date (YYYY-MM-DD)",
+            value=DEFAULT_START_DATE,
+            key='start_date',
+            help="Date de début utilisée pour charger les données d'optimisation."
+        )
+        end_date = st.text_input(
+            "End Date (YYYY-MM-DD)",
+            value=DEFAULT_END_DATE,
+            key='end_date',
+            help="Date de fin utilisée pour charger les données d'optimisation."
+        )
         
         # Timeframe selection
-        tf_options = ['1s', '5s', '15s', '30s', '1m', '5m', '15m', '30m', '1h', '4h', '1d']
+        tf_options = ['1s', '5s', '10s', '15s', '30s', '1m', '5m', '15m', '30m', '1h', '4h', '1d']
         default_tf_idx = tf_options.index(DEFAULT_TIMEFRAME) if DEFAULT_TIMEFRAME in tf_options else 1
-        timeframe = st.selectbox("Timeframe", options=tf_options, index=default_tf_idx, key='timeframe')
+        timeframe = st.selectbox(
+            "Timeframe",
+            options=tf_options,
+            index=default_tf_idx,
+            key='timeframe',
+            help="Résolution temporelle des bougies utilisées par la stratégie et le backtest."
+        )
         
         # Data Source
         ds_options = ["Local File", "Binance API"]
         # Default index 0 (Local File) if not in state
-        data_source = st.radio("Data Source", options=ds_options, index=0, key='data_source')
+        data_source = st.radio(
+            "Data Source",
+            options=ds_options,
+            index=0,
+            key='data_source',
+            help="Choisis entre un fichier local et un chargement via API Binance."
+        )
         
         if data_source == "Local File":
             file_path = st.text_input(
                 "File Path",
                 value=DEFAULT_DATA_FILE,
                 key='file_path',
-                on_change=sync_dates_from_file
+                on_change=sync_dates_from_file,
+                help="Chemin du CSV OHLCV local. Les dates peuvent être synchronisées automatiquement avec le fichier."
             )
             if not os.path.exists(file_path):
                 st.error("File not found! Please check the path.")
@@ -580,14 +654,37 @@ with st.sidebar:
         # Default value is True (checked) if not in state
         
         with c1:
-            enabled = st.checkbox(key, value=True, key=f"check_{key}")
+            enabled = st.checkbox(
+                key,
+                value=True,
+                key=f"check_{key}",
+                help=PARAMETER_HELP.get(key, "Active/désactive ce paramètre dans l'optimisation.")
+            )
         
         with c2:
-            min_val = st.number_input(f"Min", value=float(default_min), key=f"min_{key}", disabled=not enabled)
+            min_val = st.number_input(
+                "Min",
+                value=float(default_min),
+                key=f"min_{key}",
+                disabled=not enabled,
+                help=f"Borne minimale testée pour `{key}`."
+            )
         with c3:
-            max_val = st.number_input(f"Max", value=float(default_max), key=f"max_{key}", disabled=not enabled)
+            max_val = st.number_input(
+                "Max",
+                value=float(default_max),
+                key=f"max_{key}",
+                disabled=not enabled,
+                help=f"Borne maximale testée pour `{key}`."
+            )
         with c4:
-            step_val = st.number_input(f"Step", value=float(default_step), key=f"step_{key}", disabled=not enabled)
+            step_val = st.number_input(
+                "Step",
+                value=float(default_step),
+                key=f"step_{key}",
+                disabled=not enabled,
+                help=f"Pas d'incrément entre Min et Max pour `{key}`."
+            )
         return enabled, min_val, max_val, step_val
 
     # --- Entry Parameters ---
@@ -652,36 +749,305 @@ with st.sidebar:
 
     # --- WFO Settings ---
     with st.expander("4. WFO Engine Settings", expanded=False):
-        n_windows = st.number_input("Number of Windows", min_value=1, value=1, help="Number of Walk-Forward windows", key='n_windows')
-        train_size = st.slider("Train Size Ratio", 0.1, 0.9, 0.5, 0.05, help="Proportion of data used for optimization vs validation", key='train_size')
-        anchored = st.checkbox("Anchored WFO", value=False, help="If checked, training window grows. If unchecked, it slides.", key='anchored')
+        n_windows = st.number_input(
+            "Number of Windows",
+            min_value=1,
+            value=1,
+            help="Nombre de fenêtres utilisées pour le processus WFO classique.",
+            key='n_windows'
+        )
+        train_size = st.slider(
+            "Train Size Ratio",
+            0.1,
+            0.9,
+            0.5,
+            0.05,
+            help="Part de chaque fenêtre réservée à l'optimisation (IS) par rapport à la validation (OOS).",
+            key='train_size'
+        )
+        anchored = st.checkbox(
+            "Anchored WFO",
+            value=False,
+            help="Si activé, la zone d'entraînement s'agrandit au fil du temps; sinon elle glisse.",
+            key='anchored'
+        )
         
         opt_methods = ['grid', 'bayesian', 'optuna']
-        optimization_method = st.selectbox("Optimization Method", options=opt_methods, index=0, key='optimization_method')
-        
+        optimization_method = st.selectbox(
+            "Optimization Method",
+            options=opt_methods,
+            index=0,
+            key='optimization_method',
+            help="`grid`: exhaustif, `bayesian/optuna`: recherche probabiliste plus efficace sur grands espaces."
+        )
+
+        regime_options = ['classic', 'prev_best_grid', 'nn_guided', 'adaptive_continuous']
+        optimization_regime = st.selectbox(
+            "WFO Mode",
+            options=regime_options,
+            index=0,
+            key='optimization_regime',
+            format_func=lambda v: (
+                "Classic WFO"
+                if v == "classic"
+                else (
+                    "Previous Best Grid WFO"
+                    if v == "prev_best_grid"
+                    else ("NN-Guided WFO" if v == "nn_guided" else "Adaptive Continuous")
+                )
+            ),
+            help="Choisit la logique globale de construction de grille d'une fenêtre/cycle au suivant."
+        )
+
+        if optimization_regime == "prev_best_grid":
+            st.caption("Window 1 uses full grid; next windows reuse the previous window best parameter values as grid.")
+
         patience_levels = ['Low', 'Medium', 'High']
-        patience_level = st.selectbox("Patience Level (Bayesian/Optuna)", options=patience_levels, index=1, key='patience_level')
+        patience_level = st.selectbox(
+            "Patience Level (Bayesian/Optuna)",
+            options=patience_levels,
+            index=1,
+            key='patience_level',
+            help="Contrôle l'arrêt anticipé des méthodes probabilistes: Low plus rapide, High plus approfondi."
+        )
         
-        max_trials = st.number_input("Max Trials (Bayesian/Optuna)", min_value=10, value=200, step=10, key='max_trials')
-        neighbor_count = st.number_input("Stability Neighbor Count", min_value=1, value=5, step=1, key='neighbor_count')
+        max_trials = st.number_input(
+            "Max Trials (Bayesian/Optuna)",
+            min_value=10,
+            value=200,
+            step=10,
+            key='max_trials',
+            help="Nombre maximum d'essais évalués par fenêtre pour les méthodes bayésiennes."
+        )
+        neighbor_count = st.number_input(
+            "Stability Neighbor Count",
+            min_value=1,
+            value=5,
+            step=1,
+            key='neighbor_count',
+            help="Lissage local utilisé pour sélectionner un meilleur paramètre plus robuste."
+        )
         
         backends = ['thread', 'dask', 'ray', 'pathos']
-        parallel_backend = st.selectbox("Parallel Backend", options=backends, index=0, key='parallel_backend')
+        parallel_backend = st.selectbox(
+            "Parallel Backend",
+            options=backends,
+            index=0,
+            key='parallel_backend',
+            help="Moteur de parallélisation de l'optimisation."
+        )
         
-        max_workers = st.number_input("Max Workers", min_value=1, value=os.cpu_count() or 1, key='max_workers')
-        use_numba = st.checkbox("Use Numba Acceleration", value=True, key='use_numba')
+        max_workers = st.number_input(
+            "Max Workers",
+            min_value=1,
+            value=os.cpu_count() or 1,
+            key='max_workers',
+            help="Nombre max de workers CPU pour les tâches parallèles."
+        )
+        use_numba = st.checkbox(
+            "Use Numba Acceleration",
+            value=True,
+            key='use_numba',
+            help="Active les optimisations Numba lorsque disponibles."
+        )
+
+        if optimization_regime == "nn_guided":
+            st.caption("NN-guided mode: learns from previous windows and narrows the search space for the next one.")
+            nn_min_samples = st.number_input(
+                "NN Min Cumulative Trials",
+                min_value=50,
+                value=500,
+                step=50,
+                key='nn_min_samples',
+                help="Nombre minimal d'essais valides cumulés avant d'activer le guidage par réseau de neurones."
+            )
+            nn_candidate_pool_size = st.number_input(
+                "NN Candidate Pool Size",
+                min_value=500,
+                value=3000,
+                step=100,
+                key='nn_candidate_pool_size',
+                help="Nombre de candidats aléatoires scorés par le RN à chaque fenêtre."
+            )
+            nn_top_k = st.number_input(
+                "NN Top-K Candidates",
+                min_value=50,
+                value=250,
+                step=10,
+                key='nn_top_k',
+                help="Nombre de meilleurs candidats retenus pour construire la grille guidée."
+            )
+            nn_exploration_ratio = st.slider(
+                "NN Exploration Ratio",
+                min_value=0.0,
+                max_value=0.5,
+                value=0.15,
+                step=0.01,
+                key='nn_exploration_ratio',
+                help="Part des valeurs de base conservées pour l'exploration à chaque fenêtre."
+            )
+            nn_hidden_size = st.number_input(
+                "NN Hidden Size",
+                min_value=8,
+                value=32,
+                step=4,
+                key='nn_hidden_size'
+            )
+            nn_epochs = st.number_input(
+                "NN Epochs/Window",
+                min_value=10,
+                value=60,
+                step=5,
+                key='nn_epochs'
+            )
+            nn_learning_rate = st.number_input(
+                "NN Learning Rate",
+                min_value=0.0001,
+                value=0.01,
+                step=0.0005,
+                format="%.4f",
+                key='nn_learning_rate'
+            )
+            nn_l2 = st.number_input(
+                "NN L2 Regularization",
+                min_value=0.0,
+                value=0.0001,
+                step=0.0001,
+                format="%.4f",
+                key='nn_l2'
+            )
+        elif optimization_regime == "adaptive_continuous":
+            st.caption("Adaptive Continuous: no fixed WFO windows. The grid evolves cycle after cycle from historical trials.")
+            adaptive_train_bars = st.number_input(
+                "Adaptive Train Bars",
+                min_value=200,
+                value=5000,
+                step=100,
+                key='adaptive_train_bars',
+                help="Nombre de bougies historiques utilisées comme zone d'entraînement à chaque cycle."
+            )
+            adaptive_cycle_bars = st.number_input(
+                "Adaptive Cycle Bars",
+                min_value=50,
+                value=1000,
+                step=50,
+                key='adaptive_cycle_bars',
+                help="Nombre de bougies avancées et évaluées après chaque cycle adaptatif."
+            )
+            adaptive_trials_per_cycle = st.number_input(
+                "Adaptive Trials per Cycle",
+                min_value=10,
+                value=150,
+                step=10,
+                key='adaptive_trials_per_cycle'
+            )
+            adaptive_candidate_pool_size = st.number_input(
+                "Adaptive Candidate Pool",
+                min_value=200,
+                value=3000,
+                step=100,
+                key='adaptive_candidate_pool_size'
+            )
+            adaptive_keep_ratio = st.slider(
+                "Adaptive Keep Ratio",
+                min_value=0.10,
+                max_value=1.00,
+                value=0.40,
+                step=0.05,
+                key='adaptive_keep_ratio',
+                help="Part des meilleures valeurs conservées par paramètre pour la grille active suivante."
+            )
+            adaptive_exploration_ratio = st.slider(
+                "Adaptive Exploration Ratio",
+                min_value=0.00,
+                max_value=0.90,
+                value=0.20,
+                step=0.01,
+                key='adaptive_exploration_ratio',
+                help="Part d'exploration utilisée pour la sélection des valeurs et l'échantillonnage des essais."
+            )
+            adaptive_min_values_per_param = st.number_input(
+                "Adaptive Min Values/Param",
+                min_value=1,
+                value=2,
+                step=1,
+                key='adaptive_min_values_per_param'
+            )
+            adaptive_decay = st.number_input(
+                "Adaptive Memory Decay",
+                min_value=0.50,
+                max_value=1.00,
+                value=0.98,
+                step=0.01,
+                format="%.2f",
+                key='adaptive_decay',
+                help="Facteur de décroissance de la mémoire historique à chaque cycle (1.00 = mémoire complète)."
+            )
+            adaptive_ucb_beta = st.number_input(
+                "Adaptive UCB Beta",
+                min_value=0.0,
+                value=0.75,
+                step=0.05,
+                key='adaptive_ucb_beta',
+                help="Bonus d'incertitude appliqué au classement des valeurs de paramètres."
+            )
+            adaptive_warmup_trials = st.number_input(
+                "Adaptive Warmup Trials",
+                min_value=50,
+                value=300,
+                step=50,
+                key='adaptive_warmup_trials',
+                help="Nombre d'essais cumulés avant de commencer à resserrer la grille."
+            )
+            adaptive_max_cycles = st.number_input(
+                "Adaptive Max Cycles (0 = no cap)",
+                min_value=0,
+                value=0,
+                step=1,
+                key='adaptive_max_cycles'
+            )
+            adaptive_oos_weight = st.number_input(
+                "Adaptive OOS Weight",
+                min_value=0.0,
+                value=2.0,
+                step=0.1,
+                key='adaptive_oos_weight',
+                help="Poids appliqué au score OOS lors de la mise à jour des statistiques de valeurs."
+            )
 
     # --- Metrics ---
     with st.expander("5. Performance Metrics", expanded=False):
         metric_options = ['sharpe_ratio', 'total_return', 'max_drawdown', 'win_rate', 'avg_gain_per_trade', 'avg_loss_per_trade', 'avg_pl_per_trade']
         
         m1_idx = 0 # Default sharpe
-        metric1 = st.selectbox("Primary Metric", options=metric_options, index=m1_idx, key='metric1_name')
-        weight1 = st.number_input("Weight 1", value=1.0, key='weight_metric1')
+        metric1 = st.selectbox(
+            "Primary Metric",
+            options=metric_options,
+            index=m1_idx,
+            key='metric1_name',
+            help="Métrique principale du score combiné d'optimisation."
+        )
+        weight1 = st.number_input(
+            "Weight 1",
+            value=1.0,
+            key='weight_metric1',
+            help="Poids de la métrique principale."
+        )
         
         m2_idx = 1 # Default total_return
-        metric2 = st.selectbox("Secondary Metric", options=metric_options, index=m2_idx, key='metric2_name')
-        weight2 = st.number_input("Weight 2", value=0.0, key='weight_metric2')
+        metric2 = st.selectbox(
+            "Secondary Metric",
+            options=metric_options,
+            index=m2_idx,
+            key='metric2_name',
+            help="Métrique secondaire ajoutée au score combiné."
+        )
+        weight2 = st.number_input(
+            "Weight 2",
+            value=0.0,
+            key='weight_metric2',
+            help="Poids de la métrique secondaire (0 = ignorée)."
+        )
 
     # --- Execution Settings ---
     with st.expander("6. Execution Settings", expanded=False):
@@ -696,7 +1062,8 @@ with st.sidebar:
             options=sizing_values,
             index=default_idx,
             key="order_sizing_mode",
-            format_func=lambda v: sizing_options.get(v, v)
+            format_func=lambda v: sizing_options.get(v, v),
+            help="Choix du mode de taille d'ordre pendant le backtest."
         )
 
         order_fixed_cash = st.number_input(
@@ -735,6 +1102,26 @@ class WFOControl:
         if self._stop_requested:
             raise OptimizationInterrupted()
 
+def _capture_state_snapshot():
+    keys = [
+        'wfo_results', 'df', 'final_backtest_df', 'final_portfolio', 'final_params',
+        'final_params_score', 'final_params_window', 'final_params_is_metrics',
+        'final_params_oos_metrics', 'final_params_is_score', 'final_params_oos_score'
+    ]
+    return {k: st.session_state[k] for k in keys if k in st.session_state}
+
+def _restore_state_snapshot(snapshot):
+    keys = [
+        'wfo_results', 'df', 'final_backtest_df', 'final_portfolio', 'final_params',
+        'final_params_score', 'final_params_window', 'final_params_is_metrics',
+        'final_params_oos_metrics', 'final_params_is_score', 'final_params_oos_score'
+    ]
+    for key in keys:
+        if key in st.session_state:
+            st.session_state.pop(key)
+    for key, value in snapshot.items():
+        st.session_state[key] = value
+
 def get_current_config():
     """Collects all sidebar widgets into a configuration dictionary."""
     config = {
@@ -759,12 +1146,33 @@ def get_current_config():
         'train_size': train_size,
         'anchored': anchored,
         'optimization_method': optimization_method,
+        'optimization_regime': optimization_regime,
         'patience_level': patience_level,
         'max_trials': max_trials,
         'neighbor_count': neighbor_count,
         'parallel_backend': parallel_backend,
         'max_workers': max_workers,
-        'use_numba': use_numba
+        'use_numba': use_numba,
+        'nn_min_samples': int(st.session_state.get('nn_min_samples', 500)),
+        'nn_candidate_pool_size': int(st.session_state.get('nn_candidate_pool_size', 3000)),
+        'nn_top_k': int(st.session_state.get('nn_top_k', 250)),
+        'nn_exploration_ratio': float(st.session_state.get('nn_exploration_ratio', 0.15)),
+        'nn_hidden_size': int(st.session_state.get('nn_hidden_size', 32)),
+        'nn_epochs': int(st.session_state.get('nn_epochs', 60)),
+        'nn_learning_rate': float(st.session_state.get('nn_learning_rate', 0.01)),
+        'nn_l2': float(st.session_state.get('nn_l2', 1e-4)),
+        'adaptive_train_bars': int(st.session_state.get('adaptive_train_bars', 5000)),
+        'adaptive_cycle_bars': int(st.session_state.get('adaptive_cycle_bars', 1000)),
+        'adaptive_trials_per_cycle': int(st.session_state.get('adaptive_trials_per_cycle', 150)),
+        'adaptive_candidate_pool_size': int(st.session_state.get('adaptive_candidate_pool_size', 3000)),
+        'adaptive_keep_ratio': float(st.session_state.get('adaptive_keep_ratio', 0.40)),
+        'adaptive_exploration_ratio': float(st.session_state.get('adaptive_exploration_ratio', 0.20)),
+        'adaptive_min_values_per_param': int(st.session_state.get('adaptive_min_values_per_param', 2)),
+        'adaptive_decay': float(st.session_state.get('adaptive_decay', 0.98)),
+        'adaptive_ucb_beta': float(st.session_state.get('adaptive_ucb_beta', 0.75)),
+        'adaptive_warmup_trials': int(st.session_state.get('adaptive_warmup_trials', 300)),
+        'adaptive_max_cycles': int(st.session_state.get('adaptive_max_cycles', 0)),
+        'adaptive_oos_weight': float(st.session_state.get('adaptive_oos_weight', 2.0))
     }
     # Merge parameter ranges
     config.update(config_params)
@@ -915,51 +1323,75 @@ def run_final_backtest_logic():
 # MAIN LOGIC
 # ==============================================================================
 
-def run_wfo(config, control=None):
-    # --- Execution ---
+def run_wfo(config, control=None, job_state=None):
+    """Run WFO without direct UI updates (safe for background thread)."""
     try:
-        with st.status("Running Optimization...", expanded=True) as status:
-            st.write("⏳ Loading Data...")
-            
-            # Load Data
-            if config['from_file']:
-                df = load_data(config['start_date'], config['end_date'], config['timeframe'], from_file=True, file_path=config['file_path'])
-            else:
-                df = load_data(config['start_date'], config['end_date'], config['timeframe'], from_file=False)
-            
-            if df is None or df.empty:
-                status.update(label="Error: No data loaded.", state="error")
-                st.error("No data found for the specified range/source.")
-                return None, None
+        if job_state is not None:
+            job_state['message'] = "Loading data..."
 
-            st.write(f"✅ Loaded {len(df)} bars of data.")
-            st.session_state['opt_start_date'] = config.get('start_date')
-            st.session_state['opt_end_date'] = config.get('end_date')
-            
-            # Prepare WFO arguments
-            params_grid = get_param_grid(config)
-            metrics_info = get_metrics_info(config)
-            wfo_settings = get_wfo_settings(config)
-            
-            st.write(f"⚙️ Parameter Space: {sum(len(v) for v in params_grid.values())} raw dimensions.")
-            st.write(f"🚀 Starting {config['optimization_method'].upper()} optimization on {config['n_windows']} windows...")
-            
-            # Run WFO
-            start_time = time.time()
-            
-            # Create a progress placeholder
-            progress_bar = st.progress(0)
-            
-            # Define a simple callback to update status
-            def status_callback(msg):
-                if isinstance(msg, str):
-                    pass
-                elif isinstance(msg, dict) and msg.get('type') == 'stats':
+        if config['from_file']:
+            df = load_data(
+                config['start_date'],
+                config['end_date'],
+                config['timeframe'],
+                from_file=True,
+                file_path=config['file_path']
+            )
+        else:
+            df = load_data(
+                config['start_date'],
+                config['end_date'],
+                config['timeframe'],
+                from_file=False
+            )
+
+        if df is None or df.empty:
+            if job_state is not None:
+                job_state['error'] = "No data found for the specified range/source."
+            return None, None, None
+
+        params_grid = get_param_grid(config)
+        metrics_info = get_metrics_info(config)
+        wfo_settings = get_wfo_settings(config)
+        regime = str(getattr(wfo_settings, 'optimization_regime', 'classic')).lower()
+
+        if job_state is not None:
+            if regime == 'adaptive_continuous':
+                job_state['message'] = "Starting adaptive continuous optimization..."
+            else:
+                job_state['message'] = (
+                    f"Starting {config['optimization_method'].upper()} on {config['n_windows']} windows..."
+                )
+
+        start_time = time.time()
+
+        def status_callback(msg):
+            if job_state is None:
+                return
+            if isinstance(msg, str):
+                job_state['message'] = msg
+            elif isinstance(msg, dict) and msg.get('type') == 'stats':
+                progress = msg.get('progress')
+                if progress is not None:
+                    try:
+                        job_state['progress'] = min(max(float(progress), 0.0), 1.0)
+                    except Exception:
+                        pass
+                else:
                     w = msg.get('window', 0)
-                    progress_bar.progress(min(w / max(1, config['n_windows']), 1.0))
-            
-            results = walk_forward_optimization(
-                df, 
+                    job_state['progress'] = min(w / max(1, config['n_windows']), 1.0)
+
+                if msg.get('message'):
+                    job_state['message'] = msg.get('message')
+                else:
+                    w = msg.get('window', 0)
+                    job_state['message'] = (
+                        f"Window {min(w, config['n_windows'])}/{config['n_windows']}"
+                    )
+
+        if regime == 'adaptive_continuous':
+            results = adaptive_continuous_optimization(
+                df,
                 param_grid=params_grid,
                 metrics_info=metrics_info,
                 timeframe=config['timeframe'],
@@ -967,20 +1399,31 @@ def run_wfo(config, control=None):
                 status_callback=status_callback,
                 control=control
             )
-            
-            elapsed = time.time() - start_time
-            st.write(f"✅ Optimization completed in {elapsed:.2f} seconds.")
-            status.update(label="Optimization Complete!", state="complete")
-            
-            return results, df
+        else:
+            results = walk_forward_optimization(
+                df,
+                param_grid=params_grid,
+                metrics_info=metrics_info,
+                timeframe=config['timeframe'],
+                settings=wfo_settings,
+                status_callback=status_callback,
+                control=control
+            )
+
+        elapsed = time.time() - start_time
+        if job_state is not None:
+            job_state['progress'] = 1.0
+            job_state['message'] = "Optimization complete."
+        return results, df, elapsed
 
     except OptimizationInterrupted:
-        st.warning("Optimization cancelled by user.")
-        return None, None
+        if job_state is not None:
+            job_state['message'] = "Stop requested. Optimization interrupted."
+        return None, None, None
     except Exception as e:
-        st.error(f"An error occurred during optimization: {str(e)}")
-        # st.exception(e) # Uncomment for debug stack trace
-        return None, None
+        if job_state is not None:
+            job_state['error'] = str(e)
+        return None, None, None
 
 # --- Action Buttons ---
 st.sidebar.divider()
@@ -990,29 +1433,97 @@ current_conf = get_current_config()
 total_combos = calculate_combinations(current_conf)
 st.sidebar.info(f"📊 Total Parameter Combinations: **{total_combos:,}**")
 
+if 'wfo_running' not in st.session_state:
+    st.session_state['wfo_running'] = False
+
+# Resolve finished background job and update/restore state once.
+if st.session_state.get('wfo_running'):
+    wfo_thread = st.session_state.get('wfo_thread')
+    wfo_job_state = st.session_state.get('wfo_job_state')
+    if wfo_thread is not None and not wfo_thread.is_alive() and wfo_job_state is not None:
+        status = wfo_job_state.get('status')
+        if status == 'completed' and wfo_job_state.get('results') is not None:
+            st.session_state['wfo_results'] = wfo_job_state['results']
+            st.session_state['df'] = wfo_job_state['df']
+            job_conf = st.session_state.get('wfo_job_config', {})
+            st.session_state['opt_start_date'] = job_conf.get('start_date')
+            st.session_state['opt_end_date'] = job_conf.get('end_date')
+            st.session_state['wfo_notice'] = ("success", "Optimization finished.")
+        elif status == 'stopped':
+            _restore_state_snapshot(st.session_state.get('wfo_prev_state', {}))
+            st.session_state['wfo_notice'] = ("warning", "Optimization stopped. Previous state restored.")
+        else:
+            _restore_state_snapshot(st.session_state.get('wfo_prev_state', {}))
+            err = wfo_job_state.get('error') or "Unknown optimization error."
+            st.session_state['wfo_notice'] = ("error", f"An error occurred during optimization: {err}")
+
+        for key in ['wfo_thread', 'wfo_control', 'wfo_job_state', 'wfo_prev_state', 'wfo_job_config']:
+            st.session_state.pop(key, None)
+        st.session_state['wfo_running'] = False
+        st.rerun()
+
 col_run, col_save = st.sidebar.columns([1, 1])
 
 with col_run:
-    if st.button("🚀 Start WFO", type="primary", use_container_width=True):
-        if not selected_params:
-            st.error("Select params!")
-        else:
-            st.session_state['wfo_control'] = WFOControl()
-            st.session_state['wfo_running'] = True
-            results, df = run_wfo(current_conf, control=st.session_state['wfo_control'])
-            st.session_state['wfo_running'] = False
-            if results:
-                st.session_state['wfo_results'] = results
-                st.session_state['df'] = df
-                st.success("Finished!")
+    if not st.session_state.get('wfo_running'):
+        if st.button(
+            "🚀 Start WFO",
+            type="primary",
+            use_container_width=True,
+            help="Lance l'optimisation selon le mode choisi (WFO classique, grille précédente, NN, ou adaptatif continu)."
+        ):
+            if not selected_params:
+                st.error("Select params!")
+            else:
+                job_state = {
+                    'status': 'running',
+                    'progress': 0.0,
+                    'message': "Preparing optimization...",
+                    'results': None,
+                    'df': None,
+                    'error': None,
+                    'elapsed': None
+                }
+                control = WFOControl()
+                st.session_state['wfo_prev_state'] = _capture_state_snapshot()
+                st.session_state['wfo_job_state'] = job_state
+                st.session_state['wfo_control'] = control
+                st.session_state['wfo_job_config'] = current_conf.copy()
+                st.session_state['wfo_running'] = True
 
-# Cancel button for running optimization
+                def _wfo_worker():
+                    results, df, elapsed = run_wfo(current_conf, control=control, job_state=job_state)
+                    if control.should_stop():
+                        job_state['status'] = 'stopped'
+                    elif results is not None and df is not None:
+                        job_state['status'] = 'completed'
+                        job_state['results'] = results
+                        job_state['df'] = df
+                        job_state['elapsed'] = elapsed
+                    else:
+                        if job_state.get('status') != 'stopped':
+                            job_state['status'] = 'error'
+                            if not job_state.get('error'):
+                                job_state['error'] = "No data found for the specified range/source."
+
+                worker = threading.Thread(target=_wfo_worker, daemon=True)
+                st.session_state['wfo_thread'] = worker
+                worker.start()
+                st.rerun()
+    else:
+        if st.button("🛑 Stop WFO", use_container_width=True, help="Demande un arrêt propre après l'essai en cours."):
+            control = st.session_state.get('wfo_control')
+            if control:
+                control.request_stop()
+            if st.session_state.get('wfo_job_state') is not None:
+                st.session_state['wfo_job_state']['message'] = "Stop requested. Waiting for clean shutdown..."
+            st.sidebar.warning("Stop requested. Optimization is shutting down...")
+            st.rerun()
+
 if st.session_state.get('wfo_running'):
-    if st.sidebar.button("🛑 Cancel WFO", use_container_width=True):
-        control = st.session_state.get('wfo_control')
-        if control:
-            control.request_stop()
-        st.sidebar.warning("Cancel requested. Stopping after current step...")
+    job_state = st.session_state.get('wfo_job_state', {})
+    st.sidebar.progress(float(job_state.get('progress', 0.0)))
+    st.sidebar.caption(job_state.get('message', "Running..."))
 
 with col_save:
     # Save Config Button
@@ -1022,8 +1533,18 @@ with col_save:
         data=json_config,
         file_name="config.json",
         mime="application/json",
-        use_container_width=True
+        use_container_width=True,
+        help="Télécharge la configuration actuelle de tous les contrôles de la sidebar."
     )
+
+if st.session_state.get('wfo_notice'):
+    notice_type, notice_msg = st.session_state.pop('wfo_notice')
+    if notice_type == "success":
+        st.success(notice_msg)
+    elif notice_type == "warning":
+        st.warning(notice_msg)
+    else:
+        st.error(notice_msg)
 
 st.sidebar.divider()
 st.sidebar.subheader("📤 Export Results")
@@ -1032,7 +1553,7 @@ if "wfo_results" in st.session_state:
         "df.csv export",
         options=["none", "downsampled", "full"],
         index=0,
-        help="Include price data in the ZIP. Downsampled reduces size."
+        help="Inclut les données de prix dans le ZIP. Le mode downsampled réduit la taille."
     )
     df_max_rows = 200000
     if df_export_mode == "downsampled":
@@ -1042,9 +1563,13 @@ if "wfo_results" in st.session_state:
             max_value=1000000,
             value=200000,
             step=10000,
-            help="Approximate maximum rows to keep in df.csv."
+            help="Nombre maximal approximatif de lignes conservées dans `df.csv`."
         )
-    if st.sidebar.button("💾 Save Results to Disk", use_container_width=True):
+    if st.sidebar.button(
+        "💾 Save Results to Disk",
+        use_container_width=True,
+        help="Crée une archive ZIP des résultats dans le dossier `reports/`."
+    ):
         zip_buffer = _export_results_zip(df_mode=df_export_mode, df_max_rows=df_max_rows)
         if zip_buffer is not None:
             saved_path = _save_results_zip_to_disk(zip_buffer)
@@ -1058,7 +1583,8 @@ if "wfo_results" in st.session_state:
             data=st.session_state["results_zip_bytes"],
             file_name=os.path.basename(st.session_state.get("results_zip_path", "wfo_results.zip")),
             mime="application/zip",
-            use_container_width=True
+            use_container_width=True,
+            help="Télécharge l'archive des résultats en mémoire (JSON/CSV/trades selon disponibilité)."
         )
 else:
     st.sidebar.info("Run an optimization or load a results ZIP to enable export.")
@@ -1072,19 +1598,26 @@ if 'wfo_results' in st.session_state:
     final_start_date = st.sidebar.text_input(
         "Final Start Date (YYYY-MM-DD)",
         value=default_final_start,
-        key="final_start_date"
+        key="final_start_date",
+        help="Date de début du jeu de données utilisé pour le backtest final."
     )
     final_end_date = st.sidebar.text_input(
         "Final End Date (YYYY-MM-DD)",
         value=default_final_end,
-        key="final_end_date"
+        key="final_end_date",
+        help="Date de fin du jeu de données utilisé pour le backtest final."
     )
     final_file_path = st.sidebar.text_input(
         "Final Data File Path",
         value=st.session_state.get('file_path', DEFAULT_DATA_FILE),
-        key="final_file_path"
+        key="final_file_path",
+        help="Chemin du fichier de données pour le backtest final (si source locale)."
     )
-    if st.sidebar.button("🏆 Run Final Backtest", use_container_width=True):
+    if st.sidebar.button(
+        "🏆 Run Final Backtest",
+        use_container_width=True,
+        help="Exécute un backtest complet avec le meilleur jeu de paramètres sélectionné."
+    ):
         run_final_backtest_logic()
 
 # ==============================================================================
@@ -1392,7 +1925,7 @@ if 'wfo_results' in st.session_state:
                 value=20000,
                 step=1000,
                 key="max_plot_points",
-                help="Downsample large series to avoid Streamlit message size limits."
+                help="Réduit les séries volumineuses pour éviter les limites de taille des messages Streamlit."
             )
             # Avoid sending huge figures to the browser.
             try:
@@ -1450,7 +1983,7 @@ if 'wfo_results' in st.session_state:
                 value=5,
                 step=1,
                 key="pnl_trim_pct",
-                help="Percent trimmed/winsorized from each tail."
+                help="Pourcentage tronqué/winsorisé sur chaque extrémité de la distribution."
             )
             pnl_metrics_df = _compute_trade_pnl_metrics(pd.DataFrame(pf.trades.records), trim=trim_pct / 100.0)
             if not pnl_metrics_df.empty:
@@ -1614,7 +2147,7 @@ if 'wfo_results' in st.session_state:
                         value=5,
                         step=1,
                         key="pnl_trim_pct_import",
-                        help="Percent trimmed/winsorized from each tail."
+                        help="Pourcentage tronqué/winsorisé sur chaque extrémité de la distribution."
                     )
                     pnl_metrics_df = _compute_trade_pnl_metrics(trades_df, trim=trim_pct / 100.0)
                     if not pnl_metrics_df.empty:
@@ -1639,13 +2172,18 @@ if 'wfo_results' in st.session_state:
                         submitted = st.form_submit_button("Run Final Backtest (Selected Window)")
 
                     if submitted:
+                        try:
+                            selected_window_int = int(selected_window)
+                        except Exception:
+                            selected_window_int = selected_window
                         selected_entry = None
                         for window in results['window_results']:
-                            if window.get('window_info', {}).get('window') == selected_window:
+                            if window.get('window_info', {}).get('window') == selected_window_int:
                                 selected_entry = window
                                 break
 
                         if selected_entry:
+                            st.session_state.pop('final_portfolio', None)
                             selected_params = (selected_entry.get('best_params') or {}).copy()
                             int_params = {'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length'}
                             for param in list(selected_params.keys()):
@@ -1694,8 +2232,10 @@ if 'wfo_results' in st.session_state:
                                         st.session_state['final_backtest_df'] = df_final
                                         st.session_state['final_portfolio'] = selected_portfolio
                                         st.session_state['final_params'] = selected_params
-                                        st.session_state['final_params_window'] = selected_window
+                                        st.session_state['final_params_window'] = selected_window_int
                                         st.success("Final Backtest Complete!")
+                                        # Results panel is rendered above this form; rerun to show updated state immediately.
+                                        st.rerun()
                                     except Exception as e:
                                         st.error(f"Error in final backtest: {e}")
 
@@ -1703,3 +2243,10 @@ elif not os.path.exists(DEFAULT_DATA_FILE):
     st.warning(f"⚠️ Default data file not found at: `{DEFAULT_DATA_FILE}`. Please configure the data source in the sidebar.")
 else:
     st.info("👈 Click **Start Optimization** in the sidebar to run the backtest.")
+
+# Keep the UI in sync with background WFO progress/completion without requiring user interaction.
+if st.session_state.get('wfo_running'):
+    live_thread = st.session_state.get('wfo_thread')
+    if live_thread is not None and live_thread.is_alive():
+        time.sleep(0.8)
+    st.rerun()

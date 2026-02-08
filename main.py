@@ -15,6 +15,7 @@ from config import (
 from data_loading import get_dates, load_data
 from strategy import run_backtest
 from wfo import walk_forward_optimization, OptimizationInterrupted
+from adaptive_optimization import adaptive_continuous_optimization
 from visualization import (
     visualize_wfo_results, create_parameter_performance_map, visualize_robustness_metrics,
     integrate_report_generation
@@ -257,12 +258,33 @@ def get_wfo_settings(config):
     settings.train_size = config.get('train_size', 0.5)
     settings.anchored = config.get('anchored', False)
     settings.optimization_method = config.get('optimization_method', 'bayesian')
+    settings.optimization_regime = config.get('optimization_regime', 'classic')
     settings.parallel_backend = config.get('parallel_backend', 'dask')
     settings.max_workers = config.get('max_workers', os.cpu_count() or 1)
     settings.use_numba = config.get('use_numba', True)
     settings.patience_level = config.get('patience_level', 'Medium')
     settings.max_trials = config.get('max_trials', 200)
     settings.neighbor_count = config.get('neighbor_count', 5)
+    settings.nn_min_samples = config.get('nn_min_samples', 500)
+    settings.nn_candidate_pool_size = config.get('nn_candidate_pool_size', 3000)
+    settings.nn_top_k = config.get('nn_top_k', 250)
+    settings.nn_exploration_ratio = config.get('nn_exploration_ratio', 0.15)
+    settings.nn_hidden_size = config.get('nn_hidden_size', 32)
+    settings.nn_epochs = config.get('nn_epochs', 60)
+    settings.nn_learning_rate = config.get('nn_learning_rate', 0.01)
+    settings.nn_l2 = config.get('nn_l2', 1e-4)
+    settings.adaptive_train_bars = config.get('adaptive_train_bars', 5000)
+    settings.adaptive_cycle_bars = config.get('adaptive_cycle_bars', 1000)
+    settings.adaptive_trials_per_cycle = config.get('adaptive_trials_per_cycle', 150)
+    settings.adaptive_candidate_pool_size = config.get('adaptive_candidate_pool_size', 3000)
+    settings.adaptive_keep_ratio = config.get('adaptive_keep_ratio', 0.40)
+    settings.adaptive_exploration_ratio = config.get('adaptive_exploration_ratio', 0.20)
+    settings.adaptive_min_values_per_param = config.get('adaptive_min_values_per_param', 2)
+    settings.adaptive_decay = config.get('adaptive_decay', 0.98)
+    settings.adaptive_ucb_beta = config.get('adaptive_ucb_beta', 0.75)
+    settings.adaptive_warmup_trials = config.get('adaptive_warmup_trials', 300)
+    settings.adaptive_max_cycles = config.get('adaptive_max_cycles', 0)
+    settings.adaptive_oos_weight = config.get('adaptive_oos_weight', 2.0)
     settings.exit_sar_enabled = config.get('exit_sar_enabled', True)
     settings.exit_macd_enabled = config.get('exit_macd_enabled', True)
     settings.exit_macd_type_a = config.get('exit_macd_type_a', True)
@@ -308,17 +330,30 @@ def run_optimization(config, status_callback: Optional[Callable[[Any], None]] = 
     
     settings = get_wfo_settings(config)
     
-    log("Starting walk-forward optimization...")
-    wfo_results = walk_forward_optimization(
-        df, 
-        param_grid=param_grid,
-        metrics_info=metrics_info,
-        timeframe=timeframe,
-        settings=settings,
-        status_callback=status_callback,
-        control=control
-    )
-    log("Walk-forward optimization completed.")
+    if str(settings.optimization_regime).lower() == 'adaptive_continuous':
+        log("Starting adaptive continuous optimization...")
+        wfo_results = adaptive_continuous_optimization(
+            df,
+            param_grid=param_grid,
+            metrics_info=metrics_info,
+            timeframe=timeframe,
+            settings=settings,
+            status_callback=status_callback,
+            control=control
+        )
+        log("Adaptive continuous optimization completed.")
+    else:
+        log("Starting walk-forward optimization...")
+        wfo_results = walk_forward_optimization(
+            df,
+            param_grid=param_grid,
+            metrics_info=metrics_info,
+            timeframe=timeframe,
+            settings=settings,
+            status_callback=status_callback,
+            control=control
+        )
+        log("Walk-forward optimization completed.")
     
     results_dir = "WFO_Results"
     os.makedirs(results_dir, exist_ok=True)
