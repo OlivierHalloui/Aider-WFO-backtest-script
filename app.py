@@ -385,7 +385,119 @@ def _build_results_payload():
     }
     return _sanitize_for_json(payload)
 
-def _export_results_zip(df_mode="none", df_max_rows=200000):
+def _build_trials_dataframe_from_results(results):
+    rows = []
+    if not isinstance(results, dict):
+        return pd.DataFrame()
+    for window_result in results.get("window_results", []):
+        if not isinstance(window_result, dict):
+            continue
+        info = window_result.get("window_info", {}) or {}
+        window_id = info.get("window")
+        trials = window_result.get("optimization_trials") or []
+        for idx, trial in enumerate(trials):
+            if not isinstance(trial, dict):
+                continue
+            row = dict(trial)
+            row["window"] = window_id
+            row["trial_rank_in_window"] = idx + 1
+            row["in_sample_start"] = info.get("in_sample_start")
+            row["in_sample_end"] = info.get("in_sample_end")
+            row["out_sample_start"] = info.get("out_sample_start")
+            row["out_sample_end"] = info.get("out_sample_end")
+            rows.append(row)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+def _build_window_info_dataframe(results):
+    rows = []
+    if not isinstance(results, dict):
+        return pd.DataFrame()
+    for window_result in results.get("window_results", []):
+        if not isinstance(window_result, dict):
+            continue
+        info = window_result.get("window_info", {}) or {}
+        row = dict(info)
+        row["optimization_trials_count"] = int(window_result.get("optimization_trials_count", 0))
+        row["evaluations"] = int(window_result.get("evaluations", 0))
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+def _build_data_source_descriptor(config_snapshot, df):
+    descriptor = {
+        "from_file": None,
+        "file_path": None,
+        "file_exists": None,
+        "file_size_bytes": None,
+        "file_mtime_utc": None,
+        "timeframe": None,
+        "requested_start_date": None,
+        "requested_end_date": None,
+        "loaded_rows": None,
+        "loaded_start": None,
+        "loaded_end": None
+    }
+    if isinstance(config_snapshot, dict):
+        file_path = config_snapshot.get("file_path")
+        from_file = bool(config_snapshot.get("from_file", False))
+        descriptor["from_file"] = from_file
+        descriptor["file_path"] = file_path
+        descriptor["timeframe"] = config_snapshot.get("timeframe")
+        descriptor["requested_start_date"] = config_snapshot.get("start_date")
+        descriptor["requested_end_date"] = config_snapshot.get("end_date")
+        if from_file and isinstance(file_path, str):
+            exists = os.path.exists(file_path)
+            descriptor["file_exists"] = exists
+            if exists:
+                try:
+                    descriptor["file_size_bytes"] = int(os.path.getsize(file_path))
+                except Exception:
+                    descriptor["file_size_bytes"] = None
+                try:
+                    descriptor["file_mtime_utc"] = datetime.datetime.fromtimestamp(
+                        os.path.getmtime(file_path),
+                        tz=datetime.timezone.utc
+                    ).isoformat()
+                except Exception:
+                    descriptor["file_mtime_utc"] = None
+    if df is not None and hasattr(df, "empty") and not df.empty:
+        try:
+            descriptor["loaded_rows"] = int(len(df))
+            descriptor["loaded_start"] = _json_safe(df.index[0])
+            descriptor["loaded_end"] = _json_safe(df.index[-1])
+        except Exception:
+            pass
+    return _sanitize_for_json(descriptor)
+
+def _build_replay_manifest(payload, snapshot_mode_requested, snapshot_mode_actual, has_df_snapshot, data_source):
+    run_meta = st.session_state.get("wfo_run_metadata") or {}
+    final_params = st.session_state.get("final_params")
+    manifest = {
+        "created_at_utc": _utc_now_iso(),
+        "package_type": "full_replay_and_stats" if has_df_snapshot else "stats_and_manifest",
+        "data_snapshot_mode_requested": snapshot_mode_requested,
+        "data_snapshot_mode_actual": snapshot_mode_actual,
+        "contains_df_snapshot": bool(has_df_snapshot),
+        "replay_readiness": "strict" if bool(has_df_snapshot) else "reference_only",
+        "run_id": run_meta.get("run_id"),
+        "status": run_meta.get("status"),
+        "traceability": payload.get("traceability"),
+        "config": payload.get("config"),
+        "data_source": data_source,
+        "final_backtest": {
+            "has_final_portfolio": bool(payload.get("has_final_portfolio")),
+            "final_params": final_params,
+            "final_start_date": st.session_state.get("final_start_date"),
+            "final_end_date": st.session_state.get("final_end_date"),
+            "final_file_path": st.session_state.get("final_file_path")
+        }
+    }
+    return _sanitize_for_json(manifest)
+
+def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, full_package=False):
     if "wfo_results" not in st.session_state:
         st.error("No results available to export.")
         return None
@@ -394,7 +506,14 @@ def _export_results_zip(df_mode="none", df_max_rows=200000):
     df = st.session_state.get("df")
 
     payload = _build_results_payload()
+    config_snapshot = payload.get("config", {})
     zip_buffer = io.BytesIO()
+
+    snapshot_mode_requested = str(data_snapshot_mode)
+    snapshot_mode_actual = "manifest_only"
+    has_df_snapshot = False
+    data_source_descriptor = _build_data_source_descriptor(config_snapshot, df)
+
     with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("results.json", json.dumps(payload, indent=2))
         zf.writestr("audit_trace.json", json.dumps(payload.get("traceability", {}), indent=2))
@@ -409,12 +528,45 @@ def _export_results_zip(df_mode="none", df_max_rows=200000):
             params_df = pd.DataFrame(results["best_params"])
             zf.writestr("best_params.csv", params_df.to_csv(index=False))
 
-        if df is not None and not df.empty and df_mode in ("full", "downsampled"):
+        window_info_df = _build_window_info_dataframe(results)
+        if not window_info_df.empty:
+            zf.writestr("window_info.csv", window_info_df.to_csv(index=False))
+
+        trials_df = _build_trials_dataframe_from_results(results)
+        if not trials_df.empty:
+            zf.writestr("all_trials.csv", trials_df.to_csv(index=False))
+            if "window" in trials_df.columns:
+                for window_id, win_df in trials_df.groupby("window", dropna=False):
+                    safe_window = str(window_id).replace("/", "_")
+                    zf.writestr(f"trials/window_{safe_window}.csv", win_df.to_csv(index=False))
+
+        if full_package and snapshot_mode_requested == "manifest_only":
+            st.info("Package complet actif sans snapshot de prix: rejeu strict non garanti.")
+
+        if df is not None and not df.empty and snapshot_mode_requested in ("csv_full", "csv_downsampled", "parquet_zstd"):
             df_out = df.copy()
-            if df_mode == "downsampled":
+            if snapshot_mode_requested == "csv_downsampled":
                 df_out = _downsample_df(df_out, max_rows=df_max_rows)
-            df_out.index.name = "Open time"
-            zf.writestr("df.csv", df_out.to_csv())
+            try:
+                if snapshot_mode_requested == "parquet_zstd":
+                    # Compact snapshot format for large market datasets.
+                    buf = io.BytesIO()
+                    df_out.to_parquet(buf, compression="zstd")
+                    zf.writestr("df.parquet", buf.getvalue())
+                    snapshot_mode_actual = "parquet_zstd"
+                    has_df_snapshot = True
+                else:
+                    df_out.index.name = "Open time"
+                    zf.writestr("df.csv", df_out.to_csv())
+                    snapshot_mode_actual = snapshot_mode_requested
+                    has_df_snapshot = True
+            except Exception as e:
+                # Fallback to CSV if parquet dependencies are missing or serialization fails.
+                df_out.index.name = "Open time"
+                zf.writestr("df.csv", df_out.to_csv())
+                snapshot_mode_actual = "csv_full" if snapshot_mode_requested == "parquet_zstd" else snapshot_mode_requested
+                has_df_snapshot = True
+                st.warning(f"Snapshot parquet indisponible, fallback CSV appliqué: {e}")
 
         if "final_portfolio" in st.session_state:
             pf = st.session_state["final_portfolio"]
@@ -429,6 +581,15 @@ def _export_results_zip(df_mode="none", df_max_rows=200000):
                 zf.writestr("final_trade_stats.csv", stats_df.to_csv(index=False))
             except Exception:
                 pass
+
+        replay_manifest = _build_replay_manifest(
+            payload,
+            snapshot_mode_requested=snapshot_mode_requested,
+            snapshot_mode_actual=snapshot_mode_actual,
+            has_df_snapshot=has_df_snapshot,
+            data_source=data_source_descriptor
+        )
+        zf.writestr("replay_manifest.json", json.dumps(replay_manifest, indent=2))
 
     zip_buffer.seek(0)
     return zip_buffer
@@ -460,12 +621,21 @@ def _load_results_zip(zip_file):
                 st.session_state["wfo_traceability"] = payload.get("traceability")
                 if isinstance(payload["traceability"], dict) and isinstance(payload["traceability"].get("run"), dict):
                     st.session_state["wfo_run_metadata"] = payload["traceability"]["run"]
-            if "df.csv" in zf.namelist():
+            if "df.parquet" in zf.namelist():
+                try:
+                    st.session_state["df"] = pd.read_parquet(io.BytesIO(zf.read("df.parquet")))
+                except Exception as e:
+                    st.warning(f"Impossible de lire df.parquet: {e}")
+            elif "df.csv" in zf.namelist():
                 df = pd.read_csv(io.BytesIO(zf.read("df.csv")))
                 if "Open time" in df.columns:
                     df["Open time"] = pd.to_datetime(df["Open time"], errors="coerce")
                     df.set_index("Open time", inplace=True)
                 st.session_state["df"] = df
+            if "all_trials.csv" in zf.namelist():
+                st.session_state["all_trials_df"] = pd.read_csv(io.BytesIO(zf.read("all_trials.csv")))
+            if "window_info.csv" in zf.namelist():
+                st.session_state["window_info_df"] = pd.read_csv(io.BytesIO(zf.read("window_info.csv")))
 
             # Optional: load backtest artifacts for display
             if "final_trades.csv" in zf.namelist():
@@ -555,6 +725,266 @@ PARAMETER_HELP = {
     'macd_signal_length': "Période de la ligne signal MACD."
 }
 
+ADAPTIVE_PROFILE_DEFS = {
+    "custom": {
+        "label": "Custom (manuel)",
+        "summary": "Aucun preset appliqué; tous les réglages restent manuels.",
+        "advantages": "Contrôle total sur chaque hyperparamètre adaptatif.",
+        "drawbacks": "Plus de risque d'erreur de calibration, temps moins prévisible.",
+        "specificity": "À utiliser si tu maîtrises déjà ton régime de marché et ton budget compute.",
+        "duration_note": "Variable selon les valeurs saisies.",
+        "params": None
+    },
+    "smoke_test": {
+        "label": "Smoke Test (ultra rapide)",
+        "summary": "Validation technique rapide du pipeline et de l'UI.",
+        "advantages": "Très rapide, utile pour vérifier que tout fonctionne.",
+        "drawbacks": "Peu robuste statistiquement, forte variance.",
+        "specificity": "Profil de debug, pas de décision de production.",
+        "duration_note": "Très court.",
+        "params": {
+            "adaptive_train_bars": 20000,
+            "adaptive_cycle_bars": 5000,
+            "adaptive_trials_per_cycle": 40,
+            "adaptive_candidate_pool_size": 400,
+            "adaptive_keep_ratio": 0.50,
+            "adaptive_exploration_ratio": 0.35,
+            "adaptive_min_values_per_param": 2,
+            "adaptive_decay": 0.98,
+            "adaptive_ucb_beta": 1.00,
+            "adaptive_warmup_trials": 150,
+            "adaptive_max_cycles": 0,
+            "adaptive_oos_weight": 1.5
+        }
+    },
+    "fast": {
+        "label": "Rapide",
+        "summary": "Bon compromis vitesse/qualité pour itérations fréquentes.",
+        "advantages": "Boucles courtes, feedback rapide.",
+        "drawbacks": "Moins stable qu'un profil robuste sur longues périodes.",
+        "specificity": "Idéal en phase de prototypage ou tuning quotidien.",
+        "duration_note": "Court à moyen.",
+        "params": {
+            "adaptive_train_bars": 86400,
+            "adaptive_cycle_bars": 10000,
+            "adaptive_trials_per_cycle": 80,
+            "adaptive_candidate_pool_size": 1200,
+            "adaptive_keep_ratio": 0.45,
+            "adaptive_exploration_ratio": 0.25,
+            "adaptive_min_values_per_param": 2,
+            "adaptive_decay": 0.98,
+            "adaptive_ucb_beta": 0.85,
+            "adaptive_warmup_trials": 250,
+            "adaptive_max_cycles": 0,
+            "adaptive_oos_weight": 2.0
+        }
+    },
+    "balanced": {
+        "label": "Équilibré (recommandé)",
+        "summary": "Compromis robustesse/coût adapté à la plupart des runs.",
+        "advantages": "Résultats généralement stables avec durée contenue.",
+        "drawbacks": "Plus lent qu'un profil rapide.",
+        "specificity": "Point de départ conseillé pour la plupart des backtests.",
+        "duration_note": "Moyen.",
+        "params": {
+            "adaptive_train_bars": 345600,
+            "adaptive_cycle_bars": 17280,
+            "adaptive_trials_per_cycle": 180,
+            "adaptive_candidate_pool_size": 4000,
+            "adaptive_keep_ratio": 0.35,
+            "adaptive_exploration_ratio": 0.20,
+            "adaptive_min_values_per_param": 3,
+            "adaptive_decay": 0.985,
+            "adaptive_ucb_beta": 0.90,
+            "adaptive_warmup_trials": 500,
+            "adaptive_max_cycles": 0,
+            "adaptive_oos_weight": 2.5
+        }
+    },
+    "robust": {
+        "label": "Robuste",
+        "summary": "Favorise la stabilité OOS et la régularité.",
+        "advantages": "Moins sensible au bruit; meilleure résilience out-of-sample.",
+        "drawbacks": "Temps de calcul plus élevé.",
+        "specificity": "À privilégier pour les runs de référence.",
+        "duration_note": "Long.",
+        "params": {
+            "adaptive_train_bars": 500000,
+            "adaptive_cycle_bars": 15000,
+            "adaptive_trials_per_cycle": 260,
+            "adaptive_candidate_pool_size": 6000,
+            "adaptive_keep_ratio": 0.30,
+            "adaptive_exploration_ratio": 0.20,
+            "adaptive_min_values_per_param": 3,
+            "adaptive_decay": 0.99,
+            "adaptive_ucb_beta": 0.75,
+            "adaptive_warmup_trials": 800,
+            "adaptive_max_cycles": 0,
+            "adaptive_oos_weight": 3.0
+        }
+    },
+    "reactive": {
+        "label": "Réactif (changement de régime)",
+        "summary": "S'adapte plus vite aux shifts de marché.",
+        "advantages": "Réagit rapidement aux phases de rupture.",
+        "drawbacks": "Plus de variance, risque de sur-réaction.",
+        "specificity": "Pertinent si le marché change fréquemment de régime.",
+        "duration_note": "Moyen à long.",
+        "params": {
+            "adaptive_train_bars": 120000,
+            "adaptive_cycle_bars": 8000,
+            "adaptive_trials_per_cycle": 160,
+            "adaptive_candidate_pool_size": 3500,
+            "adaptive_keep_ratio": 0.40,
+            "adaptive_exploration_ratio": 0.28,
+            "adaptive_min_values_per_param": 2,
+            "adaptive_decay": 0.97,
+            "adaptive_ucb_beta": 1.00,
+            "adaptive_warmup_trials": 350,
+            "adaptive_max_cycles": 0,
+            "adaptive_oos_weight": 2.2
+        }
+    },
+    "conservative": {
+        "label": "Conservateur anti-overfit",
+        "summary": "Contraint davantage la grille pour maximiser la robustesse.",
+        "advantages": "Réduit les risques de sur-ajustement.",
+        "drawbacks": "Peut rater des niches de performance.",
+        "specificity": "Utile si priorité absolue à la robustesse OOS.",
+        "duration_note": "Moyen.",
+        "params": {
+            "adaptive_train_bars": 345600,
+            "adaptive_cycle_bars": 17280,
+            "adaptive_trials_per_cycle": 150,
+            "adaptive_candidate_pool_size": 3000,
+            "adaptive_keep_ratio": 0.30,
+            "adaptive_exploration_ratio": 0.25,
+            "adaptive_min_values_per_param": 3,
+            "adaptive_decay": 0.99,
+            "adaptive_ucb_beta": 0.80,
+            "adaptive_warmup_trials": 800,
+            "adaptive_max_cycles": 0,
+            "adaptive_oos_weight": 3.0
+        }
+    },
+    "exploratory": {
+        "label": "Exploratoire",
+        "summary": "Recherche agressive de nouvelles zones de paramètres.",
+        "advantages": "Découverte plus large de combinaisons candidates.",
+        "drawbacks": "Coût compute élevé, résultats parfois moins stables.",
+        "specificity": "Adapté pour ouvrir la recherche avant un profil robuste.",
+        "duration_note": "Long à très long.",
+        "params": {
+            "adaptive_train_bars": 200000,
+            "adaptive_cycle_bars": 10000,
+            "adaptive_trials_per_cycle": 220,
+            "adaptive_candidate_pool_size": 8000,
+            "adaptive_keep_ratio": 0.55,
+            "adaptive_exploration_ratio": 0.35,
+            "adaptive_min_values_per_param": 2,
+            "adaptive_decay": 0.98,
+            "adaptive_ucb_beta": 1.10,
+            "adaptive_warmup_trials": 400,
+            "adaptive_max_cycles": 0,
+            "adaptive_oos_weight": 2.0
+        }
+    }
+}
+
+def _timeframe_to_seconds(tf):
+    if not isinstance(tf, str) or len(tf) < 2:
+        return None
+    unit = tf[-1].lower()
+    try:
+        value = int(tf[:-1])
+    except Exception:
+        return None
+    if value <= 0:
+        return None
+    if unit == "s":
+        return value
+    if unit == "m":
+        return value * 60
+    if unit == "h":
+        return value * 3600
+    if unit == "d":
+        return value * 86400
+    return None
+
+def _parse_iso_date(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        if len(text) <= 10:
+            return datetime.datetime.combine(datetime.date.fromisoformat(text[:10]), datetime.time.min)
+        return datetime.datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+def _humanize_seconds(seconds):
+    if seconds is None or not np.isfinite(seconds) or seconds < 0:
+        return "n/a"
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    mins, sec = divmod(seconds, 60)
+    if mins < 60:
+        return f"{mins}m {sec}s"
+    hours, mins = divmod(mins, 60)
+    if hours < 24:
+        return f"{hours}h {mins}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}j {hours}h"
+
+def _estimate_adaptive_load(start_date, end_date, timeframe_str, train_bars, cycle_bars, trials_per_cycle, max_cycles):
+    step_seconds = _timeframe_to_seconds(timeframe_str)
+    start_dt = _parse_iso_date(start_date)
+    end_dt = _parse_iso_date(end_date)
+    if step_seconds is None or start_dt is None or end_dt is None:
+        return None
+    if end_dt <= start_dt:
+        return None
+
+    total_seconds = (end_dt - start_dt).total_seconds()
+    n_bars = int(total_seconds // step_seconds) + 1
+    train_bars = int(max(1, train_bars))
+    cycle_bars = int(max(1, cycle_bars))
+    trials_per_cycle = int(max(1, trials_per_cycle))
+    max_cycles = int(max(0, max_cycles))
+
+    if n_bars <= train_bars:
+        cycles = 0
+    else:
+        cycles = int((n_bars - train_bars) // cycle_bars)
+    if max_cycles > 0:
+        cycles = min(cycles, max_cycles)
+
+    total_trials = int(cycles * trials_per_cycle)
+    return {
+        "bars": int(n_bars),
+        "cycles": int(cycles),
+        "total_trials": total_trials
+    }
+
+def _get_observed_seconds_per_trial():
+    results = st.session_state.get("wfo_results")
+    if not isinstance(results, dict):
+        return None
+    timing = results.get("timing", {})
+    if not isinstance(timing, dict):
+        return None
+    total_time = timing.get("total_time")
+    total_trials = timing.get("total_trials")
+    try:
+        total_time = float(total_time)
+        total_trials = float(total_trials)
+        if total_time > 0 and total_trials > 0:
+            return total_time / total_trials
+    except Exception:
+        return None
+    return None
+
 with st.sidebar:
     st.header("⚙️ Configuration")
 
@@ -611,6 +1041,7 @@ with st.sidebar:
                     'adaptive_cycle_bars': 'adaptive_cycle_bars',
                     'adaptive_trials_per_cycle': 'adaptive_trials_per_cycle',
                     'adaptive_candidate_pool_size': 'adaptive_candidate_pool_size',
+                    'adaptive_profile': 'adaptive_profile',
                     'adaptive_keep_ratio': 'adaptive_keep_ratio',
                     'adaptive_exploration_ratio': 'adaptive_exploration_ratio',
                     'adaptive_min_values_per_param': 'adaptive_min_values_per_param',
@@ -985,6 +1416,87 @@ with st.sidebar:
             )
         elif optimization_regime == "adaptive_continuous":
             st.caption("Adaptive Continuous: no fixed WFO windows. The grid evolves cycle after cycle from historical trials.")
+            profile_keys = list(ADAPTIVE_PROFILE_DEFS.keys())
+            default_profile = st.session_state.get("adaptive_profile", "balanced")
+            if default_profile not in profile_keys:
+                default_profile = "balanced"
+            if st.session_state.get("adaptive_profile") not in profile_keys:
+                st.session_state["adaptive_profile"] = default_profile
+            adaptive_profile = st.selectbox(
+                "Adaptive Profile",
+                options=profile_keys,
+                index=profile_keys.index(default_profile),
+                key='adaptive_profile',
+                format_func=lambda k: ADAPTIVE_PROFILE_DEFS.get(k, {}).get("label", k),
+                help="Profil préconfiguré pour vitesse/robustesse. `Custom` laisse les champs manuels."
+            )
+            selected_profile_def = ADAPTIVE_PROFILE_DEFS.get(adaptive_profile, ADAPTIVE_PROFILE_DEFS["custom"])
+            selected_profile_params = selected_profile_def.get("params")
+
+            if isinstance(selected_profile_params, dict):
+                if st.session_state.get("adaptive_profile_last_applied") != adaptive_profile:
+                    for param_key, param_val in selected_profile_params.items():
+                        st.session_state[param_key] = param_val
+                    st.session_state["adaptive_profile_last_applied"] = adaptive_profile
+                    st.session_state["adaptive_profile_notice"] = f"Profil adaptatif appliqué: {selected_profile_def.get('label', adaptive_profile)}"
+                    st.rerun()
+            else:
+                st.session_state["adaptive_profile_last_applied"] = "custom"
+
+            notice = st.session_state.pop("adaptive_profile_notice", None)
+            if notice:
+                st.success(notice)
+
+            if isinstance(selected_profile_params, dict):
+                if st.button(
+                    "Réappliquer ce profil",
+                    key="adaptive_profile_reapply",
+                    help="Réinjecte les valeurs du profil dans tous les champs adaptatifs."
+                ):
+                    for param_key, param_val in selected_profile_params.items():
+                        st.session_state[param_key] = param_val
+                    st.session_state["adaptive_profile_last_applied"] = adaptive_profile
+                    st.rerun()
+
+            with st.expander("Détails du profil", expanded=False):
+                st.markdown(f"**Objectif:** {selected_profile_def.get('summary', 'n/a')}")
+                st.markdown(f"**Avantages:** {selected_profile_def.get('advantages', 'n/a')}")
+                st.markdown(f"**Limites:** {selected_profile_def.get('drawbacks', 'n/a')}")
+                st.markdown(f"**Spécificité:** {selected_profile_def.get('specificity', 'n/a')}")
+                st.markdown(f"**Impact durée (qualitatif):** {selected_profile_def.get('duration_note', 'n/a')}")
+
+            estimate_source = selected_profile_params if isinstance(selected_profile_params, dict) else {
+                "adaptive_train_bars": int(st.session_state.get("adaptive_train_bars", 5000)),
+                "adaptive_cycle_bars": int(st.session_state.get("adaptive_cycle_bars", 1000)),
+                "adaptive_trials_per_cycle": int(st.session_state.get("adaptive_trials_per_cycle", 150)),
+                "adaptive_max_cycles": int(st.session_state.get("adaptive_max_cycles", 0))
+            }
+            estimate = _estimate_adaptive_load(
+                start_date=start_date,
+                end_date=end_date,
+                timeframe_str=timeframe,
+                train_bars=estimate_source["adaptive_train_bars"],
+                cycle_bars=estimate_source["adaptive_cycle_bars"],
+                trials_per_cycle=estimate_source["adaptive_trials_per_cycle"],
+                max_cycles=estimate_source["adaptive_max_cycles"]
+            )
+            if estimate:
+                observed_sec_per_trial = _get_observed_seconds_per_trial()
+                if observed_sec_per_trial is not None:
+                    eta = estimate["total_trials"] * observed_sec_per_trial
+                    eta_text = _humanize_seconds(eta)
+                    eta_source = f"basée sur ton dernier run (~{observed_sec_per_trial:.3f}s/trial)"
+                else:
+                    eta_low = estimate["total_trials"] * 0.2
+                    eta_high = estimate["total_trials"] * 1.0
+                    eta_text = f"{_humanize_seconds(eta_low)} à {_humanize_seconds(eta_high)}"
+                    eta_source = "fourchette générique (0.2s à 1.0s par trial)"
+                st.info(
+                    "Estimation charge/durée: "
+                    f"~{estimate['bars']:,} bougies, ~{estimate['cycles']:,} cycles, "
+                    f"~{estimate['total_trials']:,} trials, durée estimée {eta_text} ({eta_source})."
+                )
+
             adaptive_train_bars = st.number_input(
                 "Adaptive Train Bars",
                 min_value=200,
@@ -1232,6 +1744,7 @@ def get_current_config():
         'adaptive_cycle_bars': int(st.session_state.get('adaptive_cycle_bars', 1000)),
         'adaptive_trials_per_cycle': int(st.session_state.get('adaptive_trials_per_cycle', 150)),
         'adaptive_candidate_pool_size': int(st.session_state.get('adaptive_candidate_pool_size', 3000)),
+        'adaptive_profile': st.session_state.get('adaptive_profile', 'balanced'),
         'adaptive_keep_ratio': float(st.session_state.get('adaptive_keep_ratio', 0.40)),
         'adaptive_exploration_ratio': float(st.session_state.get('adaptive_exploration_ratio', 0.20)),
         'adaptive_min_values_per_param': int(st.session_state.get('adaptive_min_values_per_param', 2)),
@@ -1668,14 +2181,33 @@ if st.session_state.get('wfo_notice'):
 st.sidebar.divider()
 st.sidebar.subheader("📤 Export Results")
 if "wfo_results" in st.session_state:
-    df_export_mode = st.sidebar.selectbox(
-        "df.csv export",
-        options=["none", "downsampled", "full"],
-        index=0,
-        help="Inclut les données de prix dans le ZIP. Le mode downsampled réduit la taille."
+    full_export_bundle = st.sidebar.checkbox(
+        "Package complet (rejeu + stats)",
+        value=True,
+        help="Inclut tous les trials, les fichiers d'analyse et un manifeste de rejeu."
     )
+    data_snapshot_mode = st.sidebar.selectbox(
+        "Snapshot des prix dans le ZIP",
+        options=["manifest_only", "parquet_zstd", "csv_downsampled", "csv_full"],
+        index=0,
+        format_func=lambda v: (
+            "Manifest only (léger, sans snapshot)"
+            if v == "manifest_only"
+            else (
+                "Parquet zstd (recommandé)"
+                if v == "parquet_zstd"
+                else ("CSV downsampled" if v == "csv_downsampled" else "CSV full")
+            )
+        ),
+        help=(
+            "Choix du format de données marché exportées: "
+            "`manifest_only` pour archive légère, `parquet_zstd` pour rejeu compact."
+        )
+    )
+    if full_export_bundle and data_snapshot_mode == "manifest_only":
+        st.sidebar.warning("Package complet sans snapshot prix: rejeu strict non garanti.")
     df_max_rows = 200000
-    if df_export_mode == "downsampled":
+    if data_snapshot_mode == "csv_downsampled":
         df_max_rows = st.sidebar.slider(
             "Max rows for df.csv",
             min_value=10000,
@@ -1689,7 +2221,11 @@ if "wfo_results" in st.session_state:
         use_container_width=True,
         help="Crée une archive ZIP des résultats dans le dossier `reports/`."
     ):
-        zip_buffer = _export_results_zip(df_mode=df_export_mode, df_max_rows=df_max_rows)
+        zip_buffer = _export_results_zip(
+            data_snapshot_mode=data_snapshot_mode,
+            df_max_rows=df_max_rows,
+            full_package=full_export_bundle
+        )
         if zip_buffer is not None:
             saved_path = _save_results_zip_to_disk(zip_buffer)
             st.session_state["results_zip_bytes"] = zip_buffer.getvalue()
@@ -1747,6 +2283,12 @@ if 'wfo_results' in st.session_state:
     results = st.session_state['wfo_results']
     df = st.session_state.get('df')
     traceability = results.get("traceability") or st.session_state.get("wfo_traceability")
+    all_trials_df_live = _build_trials_dataframe_from_results(results)
+    if not all_trials_df_live.empty:
+        st.session_state["all_trials_df"] = all_trials_df_live
+    window_info_df_live = _build_window_info_dataframe(results)
+    if not window_info_df_live.empty:
+        st.session_state["window_info_df"] = window_info_df_live
     
     st.divider()
     st.header("📊 Optimization Results")
@@ -1984,6 +2526,15 @@ if 'wfo_results' in st.session_state:
             # Exclude large dataframes for display
             clean_res = {k:v for k,v in results.items() if k not in ['window_results']}
             st.json(clean_res)
+
+        if st.session_state.get("window_info_df") is not None:
+            st.write("Window Info:")
+            st.dataframe(st.session_state["window_info_df"], use_container_width=True)
+
+        if st.session_state.get("all_trials_df") is not None:
+            trials_df = st.session_state["all_trials_df"]
+            st.write(f"All Trials (rows: {len(trials_df):,})")
+            st.dataframe(trials_df, use_container_width=True)
     
     with tab5:
         st.subheader("🏆 Final Backtest Results")
@@ -2064,11 +2615,14 @@ if 'wfo_results' in st.session_state:
                     raise ValueError("Portfolio value series not available.")
                 if not isinstance(value_series, pd.Series):
                     value_series = pd.Series(value_series)
-                value_series = _downsample_series(value_series, max_points=max_points)
+                value_series = pd.to_numeric(value_series, errors="coerce").dropna()
+                if value_series.empty:
+                    raise ValueError("Portfolio value series is empty after cleaning.")
+                value_series_plot = _downsample_series(value_series, max_points=max_points)
 
                 fig_value = make_subplots(specs=[[{"secondary_y": True}]])
                 fig_value.add_trace(
-                    go.Scatter(x=value_series.index, y=value_series.values, mode="lines", name="Portfolio Value"),
+                    go.Scatter(x=value_series_plot.index, y=value_series_plot.values, mode="lines", name="Portfolio Value"),
                     secondary_y=False
                 )
 
@@ -2085,6 +2639,30 @@ if 'wfo_results' in st.session_state:
                 if price_series is not None:
                     if not isinstance(price_series, pd.Series):
                         price_series = pd.Series(price_series)
+                    price_series = pd.to_numeric(price_series, errors="coerce").dropna()
+
+                    # Buy & Hold benchmark on the same capital base as Portfolio Value.
+                    aligned_price = price_series.reindex(value_series.index).ffill().bfill().dropna()
+                    common_index = value_series.index.intersection(aligned_price.index)
+                    if len(common_index) > 1:
+                        portfolio_common = value_series.loc[common_index]
+                        price_common = aligned_price.loc[common_index]
+                        initial_capital = float(portfolio_common.iloc[0])
+                        initial_price = float(price_common.iloc[0])
+                        if np.isfinite(initial_capital) and np.isfinite(initial_price) and initial_price != 0:
+                            buy_hold_series = initial_capital * (price_common / initial_price)
+                            buy_hold_series = _downsample_series(buy_hold_series, max_points=max_points)
+                            fig_value.add_trace(
+                                go.Scatter(
+                                    x=buy_hold_series.index,
+                                    y=buy_hold_series.values,
+                                    mode="lines",
+                                    name="Buy & Hold (same capital)",
+                                    line=dict(color="#2CA02C", width=1.5, dash="dash")
+                                ),
+                                secondary_y=False
+                            )
+
                     price_series = _downsample_series(price_series, max_points=max_points)
                     fig_value.add_trace(
                         go.Scatter(
@@ -2097,7 +2675,7 @@ if 'wfo_results' in st.session_state:
                         secondary_y=True
                     )
 
-                fig_value.update_layout(height=400, template="plotly_dark", title="Portfolio Value + Asset Price (Downsampled)")
+                fig_value.update_layout(height=400, template="plotly_dark", title="Portfolio Value vs Buy & Hold + Asset Price (Downsampled)")
                 fig_value.update_yaxes(title_text="Portfolio Value", secondary_y=False)
                 fig_value.update_yaxes(title_text="Asset Price", secondary_y=True)
                 st.plotly_chart(fig_value, use_container_width=True)
