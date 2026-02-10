@@ -115,17 +115,30 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
     """
     if from_file:
         file_path = file_path or DEFAULT_DATA_FILE
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Data file not found: {file_path}")
+
+        header_cols = pd.read_csv(file_path, nrows=0).columns.tolist()
+        required_cols = ['Open time', 'Open', 'High', 'Low', 'Close']
+        missing = [c for c in required_cols if c not in header_cols]
+        if missing:
+            raise ValueError(f"Missing required columns in CSV: {missing}")
+
+        usecols = required_cols + (['Volume'] if 'Volume' in header_cols else [])
         dtypes = {
-            'Open time': 'str',  # Will convert to datetime later
+            'Open time': 'str',  # converted to datetime right after loading
             'Open': 'float64',
             'High': 'float64',
             'Low': 'float64',
             'Close': 'float64',
-            'Volume': 'float64' if 'Volume' in pd.read_csv(file_path, nrows=1).columns else None
         }
-        df = pd.read_csv(file_path, dtype=dtypes)
+        if 'Volume' in usecols:
+            dtypes['Volume'] = 'float64'
+
+        df = pd.read_csv(file_path, usecols=usecols, dtype=dtypes)
         df['Open time'] = pd.to_datetime(df['Open time'], errors='coerce')
         df.set_index('Open time', inplace=True)
+        df = df[~df.index.isna()].sort_index()
         # Resample efficiently
         df = df.resample(timeframe).agg({
             'Open': 'first',
@@ -134,7 +147,6 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
             'Close': 'last'
         }).dropna()
         df = _apply_date_filter(df, start_date, end_date)
-        print(df)
 
     else:
         # Fetch from Binance
@@ -163,6 +175,5 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
         folder_path.mkdir(parents=True, exist_ok=True)
         file_path = folder_path / f"Binance_BTCUSDT_OHLCV_B_{start_date}_{end_date}_{timeframe}.csv"
         df.to_csv(file_path)
-        print(f"Saved Binance data to {file_path}")
         
     return df

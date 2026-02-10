@@ -2,7 +2,7 @@
 import pandas as pd
 import numpy as np
 import vectorbtpro as vbt
-from itertools import product
+from itertools import product, islice
 from tqdm import tqdm
 import time
 from datetime import timedelta
@@ -439,74 +439,113 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
     
     if method == "grid":
         print("Using Vectorized Grid Search...")
-        
+
         # 1. Expand the grid into lists of values
         param_keys = list(param_grid.keys())
         param_values_list = []
         for key in param_keys:
-            # Check if it's a range definition [min, max, step] or list of values
-            values = param_grid[key]
+            values = expand_param_values(param_grid[key])
             param_values_list.append(values)
-            
-        # 2. Create Cartesian Product
-        combinations = list(product(*param_values_list))
-        if not combinations:
-             raise ValueError("No parameter combinations generated.")
-             
-        total_combos = len(combinations)
+
+        if not param_values_list or any(len(v) == 0 for v in param_values_list):
+            raise ValueError("No parameter combinations generated.")
+
+        # 2. Iterate Cartesian product lazily in chunks to avoid huge peak memory.
+        total_combos = int(np.prod([len(v) for v in param_values_list]))
+        if total_combos <= 0:
+            raise ValueError("No parameter combinations generated.")
         print(f"Generating {total_combos} parameter combinations...")
-        
+
         # Chunking Logic
         chunk_size = getattr(settings, 'batch_size', 1000) # Default to 1000 if not set
         if chunk_size <= 0: chunk_size = 1000
-        
-        all_scores = []
-        
+
+        result_chunks = []
+        combos_iter = product(*param_values_list)
+        chunk_start = 0
+        fallback_used = False
+
         # Process in chunks
-        for i in range(0, total_combos, chunk_size):
+        while True:
             if control:
                 control.wait_if_paused()
                 if control.should_stop():
                     raise OptimizationInterrupted()
-            
-            chunk_combos = combinations[i : i + chunk_size]
-            
+
+            chunk_combos = list(islice(combos_iter, chunk_size))
+            if not chunk_combos:
+                break
+
             # Transpose chunk
             transposed_chunk = list(zip(*chunk_combos))
-            
+
             vectorized_params = {}
             for k_idx, key in enumerate(param_keys):
                 vectorized_params[key] = np.array(transposed_chunk[k_idx])
-            
+
             # Add metrics info
             vectorized_params.update(metrics_info)
-            
+
             try:
                 # Run backtest for this chunk
                 chunk_scores = run_backtest(in_sample_df, vectorized_params, timeframe, return_portfolio=False)
-                
-                # Handle result types (scalar vs series/array)
+
+                # Normalize result to one score per combination.
                 if np.isscalar(chunk_scores):
-                     all_scores.append(chunk_scores)
+                    score_values = [float(chunk_scores)] * len(chunk_combos)
                 elif hasattr(chunk_scores, 'values'):
-                     all_scores.extend(chunk_scores.values)
+                    score_values = list(np.asarray(chunk_scores.values).reshape(-1))
                 else:
-                     all_scores.extend(chunk_scores)
-                     
+                    score_values = list(np.asarray(chunk_scores).reshape(-1))
+
+                if len(score_values) != len(chunk_combos):
+                    raise ValueError(
+                        f"Chunk score size mismatch: got {len(score_values)} scores for "
+                        f"{len(chunk_combos)} combinations."
+                    )
+
+                chunk_df = pd.DataFrame(chunk_combos, columns=param_keys)
+                chunk_df['combined_score'] = score_values
+                result_chunks.append(chunk_df)
+
             except Exception as e:
-                print(f"Error during vectorized backtest chunk {i}-{i+chunk_size}: {e}")
-                # Optional: Decide whether to fail hard or continue. 
-                # For now, let's append NaNs or re-raise. Re-raising is safer to catch bugs.
-                raise
-        
+                if not fallback_used:
+                    print(
+                        "Vectorized grid chunk failed; falling back to per-combination "
+                        "evaluation for robustness."
+                    )
+                    fallback_used = True
+                print(f"Error during vectorized backtest chunk {chunk_start}-{chunk_start+len(chunk_combos)}: {e}")
+
+                score_values = []
+                for combo in chunk_combos:
+                    combo_params = dict(zip(param_keys, combo))
+                    combo_params.update(metrics_info)
+                    combo_score = evaluate_params(combo_params)
+                    if np.isscalar(combo_score):
+                        score_values.append(float(combo_score))
+                    elif hasattr(combo_score, 'values'):
+                        arr = np.asarray(combo_score.values).reshape(-1)
+                        score_values.append(float(arr[0]) if len(arr) else float('nan'))
+                    else:
+                        arr = np.asarray(combo_score).reshape(-1)
+                        score_values.append(float(arr[0]) if len(arr) else float('nan'))
+
+                chunk_df = pd.DataFrame(chunk_combos, columns=param_keys)
+                chunk_df['combined_score'] = score_values
+                result_chunks.append(chunk_df)
+
+            chunk_start += len(chunk_combos)
+
         # 4. Construct Results DataFrame
-        results_df = pd.DataFrame(combinations, columns=param_keys)
-        results_df['combined_score'] = all_scores
-            
+        if not result_chunks:
+            raise ValueError("No optimization results generated in grid mode.")
+        results_df = pd.concat(result_chunks, ignore_index=True)
+
         # Add metrics info columns (constant)
         for k, v in metrics_info.items():
             results_df[k] = v
-            
+
         sorted_results = results_df.sort_values('combined_score', ascending=False)
         evaluation_count = len(results_df)
         

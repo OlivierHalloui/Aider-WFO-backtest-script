@@ -3,6 +3,41 @@ import numpy as np
 from numba import njit, prange
 import vectorbtpro as vbt
 
+# ----------------------------------------------------------------------
+# VectorBT settings guard
+# ----------------------------------------------------------------------
+# Some environments load vectorbtpro with a partially initialized settings
+# object (missing "indicators"), which raises KeyError during vbt.IF(...)
+# factory creation at import time.
+def _ensure_vbt_indicators_settings():
+    try:
+        settings = getattr(vbt, "settings", None)
+        if settings is None:
+            return
+        try:
+            has_key = "indicators" in settings
+        except Exception:
+            has_key = False
+        if not has_key:
+            try:
+                settings["indicators"] = {}
+            except Exception:
+                pass
+    except Exception:
+        # Keep import resilient; downstream code will surface real failures.
+        pass
+
+def _safe_if(*args, **kwargs):
+    try:
+        return vbt.IF(*args, **kwargs)
+    except KeyError as e:
+        if str(e).strip("'\"") == "indicators":
+            _ensure_vbt_indicators_settings()
+            return vbt.IF(*args, **kwargs)
+        raise
+
+_ensure_vbt_indicators_settings()
+
 # ======================================================================
 # NUMBA-OPTIMIZED INDICATOR FUNCTIONS
 # ======================================================================
@@ -204,7 +239,7 @@ def parabolic_sar_nb(high, low, sar_start, sar_increment, sar_maximum):
 # Using with_apply_func to allow VBT to handle broadcasting of parameters automatically.
 # We explicitly set input names to match what the strategy will pass.
 
-EcartBollingerBorne = vbt.IF(
+EcartBollingerBorne = _safe_if(
     class_name='EcartBollingerBorne',
     input_names=['prix', 'upper_band', 'lower_band'],
     param_names=['timeperiod', 'longueur_mediane', 'coef_mediane', 'Nb_bars_above'],
@@ -218,7 +253,7 @@ EcartBollingerBorne = vbt.IF(
     Nb_bars_above=5
 )
 
-BollingerHorizontal = vbt.IF(
+BollingerHorizontal = _safe_if(
     class_name='BollingerHorizontal',
     input_names=['bbw', 'mmbbw', 'mediane_bbw'],
     param_names=['coeff_medianeBBW'],
@@ -229,7 +264,7 @@ BollingerHorizontal = vbt.IF(
     coeff_medianeBBW=1.1
 )
 
-CrossBBWLowSignal = vbt.IF(
+CrossBBWLowSignal = _safe_if(
     class_name='CrossBBWLowSignal',
     input_names=['upper_band', 'lower_band', 'middle_band'],
     param_names=['fenetre_lowest', 'seuil_lowest'],
@@ -241,7 +276,7 @@ CrossBBWLowSignal = vbt.IF(
     seuil_lowest=3.5
 )
 
-SMAExit = vbt.IF(
+SMAExit = _safe_if(
     class_name='SMAExit',
     input_names=['close'],
     param_names=['user_exit_sma_length'],
@@ -252,7 +287,7 @@ SMAExit = vbt.IF(
     user_exit_sma_length=20
 )
 
-ParabolicSAR = vbt.IF(
+ParabolicSAR = _safe_if(
     class_name='ParabolicSAR',
     input_names=['high', 'low'],
     param_names=['sar_start', 'sar_increment', 'sar_maximum'],
@@ -265,7 +300,7 @@ ParabolicSAR = vbt.IF(
     sar_maximum=0.2
 )
 
-MACDExit = vbt.IF(
+MACDExit = _safe_if(
     class_name='MACDExit',
     input_names=['close'],
     param_names=['fast_length', 'slow_length', 'signal_length', 'use_type_a', 'use_type_b'],

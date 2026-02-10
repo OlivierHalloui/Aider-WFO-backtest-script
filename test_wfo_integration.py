@@ -1,95 +1,106 @@
-
-import pandas as pd
-import numpy as np
-import sys
 import os
+import sys
+import importlib.util
+
+import numpy as np
+import pandas as pd
+import pytest
 
 # Ensure we can import from current directory
 sys.path.append(os.getcwd())
 
-from main import get_param_grid, get_metrics_info, get_wfo_settings
-from wfo import walk_forward_optimization, WFOSettings
-import vectorbtpro as vbt
+HAS_VBT = importlib.util.find_spec("vectorbtpro") is not None
+pytestmark = pytest.mark.skipif(not HAS_VBT, reason="vectorbtpro is required for integration tests")
 
-# Mock Data Generation
-def generate_mock_data(n=1000):
+if HAS_VBT:
+    from main import get_param_grid, get_metrics_info, get_wfo_settings
+    from wfo import walk_forward_optimization
+
+
+def generate_mock_data(n=200):
+    """Create deterministic synthetic OHLC data for fast integration checks."""
+    rng = np.random.default_rng(42)
     index = pd.date_range("2025-01-01", periods=n, freq="5s")
-    close = np.random.uniform(100, 200, size=n)
-    # Make sure close is Series
-    return pd.DataFrame({'Close': close, 'Open': close, 'High': close+1, 'Low': close-1}, index=index)
+    close = rng.uniform(100, 200, size=n)
+    return pd.DataFrame(
+        {
+            "Close": close,
+            "Open": close,
+            "High": close + 1.0,
+            "Low": close - 1.0,
+        },
+        index=index,
+    )
 
-def test_integration():
-    print("Generating mock data...")
-    df = generate_mock_data(100) # Small dataset for speed
-    
-    # Mock Config: Unselect 'coeff_medianeBBW' to trigger default injection
-    config = {
-        'selected_params': ['timeperiod'], # Only timeperiod selected
-        'timeperiod_min': 10,
-        'timeperiod_max': 12,
-        'timeperiod_step': 1,
-        # 'coeff_medianeBBW' is NOT selected
-        'metric1_name': 'sharpe_ratio',
-        'metric2_name': 'total_return',
-        'weight_metric1': 1.0,
-        'weight_metric2': 0.0,
-        'n_windows': 1,
-        'train_size': 0.5,
-        'optimization_method': 'grid',
-        'parallel_backend': 'thread', # Use thread for simplicity
-        'max_trials': 5 # Low trials for bayesian/optuna
+
+def base_config():
+    """Minimal config that exercises default-parameter injection + optimization."""
+    return {
+        "selected_params": ["timeperiod"],
+        "timeperiod_min": 10,
+        "timeperiod_max": 12,
+        "timeperiod_step": 1,
+        "metric1_name": "sharpe_ratio",
+        "metric2_name": "total_return",
+        "weight_metric1": 1.0,
+        "weight_metric2": 0.0,
+        "n_windows": 1,
+        "train_size": 0.5,
+        "parallel_backend": "thread",
+        "max_trials": 5,
     }
-    
-    print("\n--- Testing get_param_grid ---")
-    param_grid = get_param_grid(config)
-    print("Param Grid Keys:", list(param_grid.keys()))
-    
-    if 'coeff_medianeBBW' not in param_grid:
-        print("FAIL: coeff_medianeBBW missing from param_grid")
-        return
-    if param_grid['coeff_medianeBBW'] != [1.1]: # Default value
-        print(f"FAIL: coeff_medianeBBW value mismatch. Expected [1.1], got {param_grid['coeff_medianeBBW']}")
-        return
-    print("PASS: get_param_grid correctly populated default.")
-    
-    metrics_info = get_metrics_info(config)
-    
-    # Test 1: Grid Search
-    print("\n--- Testing WFO (Grid) ---")
-    settings = get_wfo_settings(config)
-    settings.optimization_method = 'grid'
-    
-    try:
-        walk_forward_optimization(df, param_grid, metrics_info, timeframe='5s', settings=settings)
-        print("PASS: Grid Search ran successfully.")
-    except Exception as e:
-        print(f"FAIL: Grid Search raised exception: {e}")
-        import traceback
-        traceback.print_exc()
-        
-    # Test 2: Bayesian
-    print("\n--- Testing WFO (Bayesian) ---")
-    settings.optimization_method = 'bayesian'
-    settings.max_trials = 5
-    try:
-        walk_forward_optimization(df, param_grid, metrics_info, timeframe='5s', settings=settings)
-        print("PASS: Bayesian ran successfully.")
-    except Exception as e:
-        print(f"FAIL: Bayesian raised exception: {e}")
-        import traceback
-        traceback.print_exc()
 
-    # Test 3: Optuna
-    print("\n--- Testing WFO (Optuna) ---")
-    settings.optimization_method = 'optuna'
-    settings.max_trials = 5
-    try:
-        walk_forward_optimization(df, param_grid, metrics_info, timeframe='5s', settings=settings)
-        print("PASS: Optuna ran successfully.")
-    except Exception as e:
-        print(f"FAIL: Optuna raised exception: {e}")
-        import traceback
-        traceback.print_exc()
+
+def test_get_param_grid_default_injection():
+    """Unselected strategy parameters must still exist as fixed defaults."""
+    config = base_config()
+    param_grid = get_param_grid(config)
+
+    assert "coeff_medianeBBW" in param_grid
+    assert param_grid["coeff_medianeBBW"] == [1.1]
+    assert "timeperiod" in param_grid
+    assert param_grid["timeperiod"] == [10, 11, 12]
+
+
+@pytest.mark.parametrize("method", ["grid", "bayesian", "optuna"])
+def test_wfo_runs_for_core_optimizers(method):
+    """The WFO pipeline should execute for grid/bayesian/optuna on small data."""
+    df = generate_mock_data(120)
+    config = base_config()
+    config["optimization_method"] = method
+    if method != "grid":
+        config["max_trials"] = 5
+
+    param_grid = get_param_grid(config)
+    metrics_info = get_metrics_info(config)
+    settings = get_wfo_settings(config)
+    settings.optimization_method = method
+    settings.n_windows = 1
+
+    results = walk_forward_optimization(
+        df,
+        param_grid,
+        metrics_info,
+        timeframe="5s",
+        settings=settings,
+    )
+
+    assert isinstance(results, dict)
+    assert "window_results" in results
+    assert len(results["window_results"]) == 1
+    assert "best_params" in results
+    assert len(results["best_params"]) >= 1
+
 
 if __name__ == "__main__":
-    test_integration()
+    # Useful for quick local manual check.
+    config = {
+        **base_config(),
+        "optimization_method": "grid",
+    }
+    _df = generate_mock_data(120)
+    _grid = get_param_grid(config)
+    _metrics = get_metrics_info(config)
+    _settings = get_wfo_settings(config)
+    _ = walk_forward_optimization(_df, _grid, _metrics, timeframe="5s", settings=_settings)
+    print("Integration smoke test passed.")

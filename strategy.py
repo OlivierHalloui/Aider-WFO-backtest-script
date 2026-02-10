@@ -91,11 +91,20 @@ def create_signal_generators(df, **params):
         exit_macd_type_a = broadcast(exit_macd_type_a, vector_len)
         exit_macd_type_b = broadcast(exit_macd_type_b, vector_len)
 
-    # We use 'Close' for most calculations
-    # VBT's run methods accept Series or DataFrame. 
-    # If we pass the full DataFrame, we might need to specify the column or rely on broadcasting if it's 1D.
-    # To be safe and explicit, we pass the specific Series.
-    close_price = df['Close']
+    # Build input price objects with explicit vectorized columns when parameter arrays are provided.
+    # This avoids per-column broadcasting mismatches in vectorbt indicator factories.
+    if vector_len > 1:
+        close_price = pd.concat([df['Close']] * vector_len, axis=1)
+        high_price = pd.concat([df['High']] * vector_len, axis=1)
+        low_price = pd.concat([df['Low']] * vector_len, axis=1)
+        cols = pd.RangeIndex(vector_len)
+        close_price.columns = cols
+        high_price.columns = cols
+        low_price.columns = cols
+    else:
+        close_price = df['Close']
+        high_price = df['High']
+        low_price = df['Low']
     
     # 1. Bollinger Bands (Vectorized via TA-Lib wrapper in VBT)
     # This handles scalar or array parameters for timeperiod/StDev
@@ -180,8 +189,8 @@ def create_signal_generators(df, **params):
 
     # Parabolic SAR
     psar_ind = ParabolicSAR.run(
-        high=df['High'],
-        low=df['Low'],
+        high=high_price,
+        low=low_price,
         sar_start=sar_start,
         sar_increment=sar_increment,
         sar_maximum=sar_maximum,

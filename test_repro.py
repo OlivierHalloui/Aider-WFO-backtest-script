@@ -1,51 +1,41 @@
-
-import sys
 import os
-import pandas as pd
-import numpy as np
-from main import get_param_grid
+import sys
+import importlib.util
 
-# Mock config
-config = {
-    'selected_params': ['timeperiod'], # Only timeperiod selected
-    'timeperiod_min': 10,
-    'timeperiod_max': 10,
-    'timeperiod_step': 1
-}
+import pytest
 
-print("Testing get_param_grid...")
-grid = get_param_grid(config)
-print("Grid keys:", grid.keys())
-print("Nb_bars_above in grid:", 'Nb_bars_above' in grid)
-if 'Nb_bars_above' in grid:
-    print("Nb_bars_above value:", grid['Nb_bars_above'])
 
-# Verify wfo.py extract_bounds
-from wfo import optimize_parameters, WFOSettings
+# Ensure local project modules are importable when running pytest from repo root.
+sys.path.append(os.getcwd())
 
-# Mock Settings
-settings = WFOSettings()
-settings.optimization_method = 'bayesian'
+HAS_VBT = importlib.util.find_spec("vectorbtpro") is not None
+pytestmark = pytest.mark.skipif(not HAS_VBT, reason="vectorbtpro is required for these tests")
 
-print("\nTesting wfo logic (mock)...")
-try:
-    # We can't easily run optimize_parameters without data, but we can check the bayesian logic block if we extract it or dry run
-    # Let's just check if extract_bounds works for [5] by importing it if possible, or defining it similarly
-    
-    bounds = grid['Nb_bars_above']
-    
-    def extract_bounds(bounds):
-        if isinstance(bounds, (list, tuple)):
-            if len(bounds) == 1 and isinstance(bounds[0], (int, float)):
-                return bounds[0], bounds[0], 1
-            if len(bounds) == 3 and all(isinstance(b, (int, float)) for b in bounds[:2]):
-                return bounds
-            if len(bounds) >= 2 and all(isinstance(b, (int, float)) for b in bounds[:2]):
-                step = max(abs(bounds[1] - bounds[0]), 1)
-                return bounds[0], bounds[-1], step
-        raise ValueError(f"Unsupported bounds format: {bounds}")
-        
-    print(f"Extract bounds for {bounds}: {extract_bounds(bounds)}")
-    
-except Exception as e:
-    print(f"Error: {e}")
+if HAS_VBT:
+    from main import get_param_grid
+
+
+def test_get_param_grid_includes_default_for_unselected_params():
+    """Ensure non-selected strategy params are injected as fixed defaults."""
+    config = {
+        "selected_params": ["timeperiod"],
+        "timeperiod_min": 10,
+        "timeperiod_max": 10,
+        "timeperiod_step": 1,
+    }
+    grid = get_param_grid(config)
+
+    assert "timeperiod" in grid
+    assert grid["timeperiod"] == [10]
+    assert "Nb_bars_above" in grid
+    assert grid["Nb_bars_above"] == [5]
+
+
+def test_get_param_grid_adds_fixed_execution_settings():
+    """Execution settings must always be present as fixed singleton values."""
+    config = {"selected_params": ["timeperiod"]}
+    grid = get_param_grid(config)
+
+    assert grid["order_sizing_mode"] == ["percent_equity"]
+    assert grid["order_fixed_cash"] == [10000.0]
+    assert grid["fees_pct"] == [0.0]
