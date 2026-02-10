@@ -17,6 +17,8 @@ class ExpertPromptBuilder:
             "N'invente rien: utilise uniquement les donnees fournies. "
             "Si une information manque, ecris 'insufficient_data'. "
             "Reponds en langue francaise, avec tolerance aux anglicismes de la profession (trading/quant). "
+            "Adresse-toi a l'utilisateur avec un langage clair et explicatif; "
+            "si une notion est complexe, ajoute une explication pedagogique breve en termes simples. "
             "Utilise explicitement le contexte strategie (logique entree/sortie, modules actifs, roles des parametres) "
             "pour expliquer les observations. "
             "Confronte les alertes deterministes aux constats statistiques et indique accord/desaccord motive. "

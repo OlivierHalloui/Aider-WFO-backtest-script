@@ -9,9 +9,9 @@ import io
 import zipfile
 import threading
 import hashlib
-import subprocess
 import html
 import tempfile
+import re
 
 # Plotly expects np.bool8 on older releases; alias for numpy>=2.0 compatibility.
 if not hasattr(np, "bool8"):
@@ -26,9 +26,7 @@ from config import (
     DEFAULT_START_DATE, DEFAULT_END_DATE, DEFAULT_TIMEFRAME, DEFAULT_DATA_FILE, DEFAULT_PARAM_GRID,
     WFOSettings
 )
-from main import get_param_grid, get_metrics_info, get_wfo_settings
-from wfo import walk_forward_optimization, OptimizationInterrupted
-from adaptive_optimization import adaptive_continuous_optimization
+from wfo import OptimizationInterrupted
 from data_loading import load_data, get_csv_date_range
 from strategy import run_backtest
 from expert import (
@@ -42,6 +40,38 @@ from expert import (
     ExpertStorage,
     ExpertService,
 )
+from domain.serialization import (
+    sanitize_for_json as _sanitize_for_json,
+    utc_now_iso as _utc_now_iso,
+    sha256_json as _sha256_json,
+    to_jsonable as _to_jsonable,
+    safe_float_scalar as _safe_float_scalar,
+)
+from ui.data_utils import (
+    downsample_series as _downsample_series,
+    downsample_df as _downsample_df,
+    get_return_series as _get_return_series,
+    compute_trade_pnl_metrics as _compute_trade_pnl_metrics,
+)
+from ui.expert_report import (
+    render_deterministic_alerts as _render_deterministic_alerts,
+    render_interpretation_guide as _render_interpretation_guide,
+    render_expert_human_report as _render_expert_human_report,
+)
+from services.traceability import (
+    build_traceability_payload as _build_traceability_payload,
+)
+from services.export_utils import (
+    build_data_source_descriptor as _build_data_source_descriptor_base,
+    build_replay_manifest as _build_replay_manifest_base,
+)
+from services.runtime_utils import (
+    timeframe_to_seconds as _timeframe_to_seconds,
+    parse_iso_date as _parse_iso_date,
+    humanize_seconds as _humanize_seconds,
+    compute_running_elapsed_seconds as _compute_running_elapsed_seconds,
+)
+from services.run_service import run_optimization_job
 
 # Set page config
 st.set_page_config(
@@ -124,6 +154,28 @@ st.markdown(
         outline: 2px solid rgba(136, 226, 255, 0.55) !important;
         outline-offset: 2px !important;
     }
+    /* Expert follow-up UI: distinct backgrounds for user prompt and AI answer. */
+    div.st-key-expert_followup_prompt textarea {
+        background: linear-gradient(135deg, rgba(20, 44, 75, 0.92), rgba(17, 35, 58, 0.92)) !important;
+        color: #e8f3ff !important;
+        border: 1px solid rgba(111, 158, 211, 0.55) !important;
+    }
+    .expert-followup-answer-box {
+        background: linear-gradient(135deg, rgba(18, 69, 43, 0.86), rgba(16, 54, 36, 0.86));
+        border: 1px solid rgba(118, 217, 164, 0.44);
+        border-radius: 10px;
+        padding: 0.75rem 0.9rem;
+        color: #eafff5;
+        margin-top: 0.35rem;
+    }
+    .expert-followup-question-preview {
+        background: linear-gradient(135deg, rgba(24, 56, 97, 0.88), rgba(21, 44, 73, 0.88));
+        border: 1px solid rgba(126, 175, 231, 0.44);
+        border-radius: 10px;
+        padding: 0.65rem 0.9rem;
+        color: #edf6ff;
+        margin-top: 0.45rem;
+    }
     </style>
     """,
     unsafe_allow_html=True
@@ -133,245 +185,8 @@ st.markdown(
 # SIDEBAR CONFIGURATION
 # ==============================================================================
 
-def _downsample_series(series, max_points=20000):
-    if series is None or len(series) <= max_points:
-        return series
-    step = max(1, len(series) // max_points)
-    return series.iloc[::step]
-
-def _downsample_df(df, max_rows=200000):
-    if df is None or df.empty or len(df) <= max_rows:
-        return df
-    step = max(1, len(df) // max_rows)
-    return df.iloc[::step]
-
-def _get_return_series(trades_df):
-    if trades_df is None or trades_df.empty:
-        return None
-
-    if "return" in trades_df.columns:
-        return pd.to_numeric(trades_df["return"], errors="coerce")
-
-    if "pnl" in trades_df.columns and "entry_value" in trades_df.columns:
-        denom = pd.to_numeric(trades_df["entry_value"], errors="coerce")
-        pnl = pd.to_numeric(trades_df["pnl"], errors="coerce")
-        return pnl / denom.replace(0, np.nan)
-
-    if "pnl" in trades_df.columns and "entry_price" in trades_df.columns and "size" in trades_df.columns:
-        denom = pd.to_numeric(trades_df["entry_price"], errors="coerce") * pd.to_numeric(trades_df["size"], errors="coerce")
-        pnl = pd.to_numeric(trades_df["pnl"], errors="coerce")
-        return pnl / denom.replace(0, np.nan)
-
-    return None
-
-def _trimmed_mean(series, trim=0.05):
-    if series is None:
-        return None
-    s = series.dropna()
-    if s.empty:
-        return None
-    lower = s.quantile(trim)
-    upper = s.quantile(1 - trim)
-    return s[(s >= lower) & (s <= upper)].mean()
-
-def _winsorized_mean(series, trim=0.05):
-    if series is None:
-        return None
-    s = series.dropna()
-    if s.empty:
-        return None
-    lower = s.quantile(trim)
-    upper = s.quantile(1 - trim)
-    return s.clip(lower=lower, upper=upper).mean()
-
-def _compute_trade_pnl_metrics(trades_df, trim=0.05):
-    """Compute robust P&L summaries (value and percent) for the trades table."""
-    if trades_df is None or trades_df.empty:
-        return pd.DataFrame()
-
-    pnl = pd.to_numeric(trades_df.get("pnl"), errors="coerce") if "pnl" in trades_df.columns else None
-    ret = _get_return_series(trades_df)
-
-    rows = []
-
-    def add_row(name, value=None, pct=None, value_std=None, pct_std=None, n_trades=None):
-        rows.append({
-            "Metric": name,
-            "P&L Value": value,
-            "P&L %": pct,
-            "Std Value": value_std,
-            "Std %": pct_std,
-            "n trades": n_trades,
-        })
-
-    if pnl is not None:
-        add_row("Mean P&L", pnl.mean(), None, pnl.std(ddof=0), None, pnl.dropna().shape[0])
-        add_row("Median P&L", pnl.median(), None, pnl.std(ddof=0), None, pnl.dropna().shape[0])
-        trimmed = pnl.dropna()
-        if not trimmed.empty:
-            lower = trimmed.quantile(trim)
-            upper = trimmed.quantile(1 - trim)
-            trimmed_vals = trimmed[(trimmed >= lower) & (trimmed <= upper)]
-        else:
-            trimmed_vals = trimmed
-        add_row(
-            f"Trimmed Mean P&L ({int(trim*100)}%)",
-            _trimmed_mean(pnl, trim),
-            None,
-            trimmed_vals.std(ddof=0) if not trimmed_vals.empty else None,
-            None,
-            trimmed_vals.dropna().shape[0] if trimmed_vals is not None else None
-        )
-        wins_vals = pnl.dropna()
-        if not wins_vals.empty:
-            lower = wins_vals.quantile(trim)
-            upper = wins_vals.quantile(1 - trim)
-            wins_vals = wins_vals.clip(lower=lower, upper=upper)
-        add_row(
-            f"Winsorized Mean P&L ({int(trim*100)}%)",
-            _winsorized_mean(pnl, trim),
-            None,
-            wins_vals.std(ddof=0) if not wins_vals.empty else None,
-            None,
-            wins_vals.dropna().shape[0] if wins_vals is not None else None
-        )
-        abs_pnl = pnl.abs()
-        add_row("Mean |P&L|", abs_pnl.mean(), None, abs_pnl.std(ddof=0), None, abs_pnl.dropna().shape[0])
-
-        if "size" in trades_df.columns:
-            size = pd.to_numeric(trades_df["size"], errors="coerce")
-            per_unit = pnl / size.replace(0, np.nan)
-            add_row("Mean P&L per Unit", per_unit.mean(), None, per_unit.std(ddof=0), None, per_unit.dropna().shape[0])
-
-    if ret is not None:
-        add_row("Mean P&L %", None, ret.mean(), None, ret.std(ddof=0), ret.dropna().shape[0])
-        add_row("Median P&L %", None, ret.median(), None, ret.std(ddof=0), ret.dropna().shape[0])
-        trimmed_ret = ret.dropna()
-        if not trimmed_ret.empty:
-            lower = trimmed_ret.quantile(trim)
-            upper = trimmed_ret.quantile(1 - trim)
-            trimmed_ret_vals = trimmed_ret[(trimmed_ret >= lower) & (trimmed_ret <= upper)]
-        else:
-            trimmed_ret_vals = trimmed_ret
-        add_row(
-            f"Trimmed Mean P&L % ({int(trim*100)}%)",
-            None,
-            _trimmed_mean(ret, trim),
-            None,
-            trimmed_ret_vals.std(ddof=0) if not trimmed_ret_vals.empty else None,
-            trimmed_ret_vals.dropna().shape[0] if trimmed_ret_vals is not None else None
-        )
-        wins_ret = ret.dropna()
-        if not wins_ret.empty:
-            lower = wins_ret.quantile(trim)
-            upper = wins_ret.quantile(1 - trim)
-            wins_ret = wins_ret.clip(lower=lower, upper=upper)
-        add_row(
-            f"Winsorized Mean P&L % ({int(trim*100)}%)",
-            None,
-            _winsorized_mean(ret, trim),
-            None,
-            wins_ret.std(ddof=0) if not wins_ret.empty else None,
-            wins_ret.dropna().shape[0] if wins_ret is not None else None
-        )
-        abs_ret = ret.abs()
-        add_row("Mean |P&L %|", None, abs_ret.mean(), None, abs_ret.std(ddof=0), abs_ret.dropna().shape[0])
-
-        ret_clean = ret.dropna()
-        ret_clean = ret_clean[ret_clean > -1]
-        if not ret_clean.empty:
-            log_mean = np.log1p(ret_clean).mean()
-            geo_mean = np.expm1(log_mean)
-            add_row("Geometric Mean P&L %", None, geo_mean, None, None, ret_clean.dropna().shape[0])
-
-    if not rows:
-        return pd.DataFrame()
-
-    df_metrics = pd.DataFrame(rows)
-    if "P&L Value" in df_metrics.columns:
-        df_metrics["P&L Value"] = df_metrics["P&L Value"].apply(
-            lambda x: f"{x:,.2f}" if pd.notna(x) else ""
-        )
-    if "P&L %" in df_metrics.columns:
-        df_metrics["P&L %"] = df_metrics["P&L %"].apply(
-            lambda x: f"{x * 100:.3f}%" if pd.notna(x) else ""
-        )
-    if "Std Value" in df_metrics.columns:
-        df_metrics["Std Value"] = df_metrics["Std Value"].apply(
-            lambda x: f"{x:,.2f}" if pd.notna(x) else ""
-        )
-    if "Std %" in df_metrics.columns:
-        df_metrics["Std %"] = df_metrics["Std %"].apply(
-            lambda x: f"{x * 100:.3f}%" if pd.notna(x) else ""
-        )
-    if "n trades" in df_metrics.columns:
-        df_metrics["n trades"] = df_metrics["n trades"].apply(
-            lambda x: f"{int(x)}" if pd.notna(x) else ""
-        )
-    return df_metrics
-
-def _json_safe(obj):
-    if isinstance(obj, (np.integer, np.floating)):
-        return obj.item()
-    if isinstance(obj, (np.ndarray,)):
-        return obj.tolist()
-    if isinstance(obj, (pd.Timestamp, datetime.datetime, datetime.date)):
-        return obj.isoformat()
-    return str(obj)
-
-def _sanitize_for_json(value):
-    if isinstance(value, dict):
-        return {k: _sanitize_for_json(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_sanitize_for_json(v) for v in value]
-    if isinstance(value, (np.integer, np.floating, np.ndarray, pd.Timestamp, datetime.datetime, datetime.date)):
-        return _json_safe(value)
-    return value
-
-def _utc_now_iso():
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-def _sha256_json(value):
-    try:
-        normalized = _sanitize_for_json(value)
-        serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-    except Exception:
-        return None
-
-def _safe_git_command(args):
-    try:
-        output = subprocess.check_output(
-            ["git", *args],
-            cwd=os.path.dirname(__file__),
-            stderr=subprocess.DEVNULL,
-            text=True
-        ).strip()
-        return output or None
-    except Exception:
-        return None
-
-def _get_git_traceability_info():
-    status = _safe_git_command(["status", "--porcelain"])
-    return {
-        "branch": _safe_git_command(["branch", "--show-current"]),
-        "commit": _safe_git_command(["rev-parse", "HEAD"]),
-        "commit_short": _safe_git_command(["rev-parse", "--short", "HEAD"]),
-        "remote_origin": _safe_git_command(["remote", "get-url", "origin"]),
-        "working_tree_dirty": bool(status) if status is not None else None
-    }
-
-def _build_traceability_payload(config_snapshot=None, results_snapshot=None, run_metadata=None):
-    # Centralized audit payload used in UI and exports.
-    payload = {
-        "generated_at_utc": _utc_now_iso(),
-        "app_name": "ATDMF Strategy Walk-Forward Optimizer",
-        "config_sha256": _sha256_json(config_snapshot) if config_snapshot is not None else None,
-        "results_sha256": _sha256_json(results_snapshot) if results_snapshot is not None else None,
-        "git": _get_git_traceability_info(),
-        "run": run_metadata or {}
-    }
-    return _sanitize_for_json(payload)
+# NOTE: Data-processing, serialization and traceability helpers were extracted
+# into `ui.data_utils`, `domain.serialization`, and `services.traceability`.
 
 def _select_best_params_from_results(results, config):
     metric1_name = config.get('metric1_name', 'sharpe_ratio')
@@ -480,12 +295,19 @@ def _build_trials_dataframe_from_results(results):
         info = window_result.get("window_info", {}) or {}
         window_id = info.get("window")
         trials = window_result.get("optimization_trials") or []
+        trial_source = "optimization_trials"
+        # Backward compatibility for historical ZIPs that only store top
+        # optimization rows under `optimization_results`.
+        if not isinstance(trials, list) or len(trials) == 0:
+            trials = window_result.get("optimization_results") or []
+            trial_source = "optimization_results"
         for idx, trial in enumerate(trials):
             if not isinstance(trial, dict):
                 continue
             row = dict(trial)
             row["window"] = window_id
             row["trial_rank_in_window"] = idx + 1
+            row["trial_source"] = trial_source
             row["in_sample_start"] = info.get("in_sample_start")
             row["in_sample_end"] = info.get("in_sample_end")
             row["out_sample_start"] = info.get("out_sample_start")
@@ -511,33 +333,8 @@ def _build_window_info_dataframe(results):
         return pd.DataFrame()
     return pd.DataFrame(rows)
 
-def _to_jsonable(value):
-    if isinstance(value, (np.integer,)):
-        return int(value)
-    if isinstance(value, (np.floating,)):
-        return float(value)
-    if isinstance(value, (np.bool_,)):
-        return bool(value)
-    if isinstance(value, (pd.Timestamp, datetime.datetime, datetime.date)):
-        return value.isoformat()
-    if isinstance(value, (pd.Timedelta, datetime.timedelta)):
-        return str(value)
-    return value
-
-def _safe_float_scalar(value):
-    try:
-        if np.isscalar(value):
-            out = float(value)
-            return out if np.isfinite(out) else np.nan
-        arr = np.asarray(value, dtype=float)
-        if arr.size == 0:
-            return np.nan
-        arr = arr[np.isfinite(arr)]
-        if arr.size == 0:
-            return np.nan
-        return float(np.mean(arr))
-    except Exception:
-        return np.nan
+# NOTE: `_to_jsonable` and `_safe_float_scalar` now come from
+# `domain.serialization`.
 
 def _compact_trials_for_expert(trials_df, selected_params=None, top_per_window=5, max_windows=60):
     if selected_params is None:
@@ -899,34 +696,68 @@ def _save_expert_prompt_templates(templates):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
-def _render_deterministic_alerts(alerts):
-    if not alerts:
-        st.info("Aucune alerte déterministe déclenchée.")
-        return
-    severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
-    sorted_alerts = sorted(
-        [a for a in alerts if isinstance(a, dict)],
-        key=lambda a: severity_rank.get(str(a.get("severity", "low")).lower(), 0),
-        reverse=True
-    )
-    for alert in sorted_alerts:
-        sev = str(alert.get("severity", "low")).lower()
-        msg = str(alert.get("message", "Alerte"))
-        typ = str(alert.get("type", "other"))
-        rule = str(alert.get("rule", ""))
-        text = f"[{typ}] {msg}"
-        if rule:
-            text += f"\nRègle: {rule}"
-        if sev in {"critical", "high"}:
-            st.error(text)
-        elif sev == "medium":
-            st.warning(text)
-        else:
-            st.info(text)
+# NOTE: `_render_deterministic_alerts` is now provided by `ui.expert_report`.
 
 def _build_expert_input_data(results, current_conf):
     if not isinstance(results, dict):
         return None
+
+    # If a context pack was loaded from ZIP and matches the current run, reuse it
+    # to preserve rich historical context for Expert analysis.
+    imported_pack = st.session_state.get("expert_context_pack")
+    if isinstance(imported_pack, dict):
+        imported_input = imported_pack.get("expert_input_data")
+        imported_run_id = str(imported_pack.get("run_id") or "").strip()
+
+        run_meta = st.session_state.get("wfo_run_metadata") or {}
+        current_run_id = str(run_meta.get("run_id") or "").strip()
+        if not current_run_id and isinstance(results, dict):
+            try:
+                current_run_id = str(
+                    ((results.get("traceability") or {}).get("run") or {}).get("run_id") or ""
+                ).strip()
+            except Exception:
+                current_run_id = ""
+
+        run_matches = True
+        if imported_run_id and current_run_id:
+            run_matches = imported_run_id == current_run_id
+
+        if run_matches and isinstance(imported_input, dict):
+            try:
+                ctx = imported_input.get("context") or {}
+                imported_obj = ExpertInputData(
+                    context=ExpertRunContext(
+                        run_id=str(ctx.get("run_id") or current_run_id or f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"),
+                        optimization_regime=str(ctx.get("optimization_regime") or "classic"),
+                        timeframe=str(ctx.get("timeframe") or ""),
+                        start_date=str(ctx.get("start_date") or ""),
+                        end_date=str(ctx.get("end_date") or ""),
+                        selected_params=[str(p) for p in (ctx.get("selected_params") or [])],
+                    ),
+                    out_of_sample_performance=list(imported_input.get("out_of_sample_performance") or []),
+                    in_sample_performance=list(imported_input.get("in_sample_performance") or []),
+                    best_params=list(imported_input.get("best_params") or []),
+                    all_trials=list(imported_input.get("all_trials") or []),
+                    adaptive_guidance=list(imported_input.get("adaptive_guidance") or []),
+                    adaptive_summary=dict(imported_input.get("adaptive_summary") or {}),
+                    price_features=dict(imported_input.get("price_features") or {}),
+                    strategy_context=dict(imported_input.get("strategy_context") or {}),
+                    deterministic_alerts=list(imported_input.get("deterministic_alerts") or []),
+                    final_backtest=dict(imported_input.get("final_backtest") or {}),
+                )
+
+                # Refresh final backtest summary from current session artifacts if available.
+                fresh_final = _extract_final_backtest_for_expert(
+                    results=results,
+                    current_conf=current_conf,
+                    df_source=st.session_state.get("df")
+                )
+                if isinstance(fresh_final, dict) and fresh_final:
+                    imported_obj.final_backtest = fresh_final
+                return imported_obj
+            except Exception:
+                pass
 
     run_meta = st.session_state.get("wfo_run_metadata") or {}
     run_id = str(run_meta.get("run_id") or f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}")
@@ -969,11 +800,61 @@ def _build_expert_input_data(results, current_conf):
         final_backtest_summary=final_backtest_summary
     )
 
+    best_params_rows = results.get("best_params", [])
+    if not isinstance(best_params_rows, list):
+        best_params_rows = []
+
+    # Enrich best-params rows with window identifiers and best score proxies when
+    # available (important for imported historical ZIPs).
+    wr_list = results.get("window_results", [])
+    if isinstance(wr_list, list) and wr_list:
+        enriched = []
+        for idx, params_row in enumerate(best_params_rows):
+            row = dict(params_row) if isinstance(params_row, dict) else {}
+            wr = wr_list[idx] if idx < len(wr_list) and isinstance(wr_list[idx], dict) else {}
+            info = wr.get("window_info", {}) if isinstance(wr.get("window_info"), dict) else {}
+            if row.get("window") is None and info.get("window") is not None:
+                row["window"] = info.get("window")
+
+            opt_rows = wr.get("optimization_results")
+            if isinstance(opt_rows, list) and opt_rows:
+                top = opt_rows[0] if isinstance(opt_rows[0], dict) else {}
+                if row.get("combined_score") is None and isinstance(top, dict):
+                    row["combined_score"] = _to_jsonable(top.get("combined_score"))
+            enriched.append(row)
+        best_params_rows = enriched
+
+    # Attach IS/OOS metrics by window for stronger optimization diagnostics.
+    if best_params_rows:
+        is_by_window = {}
+        for row in results.get("in_sample_performance", []) or []:
+            if isinstance(row, dict) and row.get("window") is not None:
+                is_by_window[row.get("window")] = row
+        oos_by_window = {}
+        for row in results.get("out_of_sample_performance", []) or []:
+            if isinstance(row, dict) and row.get("window") is not None:
+                oos_by_window[row.get("window")] = row
+
+        enriched_perf = []
+        for row in best_params_rows:
+            if not isinstance(row, dict):
+                continue
+            item = dict(row)
+            w = item.get("window")
+            if w in is_by_window:
+                item["is_return"] = _to_jsonable(is_by_window[w].get("return"))
+                item["is_sharpe"] = _to_jsonable(is_by_window[w].get("sharpe"))
+            if w in oos_by_window:
+                item["oos_return"] = _to_jsonable(oos_by_window[w].get("return"))
+                item["oos_sharpe"] = _to_jsonable(oos_by_window[w].get("sharpe"))
+            enriched_perf.append(item)
+        best_params_rows = enriched_perf
+
     return ExpertInputData(
         context=context,
         out_of_sample_performance=results.get("out_of_sample_performance", []),
         in_sample_performance=results.get("in_sample_performance", []),
-        best_params=results.get("best_params", []),
+        best_params=best_params_rows,
         all_trials=compact_trials.get("top_trials", []),
         adaptive_guidance=adaptive_guidance,
         adaptive_summary=results.get("adaptive_summary", {}),
@@ -987,279 +868,227 @@ def _build_expert_input_data(results, current_conf):
         final_backtest=final_backtest_summary,
     )
 
-def _render_interpretation_guide(points):
-    """Display a compact interpretation guide below a chart."""
-    if not points:
-        return
-    clean_points = []
-    for point in points:
-        text = str(point).strip()
-        if text:
-            clean_points.append(text)
-    if not clean_points:
-        return
-    st.caption("Guide d'interprétation")
-    st.markdown("\n".join([f"- {p}" for p in clean_points]))
 
-def _expert_value_to_text(value, digits=2, suffix=""):
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        try:
-            val = float(value)
-            if np.isfinite(val):
-                fmt = f"{{:.{int(digits)}f}}"
-                return f"{fmt.format(val)}{suffix}"
-        except Exception:
-            pass
-    if value is None:
-        return "insufficient_data"
-    txt = str(value).strip()
-    return txt if txt else "insufficient_data"
-
-def _build_expert_markdown_report(result_json, meta=None):
-    """Build a readable markdown report from expert JSON output + run metadata."""
-    meta = meta or {}
-    r = result_json if isinstance(result_json, dict) else {}
-    lines = []
-
-    run_id = str(r.get("run_id") or meta.get("run_id") or "n/a")
-    mode = str(r.get("mode") or "n/a")
-    detail = str(r.get("detail_level") or "n/a")
-    lines.append(f"# Rapport Expert IA")
-    lines.append(f"- Run ID: `{run_id}`")
-    lines.append(f"- Mode: `{mode}`")
-    lines.append(f"- Niveau de détail: `{detail}`")
-    lines.append("")
-
-    deterministic_alerts = meta.get("deterministic_alerts", []) if isinstance(meta, dict) else []
-    if isinstance(deterministic_alerts, list) and deterministic_alerts:
-        lines.append("## Alertes automatiques (règles déterministes)")
-        for a in deterministic_alerts:
-            if not isinstance(a, dict):
+def _extract_window_ids_from_question(question_text):
+    """Extract referenced window ids (w3, W10, fenêtre 5) from a free-text question."""
+    if not isinstance(question_text, str) or not question_text.strip():
+        return []
+    text = question_text.lower()
+    found = set()
+    for pat in [r"\bw\s*(\d{1,3})\b", r"fen[êe]tre\s*(\d{1,3})", r"window\s*(\d{1,3})"]:
+        for m in re.findall(pat, text):
+            try:
+                found.add(int(m))
+            except Exception:
                 continue
-            sev = _expert_value_to_text(a.get("severity")).upper()
-            typ = _expert_value_to_text(a.get("type"))
-            msg = _expert_value_to_text(a.get("message"))
-            rule = _expert_value_to_text(a.get("rule"))
-            lines.append(f"- [{sev}] {typ}: {msg}")
-            if rule != "insufficient_data":
-                lines.append(f"  - Règle: {rule}")
-        lines.append("")
+    return sorted(found)
 
-    fb_assessment = r.get("final_backtest_assessment", {})
-    fb_meta = meta.get("final_backtest", {}) if isinstance(meta, dict) else {}
-    if (isinstance(fb_assessment, dict) and fb_assessment) or (isinstance(fb_meta, dict) and fb_meta):
-        lines.append("## Final Backtest")
-        if isinstance(fb_assessment, dict) and fb_assessment:
-            lines.append(f"- Synthèse IA: {_expert_value_to_text(fb_assessment.get('summary'))}")
-            lines.append(f"- Return stratégie: **{_expert_value_to_text(fb_assessment.get('strategy_return_pct'))}%**")
-            lines.append(f"- Return buy&hold: **{_expert_value_to_text(fb_assessment.get('buy_hold_return_pct'))}%**")
-            lines.append(
-                f"- Sur/Sous-performance vs buy&hold: **{_expert_value_to_text(fb_assessment.get('outperformance_vs_buy_hold_pct'))} pts**"
-            )
-            lines.append(f"- Max Drawdown: **{_expert_value_to_text(fb_assessment.get('max_drawdown_pct'))}%**")
-            lines.append(f"- Sharpe: **{_expert_value_to_text(fb_assessment.get('sharpe'))}**")
-            lines.append(f"- Win Rate: **{_expert_value_to_text(fb_assessment.get('win_rate_pct'))}%**")
-            lines.append(f"- Nombre de trades: **{_expert_value_to_text(fb_assessment.get('n_trades'))}**")
-            comment = _expert_value_to_text(fb_assessment.get("comment"))
-            if comment != "insufficient_data":
-                lines.append(f"- Commentaire: {comment}")
-        elif isinstance(fb_meta, dict) and fb_meta:
-            # Fallback when LLM did not produce final_backtest_assessment.
-            lines.append(f"- Return stratégie: **{_expert_value_to_text(fb_meta.get('strategy_total_return_pct'))}%**")
-            lines.append(f"- Return buy&hold: **{_expert_value_to_text(fb_meta.get('buy_hold_return_pct'))}%**")
-            lines.append(
-                f"- Sur/Sous-performance vs buy&hold: **{_expert_value_to_text(fb_meta.get('outperformance_vs_buy_hold_pct'))} pts**"
-            )
-            lines.append(f"- Max Drawdown: **{_expert_value_to_text(fb_meta.get('strategy_max_drawdown_pct'))}%**")
-            lines.append(f"- Sharpe: **{_expert_value_to_text(fb_meta.get('strategy_sharpe'))}**")
-            lines.append(f"- Win Rate: **{_expert_value_to_text(fb_meta.get('strategy_win_rate_pct'))}%**")
-            lines.append(f"- Nombre de trades: **{_expert_value_to_text(fb_meta.get('strategy_n_trades'))}**")
-        lines.append("")
 
-    ga = r.get("global_assessment", {})
-    if isinstance(ga, dict) and ga:
-        lines.append("## Évaluation globale")
-        lines.append(f"- Qualité: **{_expert_value_to_text(ga.get('quality_score'), digits=1, suffix='/100')}**")
-        lines.append(f"- Robustesse: **{_expert_value_to_text(ga.get('robustness_score'), digits=1, suffix='/100')}**")
-        lines.append(f"- Risque de sur-optimisation: **{_expert_value_to_text(ga.get('overfitting_risk_score'), digits=1, suffix='/100')}**")
-        lines.append(f"- Confiance: **{_expert_value_to_text(ga.get('confidence_score'), digits=1, suffix='/100')}**")
-        lines.append("")
+def _build_oos_rankings(results):
+    """Build deterministic rankings to help follow-up Q/A answer precisely."""
+    oos = results.get("out_of_sample_performance", []) if isinstance(results, dict) else []
+    df_oos = pd.DataFrame(oos)
+    if df_oos.empty:
+        return {}
 
-    findings = r.get("key_findings", [])
-    if isinstance(findings, list) and findings:
-        lines.append("## Constats clés")
-        for idx, f in enumerate(findings, start=1):
-            if not isinstance(f, dict):
-                continue
-            title = str(f.get("title") or f"Constat {idx}")
-            sev = str(f.get("severity") or "n/a")
-            exp = str(f.get("explanation") or "insufficient_data")
-            lines.append(f"{idx}. **{title}** (sévérité: `{sev}`)")
-            lines.append(f"   - Explication: {exp}")
-            ev = f.get("evidence", [])
-            if isinstance(ev, list) and ev:
-                lines.append(f"   - Preuves:")
-                for e in ev[:5]:
-                    lines.append(f"     - {str(e)}")
-        lines.append("")
+    for col in ["window", "return", "sharpe", "max_drawdown", "win_rate", "n_trades"]:
+        if col in df_oos.columns:
+            df_oos[col] = pd.to_numeric(df_oos[col], errors="coerce")
+    df_oos = df_oos.dropna(subset=["window"])
+    if df_oos.empty:
+        return {}
 
-    strategy_alignment = r.get("strategy_alignment", {})
-    if isinstance(strategy_alignment, dict) and strategy_alignment:
-        lines.append("## Alignement avec la logique stratégie")
-        lines.append(f"- Cohérence logique d'entrée: **{_expert_value_to_text(strategy_alignment.get('entry_logic_fit'))}**")
-        lines.append(f"- Cohérence logique de sortie: **{_expert_value_to_text(strategy_alignment.get('exit_logic_fit'))}**")
-        comments = strategy_alignment.get("comments", [])
-        if isinstance(comments, list) and comments:
-            for c in comments[:6]:
-                lines.append(f"- {str(c)}")
-        lines.append("")
+    keep_cols = [c for c in ["window", "return", "sharpe", "max_drawdown", "win_rate", "n_trades"] if c in df_oos.columns]
+    by_return = df_oos.sort_values("return", ascending=False)[keep_cols] if "return" in df_oos.columns else pd.DataFrame()
+    by_sharpe = df_oos.sort_values("sharpe", ascending=False)[keep_cols] if "sharpe" in df_oos.columns else pd.DataFrame()
 
-    gen = r.get("is_oos_generalization", {})
-    if isinstance(gen, dict) and gen:
-        lines.append("## Généralisation IS/OOS")
-        lines.append(f"- Gap moyen Return (IS-OOS): **{_expert_value_to_text(gen.get('return_gap_mean'))}**")
-        lines.append(f"- Gap moyen Sharpe (IS-OOS): **{_expert_value_to_text(gen.get('sharpe_gap_mean'))}**")
-        lines.append(f"- Tendance du gap: **{_expert_value_to_text(gen.get('gap_trend'))}**")
-        lines.append(f"- Commentaire: {_expert_value_to_text(gen.get('comment'))}")
-        lines.append("")
+    def rows(df):
+        if df is None or df.empty:
+            return []
+        out = []
+        for _, r in df.iterrows():
+            item = {}
+            for c in keep_cols:
+                v = r.get(c)
+                item[c] = _to_jsonable(v)
+            out.append(item)
+        return out
 
-    ada = r.get("adaptive_diagnostics", {})
-    if isinstance(ada, dict) and ada:
-        lines.append("## Diagnostic Adaptatif")
-        lines.append(
-            f"- Réduction moyenne de l'espace de recherche: **{_expert_value_to_text(ada.get('search_space_reduction_ratio_mean'))}**"
+    return {
+        "by_return_desc": rows(by_return),
+        "by_sharpe_desc": rows(by_sharpe),
+    }
+
+
+def _build_trials_context_for_followup(trials_df, question_text, max_rows_full=800):
+    """Provide full trials when small, otherwise rich summaries + targeted slices."""
+    if trials_df is None or getattr(trials_df, "empty", True):
+        return {"available": False, "rows_total": 0}
+
+    df_t = trials_df.copy()
+    if "window" in df_t.columns:
+        df_t["window"] = pd.to_numeric(df_t["window"], errors="coerce")
+    if "combined_score" in df_t.columns:
+        df_t["combined_score"] = pd.to_numeric(df_t["combined_score"], errors="coerce")
+
+    rows_total = int(len(df_t))
+    out = {
+        "available": True,
+        "rows_total": rows_total,
+        "columns": list(df_t.columns),
+    }
+
+    if rows_total <= int(max_rows_full):
+        out["records_full"] = _sanitize_for_json(df_t.to_dict("records"))
+        return out
+
+    # Global summaries for large tables.
+    if {"window", "combined_score"}.issubset(df_t.columns):
+        grouped = (
+            df_t.dropna(subset=["window", "combined_score"])
+            .groupby("window")["combined_score"]
+            .agg(count="count", best="max", median="median", q25=lambda x: x.quantile(0.25), q75=lambda x: x.quantile(0.75))
+            .reset_index()
         )
-        lines.append(f"- État de convergence: **{_expert_value_to_text(ada.get('convergence_state'))}**")
-        ex = ada.get("exploration_vs_exploitation", {})
-        if isinstance(ex, dict) and ex:
-            lines.append(f"- Exploration/Exploitation: **{_expert_value_to_text(ex.get('assessment'))}**")
-            lines.append(f"- Commentaire: {_expert_value_to_text(ex.get('comment'))}")
-        lines.append("")
+        out["window_score_stats"] = _sanitize_for_json(grouped.to_dict("records"))
 
-    actions = r.get("recommended_actions", [])
-    if isinstance(actions, list) and actions:
-        lines.append("## Plan d'action recommandé")
-        sortable = []
-        for i, a in enumerate(actions):
-            if isinstance(a, dict):
-                pr = a.get("priority", i + 1)
-                try:
-                    pr = int(pr)
-                except Exception:
-                    pr = i + 1
-                sortable.append((pr, a))
-        sortable.sort(key=lambda x: x[0])
-        for pr, a in sortable:
-            lines.append(f"{pr}. **{_expert_value_to_text(a.get('action'))}**")
-            lines.append(f"   - Bénéfice attendu: {_expert_value_to_text(a.get('expected_benefit'))}")
-            lines.append(f"   - Risque: {_expert_value_to_text(a.get('risk'))}")
-            lines.append(f"   - Coût estimé: `{_expert_value_to_text(a.get('estimated_cost'))}`")
-        lines.append("")
+    if "combined_score" in df_t.columns:
+        df_s = df_t.dropna(subset=["combined_score"]).sort_values("combined_score", ascending=False)
+        out["top_global"] = _sanitize_for_json(df_s.head(200).to_dict("records"))
+        out["bottom_global"] = _sanitize_for_json(df_s.tail(120).to_dict("records"))
 
-    alerts = r.get("alerts", [])
-    if isinstance(alerts, list) and alerts:
-        lines.append("## Alertes")
-        for a in alerts:
-            if not isinstance(a, dict):
+    # Targeted slices for referenced windows in the question.
+    window_ids = _extract_window_ids_from_question(question_text)
+    if window_ids and "window" in df_t.columns and "combined_score" in df_t.columns:
+        targeted = {}
+        for wid in window_ids:
+            wd = df_t[df_t["window"] == wid].dropna(subset=["combined_score"]).sort_values("combined_score", ascending=False)
+            if wd.empty:
                 continue
-            lines.append(
-                f"- [{_expert_value_to_text(a.get('severity')).upper()}] "
-                f"{_expert_value_to_text(a.get('type'))}: {_expert_value_to_text(a.get('message'))}"
-            )
-        lines.append("")
+            targeted[str(wid)] = {
+                "top": _sanitize_for_json(wd.head(80).to_dict("records")),
+                "bottom": _sanitize_for_json(wd.tail(30).to_dict("records")),
+            }
+        out["targeted_windows"] = targeted
+    else:
+        out["sample_head"] = _sanitize_for_json(df_t.head(250).to_dict("records"))
 
-    limits = r.get("limitations", [])
-    if isinstance(limits, list) and limits:
-        lines.append("## Limites")
-        for l in limits:
-            lines.append(f"- {_expert_value_to_text(l)}")
-        lines.append("")
+    return out
 
-    disclaimer = r.get("disclaimer")
-    if disclaimer:
-        lines.append("## Note")
-        lines.append(str(disclaimer))
 
-    return "\n".join(lines).strip()
+def _build_followup_context_pack(results, expert_input_preview, expert_last, question_text):
+    """Assemble a rich context pack for follow-up Q/A over current or imported WFO."""
+    results = results if isinstance(results, dict) else {}
+    oos = results.get("out_of_sample_performance", []) or []
+    ins = results.get("in_sample_performance", []) or []
+    best_params = results.get("best_params", []) or []
+    window_results = results.get("window_results", []) or []
+    window_info_df = st.session_state.get("window_info_df")
+    all_trials_df = st.session_state.get("all_trials_df")
+    if (all_trials_df is None or getattr(all_trials_df, "empty", True)) and window_results:
+        all_trials_df = _build_trials_dataframe_from_results(results)
 
-def _render_expert_human_report(result_json, meta=None):
-    report_md = _build_expert_markdown_report(result_json, meta=meta)
-    if not report_md:
-        st.info("Le rapport Expert est vide ou non interprétable.")
-        return ""
-    st.markdown(report_md)
-    return report_md
+    context_pack = {
+        "run_id": (expert_last or {}).get("run_id"),
+        "analysis_json": (expert_last or {}).get("result_json", {}),
+        "deterministic_alerts": (expert_last or {}).get("deterministic_alerts", []),
+        "strategy_context": (expert_last or {}).get("strategy_context", {}),
+        "final_backtest": (expert_last or {}).get("final_backtest", {}),
+        "wfo_metrics": {
+            "in_sample_performance": ins,
+            "out_of_sample_performance": oos,
+            "best_params_by_window": best_params,
+            "window_count": len(window_results),
+            "is_count": len(ins),
+            "oos_count": len(oos),
+            "best_params_count": len(best_params),
+        },
+        "window_info": _sanitize_for_json(window_info_df.to_dict("records")) if isinstance(window_info_df, pd.DataFrame) and not window_info_df.empty else [],
+        "oos_rankings": _build_oos_rankings(results),
+        "trials_context": _build_trials_context_for_followup(all_trials_df, question_text),
+        "expert_input_compact": {
+            "all_trials_compact": (expert_input_preview.all_trials if expert_input_preview else []),
+            "adaptive_guidance": (expert_input_preview.adaptive_guidance if expert_input_preview else []),
+            "adaptive_summary": (expert_input_preview.adaptive_summary if expert_input_preview else {}),
+            "price_features": (expert_input_preview.price_features if expert_input_preview else {}),
+        },
+    }
+    return _sanitize_for_json(context_pack)
+
+
+def _expert_input_to_dict(expert_input):
+    """Serialize ExpertInputData dataclass to exportable dict."""
+    if expert_input is None:
+        return {}
+    try:
+        return _sanitize_for_json(
+            {
+                "context": {
+                    "run_id": expert_input.context.run_id,
+                    "optimization_regime": expert_input.context.optimization_regime,
+                    "timeframe": expert_input.context.timeframe,
+                    "start_date": expert_input.context.start_date,
+                    "end_date": expert_input.context.end_date,
+                    "selected_params": expert_input.context.selected_params,
+                },
+                "out_of_sample_performance": expert_input.out_of_sample_performance,
+                "in_sample_performance": expert_input.in_sample_performance,
+                "best_params": expert_input.best_params,
+                "all_trials": expert_input.all_trials,
+                "adaptive_guidance": expert_input.adaptive_guidance,
+                "adaptive_summary": expert_input.adaptive_summary,
+                "price_features": expert_input.price_features,
+                "strategy_context": expert_input.strategy_context,
+                "deterministic_alerts": expert_input.deterministic_alerts,
+                "final_backtest": expert_input.final_backtest,
+            }
+        )
+    except Exception:
+        return {}
+
+
+def _build_expert_context_pack_for_export(results, config_snapshot):
+    """Build a rich Expert context pack to persist in ZIP exports."""
+    expert_input = _build_expert_input_data(results, config_snapshot if isinstance(config_snapshot, dict) else {})
+    expert_last = st.session_state.get("expert_last_response") or {}
+    followup_context = _build_followup_context_pack(
+        results=results,
+        expert_input_preview=expert_input,
+        expert_last=expert_last,
+        question_text="",
+    )
+    run_meta = st.session_state.get("wfo_run_metadata") or {}
+    run_id = str(run_meta.get("run_id") or expert_last.get("run_id") or "")
+    if not run_id and isinstance(expert_input, ExpertInputData):
+        run_id = str(expert_input.context.run_id or "")
+
+    payload = {
+        "schema_version": "expert_context_pack.v1",
+        "generated_at_utc": _utc_now_iso(),
+        "run_id": run_id,
+        "expert_input_data": _expert_input_to_dict(expert_input),
+        "followup_context": followup_context,
+        "followup_history": _sanitize_for_json(st.session_state.get("expert_followup_history") or []),
+    }
+    return _sanitize_for_json(payload)
 
 def _build_data_source_descriptor(config_snapshot, df):
-    descriptor = {
-        "from_file": None,
-        "file_path": None,
-        "file_exists": None,
-        "file_size_bytes": None,
-        "file_mtime_utc": None,
-        "timeframe": None,
-        "requested_start_date": None,
-        "requested_end_date": None,
-        "loaded_rows": None,
-        "loaded_start": None,
-        "loaded_end": None
-    }
-    if isinstance(config_snapshot, dict):
-        file_path = config_snapshot.get("file_path")
-        from_file = bool(config_snapshot.get("from_file", False))
-        descriptor["from_file"] = from_file
-        descriptor["file_path"] = file_path
-        descriptor["timeframe"] = config_snapshot.get("timeframe")
-        descriptor["requested_start_date"] = config_snapshot.get("start_date")
-        descriptor["requested_end_date"] = config_snapshot.get("end_date")
-        if from_file and isinstance(file_path, str):
-            exists = os.path.exists(file_path)
-            descriptor["file_exists"] = exists
-            if exists:
-                try:
-                    descriptor["file_size_bytes"] = int(os.path.getsize(file_path))
-                except Exception:
-                    descriptor["file_size_bytes"] = None
-                try:
-                    descriptor["file_mtime_utc"] = datetime.datetime.fromtimestamp(
-                        os.path.getmtime(file_path),
-                        tz=datetime.timezone.utc
-                    ).isoformat()
-                except Exception:
-                    descriptor["file_mtime_utc"] = None
-    if df is not None and hasattr(df, "empty") and not df.empty:
-        try:
-            descriptor["loaded_rows"] = int(len(df))
-            descriptor["loaded_start"] = _json_safe(df.index[0])
-            descriptor["loaded_end"] = _json_safe(df.index[-1])
-        except Exception:
-            pass
-    return _sanitize_for_json(descriptor)
+    return _build_data_source_descriptor_base(config_snapshot=config_snapshot, df=df)
+
 
 def _build_replay_manifest(payload, snapshot_mode_requested, snapshot_mode_actual, has_df_snapshot, data_source):
-    run_meta = st.session_state.get("wfo_run_metadata") or {}
-    final_params = st.session_state.get("final_params")
-    manifest = {
-        "created_at_utc": _utc_now_iso(),
-        "package_type": "full_replay_and_stats" if has_df_snapshot else "stats_and_manifest",
-        "data_snapshot_mode_requested": snapshot_mode_requested,
-        "data_snapshot_mode_actual": snapshot_mode_actual,
-        "contains_df_snapshot": bool(has_df_snapshot),
-        "replay_readiness": "strict" if bool(has_df_snapshot) else "reference_only",
-        "run_id": run_meta.get("run_id"),
-        "status": run_meta.get("status"),
-        "traceability": payload.get("traceability"),
-        "config": payload.get("config"),
-        "data_source": data_source,
-        "final_backtest": {
-            "has_final_portfolio": bool(payload.get("has_final_portfolio")),
-            "final_params": final_params,
-            "final_start_date": st.session_state.get("final_start_date"),
-            "final_end_date": st.session_state.get("final_end_date"),
-            "final_file_path": st.session_state.get("final_file_path")
-        }
-    }
-    return _sanitize_for_json(manifest)
+    return _build_replay_manifest_base(
+        payload=payload,
+        snapshot_mode_requested=snapshot_mode_requested,
+        snapshot_mode_actual=snapshot_mode_actual,
+        has_df_snapshot=has_df_snapshot,
+        data_source=data_source,
+        run_meta=st.session_state.get("wfo_run_metadata") or {},
+        final_params=st.session_state.get("final_params"),
+        final_start_date=st.session_state.get("final_start_date"),
+        final_end_date=st.session_state.get("final_end_date"),
+        final_file_path=st.session_state.get("final_file_path"),
+    )
 
 def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, full_package=False):
     if "wfo_results" not in st.session_state:
@@ -1272,6 +1101,7 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
     payload = _build_results_payload()
     config_snapshot = payload.get("config", {})
     zip_buffer = io.BytesIO()
+    expert_context_pack = _build_expert_context_pack_for_export(results, config_snapshot)
 
     snapshot_mode_requested = str(data_snapshot_mode)
     snapshot_mode_actual = "manifest_only"
@@ -1281,6 +1111,7 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
     with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("results.json", json.dumps(payload, indent=2))
         zf.writestr("audit_trace.json", json.dumps(payload.get("traceability", {}), indent=2))
+        zf.writestr("expert_context_pack.json", json.dumps(expert_context_pack, indent=2, ensure_ascii=False))
 
         if results.get("out_of_sample_performance"):
             oos_df = pd.DataFrame(results["out_of_sample_performance"])
@@ -1370,6 +1201,8 @@ def _save_results_zip_to_disk(zip_buffer):
 
 def _load_results_zip(zip_file):
     try:
+        # Reset optional imported context to avoid stale cross-run usage.
+        st.session_state.pop("expert_context_pack", None)
         with zipfile.ZipFile(zip_file) as zf:
             payload = {}
             if "results.json" in zf.namelist():
@@ -1400,6 +1233,26 @@ def _load_results_zip(zip_file):
                 st.session_state["all_trials_df"] = pd.read_csv(io.BytesIO(zf.read("all_trials.csv")))
             if "window_info.csv" in zf.namelist():
                 st.session_state["window_info_df"] = pd.read_csv(io.BytesIO(zf.read("window_info.csv")))
+
+            if "expert_context_pack.json" in zf.namelist():
+                try:
+                    expert_context_pack = json.loads(zf.read("expert_context_pack.json").decode("utf-8"))
+                    if isinstance(expert_context_pack, dict):
+                        st.session_state["expert_context_pack"] = expert_context_pack
+                        history = expert_context_pack.get("followup_history")
+                        if isinstance(history, list):
+                            st.session_state["expert_followup_history"] = history[-50:]
+                        # Optional fallback: recover compact trials if CSV is missing.
+                        if "all_trials_df" not in st.session_state:
+                            trials_compact = (
+                                (expert_context_pack.get("expert_input_data") or {}).get("all_trials")
+                                if isinstance(expert_context_pack.get("expert_input_data"), dict)
+                                else None
+                            )
+                            if isinstance(trials_compact, list) and trials_compact:
+                                st.session_state["all_trials_df"] = pd.DataFrame(trials_compact)
+                except Exception as e:
+                    st.warning(f"Impossible de lire expert_context_pack.json: {e}")
 
             # Optional: load backtest artifacts for display
             if "final_trades.csv" in zf.namelist():
@@ -1739,73 +1592,7 @@ ADAPTIVE_PROFILE_DEFS = {
     }
 }
 
-def _timeframe_to_seconds(tf):
-    if not isinstance(tf, str) or len(tf) < 2:
-        return None
-    unit = tf[-1].lower()
-    try:
-        value = int(tf[:-1])
-    except Exception:
-        return None
-    if value <= 0:
-        return None
-    if unit == "s":
-        return value
-    if unit == "m":
-        return value * 60
-    if unit == "h":
-        return value * 3600
-    if unit == "d":
-        return value * 86400
-    return None
-
-def _parse_iso_date(value):
-    if not isinstance(value, str) or not value.strip():
-        return None
-    text = value.strip()
-    try:
-        if len(text) <= 10:
-            return datetime.datetime.combine(datetime.date.fromisoformat(text[:10]), datetime.time.min)
-        return datetime.datetime.fromisoformat(text)
-    except Exception:
-        return None
-
-def _humanize_seconds(seconds):
-    if seconds is None or not np.isfinite(seconds) or seconds < 0:
-        return "n/a"
-    seconds = int(round(seconds))
-    if seconds < 60:
-        return f"{seconds}s"
-    mins, sec = divmod(seconds, 60)
-    if mins < 60:
-        return f"{mins}m {sec}s"
-    hours, mins = divmod(mins, 60)
-    if hours < 24:
-        return f"{hours}h {mins}m"
-    days, hours = divmod(hours, 24)
-    return f"{days}j {hours}h"
-
-def _parse_utc_iso(value):
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        return datetime.datetime.fromisoformat(value)
-    except Exception:
-        return None
-
-def _compute_running_elapsed_seconds(job_state):
-    if not isinstance(job_state, dict):
-        return None
-    started = _parse_utc_iso(job_state.get("started_at_utc"))
-    if started is None:
-        return None
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=datetime.timezone.utc)
-    elapsed = (now_utc - started).total_seconds()
-    if elapsed < 0:
-        return None
-    return float(elapsed)
+# NOTE: runtime/date helpers are now provided by `services.runtime_utils`.
 
 def _inject_running_animation_css():
     st.markdown(
@@ -2807,6 +2594,82 @@ def calculate_combinations(config):
         
     return total
 
+
+def _normalize_filename_token(value, default="na", max_len=24):
+    """Normalize arbitrary text to a filesystem-safe short token."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    if not text:
+        return default
+    return text[:max_len]
+
+
+def _build_period_label(start_date, end_date):
+    """Build compact duration label (ex: 01m, 02w, 10d) from config dates."""
+    start_dt = _parse_iso_date(start_date) if isinstance(start_date, str) else None
+    end_dt = _parse_iso_date(end_date) if isinstance(end_date, str) else None
+    if start_dt is None or end_dt is None:
+        return "unk"
+    if end_dt < start_dt:
+        start_dt, end_dt = end_dt, start_dt
+    days = max(1, (end_dt.date() - start_dt.date()).days + 1)
+    if days >= 28:
+        months = max(1, int(round(days / 30.0)))
+        return f"{months:02d}m"
+    if days >= 7:
+        weeks = max(1, int(round(days / 7.0)))
+        return f"{weeks:02d}w"
+    return f"{days:02d}d"
+
+
+def _build_config_filename(config):
+    """
+    Build an abbreviated, information-rich WFO config filename.
+    Example:
+    config_wfo_20260210_132530_01m_5s_bayes_05w_tr5000_classic.json
+    """
+    now_tag = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    period = _build_period_label(config.get("start_date"), config.get("end_date"))
+    timeframe = _normalize_filename_token(str(config.get("timeframe", "tf")).lower(), default="tf", max_len=8)
+
+    method_map = {
+        "bayesian": "bayes",
+        "optuna": "optuna",
+        "grid": "grid",
+    }
+    regime_map = {
+        "classic": "classic",
+        "adaptive_continuous": "adapt",
+        "nn_guided": "nnguide",
+        "prev_best_grid": "prevbest",
+    }
+    method_raw = str(config.get("optimization_method", "grid")).lower()
+    regime_raw = str(config.get("optimization_regime", "classic")).lower()
+    method = method_map.get(method_raw, _normalize_filename_token(method_raw, default="method", max_len=12))
+    regime = regime_map.get(regime_raw, _normalize_filename_token(regime_raw, default="regime", max_len=14))
+
+    try:
+        windows = int(config.get("n_windows", 0))
+    except Exception:
+        windows = 0
+    windows_label = f"{max(0, windows):02d}w"
+
+    # Trials label: use max_trials for classic/nn/prevbest regimes,
+    # and adaptive_trials_per_cycle for adaptive continuous mode.
+    if regime_raw == "adaptive_continuous":
+        trials_value = config.get("adaptive_trials_per_cycle")
+    else:
+        trials_value = config.get("max_trials")
+    try:
+        trials_label = f"tr{max(0, int(trials_value))}"
+    except Exception:
+        trials_label = "trna"
+
+    return f"config_wfo_{now_tag}_{period}_{timeframe}_{method}_{windows_label}_{trials_label}_{regime}.json"
+
 def run_final_backtest_logic():
     """Runs the final backtest using averaged parameters."""
     if 'wfo_results' not in st.session_state or 'df' not in st.session_state:
@@ -2932,124 +2795,8 @@ def run_final_backtest_logic():
 # ==============================================================================
 
 def run_wfo(config, control=None, job_state=None):
-    """Run WFO without direct UI updates (safe for background thread)."""
-    try:
-        if job_state is not None:
-            job_state['message'] = "Loading data..."
-
-        if config['from_file']:
-            df = load_data(
-                config['start_date'],
-                config['end_date'],
-                config['timeframe'],
-                from_file=True,
-                file_path=config['file_path']
-            )
-        else:
-            df = load_data(
-                config['start_date'],
-                config['end_date'],
-                config['timeframe'],
-                from_file=False
-            )
-
-        if df is None or df.empty:
-            if job_state is not None:
-                job_state['error'] = "No data found for the specified range/source."
-            return None, None, None
-
-        params_grid = get_param_grid(config)
-        metrics_info = get_metrics_info(config)
-        wfo_settings = get_wfo_settings(config)
-        regime = str(getattr(wfo_settings, 'optimization_regime', 'classic')).lower()
-
-        if job_state is not None:
-            if regime == 'adaptive_continuous':
-                job_state['message'] = "Starting adaptive continuous optimization..."
-            else:
-                job_state['message'] = (
-                    f"Starting {config['optimization_method'].upper()} on {config['n_windows']} windows..."
-                )
-
-        start_time = time.time()
-
-        def status_callback(msg):
-            if job_state is None:
-                return
-            if isinstance(msg, str):
-                job_state['message'] = msg
-            elif isinstance(msg, dict) and msg.get('type') == 'stats':
-                progress = msg.get('progress')
-                if progress is not None:
-                    try:
-                        job_state['progress'] = min(max(float(progress), 0.0), 1.0)
-                    except Exception:
-                        pass
-                else:
-                    w = msg.get('window', 0)
-                    job_state['progress'] = min(w / max(1, config['n_windows']), 1.0)
-
-                if msg.get('window') is not None:
-                    job_state['window'] = msg.get('window')
-                if msg.get('evaluations') is not None:
-                    try:
-                        job_state['evaluations'] = int(msg.get('evaluations'))
-                    except Exception:
-                        pass
-                if msg.get('speed') is not None:
-                    try:
-                        job_state['speed'] = float(msg.get('speed'))
-                    except Exception:
-                        pass
-                if msg.get('eta') is not None:
-                    try:
-                        job_state['eta_seconds'] = float(msg.get('eta'))
-                    except Exception:
-                        pass
-
-                if msg.get('message'):
-                    job_state['message'] = msg.get('message')
-                else:
-                    w = msg.get('window', 0)
-                    job_state['message'] = (
-                        f"Window {min(w, config['n_windows'])}/{config['n_windows']}"
-                    )
-
-        if regime == 'adaptive_continuous':
-            results = adaptive_continuous_optimization(
-                df,
-                param_grid=params_grid,
-                metrics_info=metrics_info,
-                timeframe=config['timeframe'],
-                settings=wfo_settings,
-                status_callback=status_callback,
-                control=control
-            )
-        else:
-            results = walk_forward_optimization(
-                df,
-                param_grid=params_grid,
-                metrics_info=metrics_info,
-                timeframe=config['timeframe'],
-                settings=wfo_settings,
-                status_callback=status_callback,
-                control=control
-            )
-
-        elapsed = time.time() - start_time
-        if job_state is not None:
-            job_state['progress'] = 1.0
-            job_state['message'] = "Optimization complete."
-        return results, df, elapsed
-
-    except OptimizationInterrupted:
-        if job_state is not None:
-            job_state['message'] = "Stop requested. Optimization interrupted."
-        return None, None, None
-    except Exception as e:
-        if job_state is not None:
-            job_state['error'] = str(e)
-        return None, None, None
+    """Run WFO via the run service without direct UI calls."""
+    return run_optimization_job(config=config, control=control, job_state=job_state)
 
 # --- Action Buttons ---
 st.sidebar.divider()
@@ -3242,13 +2989,19 @@ if st.session_state.get('wfo_running'):
 with col_save:
     # Save Config Button
     json_config = json.dumps(current_conf, indent=4)
+    config_filename = _build_config_filename(current_conf)
     st.download_button(
         label="💾 Save Config",
         data=json_config,
-        file_name="config.json",
+        file_name=config_filename,
         mime="application/json",
         width="stretch",
-        help="Télécharge la configuration actuelle de tous les contrôles de la sidebar."
+        help=(
+            "Télécharge la configuration actuelle de tous les contrôles de la sidebar. "
+            "Règle de nommage: "
+            "`config_wfo_<YYYYMMDD_HHMMSS>_<periode>_<timeframe>_<methode>_<nb_fenetres>_<trials>_<regime>.json` "
+            "(ex: `config_wfo_20260210_141530_01m_5s_bayes_05w_tr5000_classic.json`)."
+        )
     )
 
 if st.session_state.get('wfo_notice'):
@@ -3426,26 +3179,63 @@ if 'wfo_results' in st.session_state:
             
             # Add Windows
             colors = {'train': 'rgba(0, 255, 0, 0.1)', 'test': 'rgba(255, 0, 0, 0.1)'}
-            
+            first_train_labeled = False
+            first_test_labeled = False
+            out_of_range_windows = 0
+            df_x_min = None
+            df_x_max = None
+            try:
+                if len(df.index) > 0:
+                    df_x_min = pd.to_datetime(df.index.min(), errors="coerce")
+                    df_x_max = pd.to_datetime(df.index.max(), errors="coerce")
+            except Exception:
+                df_x_min = None
+                df_x_max = None
+
             for i, window in enumerate(results['window_results']):
                 info = window['window_info']
                 # IS
                 if info['in_sample_start'] and info['in_sample_end']:
-                    fig.add_vrect(
+                    rect_kwargs = dict(
                         x0=info['in_sample_start'], x1=info['in_sample_end'],
-                        fillcolor=colors['train'], layer="below", line_width=0,
-                        annotation_text=f"W{i+1} Train" if i==0 else None
+                        fillcolor=colors['train'], layer="below", line_width=0
                     )
+                    if not first_train_labeled:
+                        rect_kwargs["annotation_text"] = f"W{i+1} Train"
+                        first_train_labeled = True
+                    fig.add_vrect(**rect_kwargs)
                 # OOS
                 if info['out_sample_start'] and info['out_sample_end']:
-                    fig.add_vrect(
+                    rect_kwargs = dict(
                         x0=info['out_sample_start'], x1=info['out_sample_end'],
-                        fillcolor=colors['test'], layer="below", line_width=0,
-                        annotation_text=f"W{i+1} Test" if i==0 else None
+                        fillcolor=colors['test'], layer="below", line_width=0
                     )
+                    if not first_test_labeled:
+                        rect_kwargs["annotation_text"] = f"W{i+1} Test"
+                        first_test_labeled = True
+                    fig.add_vrect(**rect_kwargs)
+
+                # Detect window/date mismatch between plotted df and WFO windows.
+                if df_x_min is not None and df_x_max is not None:
+                    try:
+                        w_start = pd.to_datetime(info.get('start_date'), errors='coerce')
+                        w_end = pd.to_datetime(info.get('end_date'), errors='coerce')
+                        if pd.notna(w_start) and pd.notna(w_end):
+                            if w_end < df_x_min or w_start > df_x_max:
+                                out_of_range_windows += 1
+                    except Exception:
+                        pass
                     
             fig.update_layout(height=500, template="plotly_dark", title_text="Market Data & WFO Windows")
+            if df_x_min is not None and df_x_max is not None and pd.notna(df_x_min) and pd.notna(df_x_max):
+                # Keep x-axis aligned with the displayed price data range.
+                fig.update_xaxes(range=[df_x_min, df_x_max])
             st.plotly_chart(fig, use_container_width=True)
+            if out_of_range_windows > 0:
+                st.info(
+                    f"{out_of_range_windows} fenêtre(s) WFO sont hors de la plage de prix affichée. "
+                    "Cela arrive si les résultats WFO importés et la série de prix active n'ont pas la même période."
+                )
         
         # IS + OOS Performance per Window (shared scale)
         if results['out_of_sample_performance'] or results['in_sample_performance']:
@@ -4069,6 +3859,16 @@ if 'wfo_results' in st.session_state:
         preview_strategy = expert_input_preview.strategy_context if expert_input_preview else {}
         preview_final_backtest = expert_input_preview.final_backtest if expert_input_preview else {}
 
+        st.markdown("#### Vérification des données envoyées à l'Expert")
+        if expert_input_preview is not None:
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Fenêtres IS", str(len(expert_input_preview.in_sample_performance or [])))
+            d2.metric("Fenêtres OOS", str(len(expert_input_preview.out_of_sample_performance or [])))
+            d3.metric("Best Params (fenêtres)", str(len(expert_input_preview.best_params or [])))
+            d4.metric("Trials compacts", str(len(expert_input_preview.all_trials or [])))
+        else:
+            st.warning("Aucune donnée Expert construite à partir des résultats courants.")
+
         st.markdown("#### Pré-diagnostic automatique (sans IA)")
         _render_deterministic_alerts(preview_alerts)
 
@@ -4133,6 +3933,32 @@ if 'wfo_results' in st.session_state:
             st.session_state["expert_system_prompt_edit"] = default_system_prompt
         if "expert_user_prompt_edit" not in st.session_state:
             st.session_state["expert_user_prompt_edit"] = default_user_prompt
+
+        # Auto-refresh prompts when Expert input data changed (e.g. new ZIP loaded),
+        # unless user explicitly locks custom prompts.
+        prompt_data_signature = _sha256_json(
+            {
+                "run_id": getattr(getattr(expert_input_preview, "context", None), "run_id", None) if expert_input_preview else None,
+                "is_rows": len(expert_input_preview.in_sample_performance or []) if expert_input_preview else 0,
+                "oos_rows": len(expert_input_preview.out_of_sample_performance or []) if expert_input_preview else 0,
+                "best_rows": len(expert_input_preview.best_params or []) if expert_input_preview else 0,
+                "trials_rows": len(expert_input_preview.all_trials or []) if expert_input_preview else 0,
+                "fb_available": bool((expert_input_preview.final_backtest or {}).get("available")) if expert_input_preview else False,
+            }
+        )
+
+        lock_custom_prompts = st.checkbox(
+            "Conserver mes prompts personnalisés",
+            key="expert_lock_prompts",
+            help="Si désactivé, les prompts se rechargent automatiquement lors d'un changement de dataset/run.",
+        )
+        previous_sig = st.session_state.get("expert_prompt_data_signature")
+        if prompt_data_signature and previous_sig != prompt_data_signature:
+            if not lock_custom_prompts:
+                st.session_state["expert_system_prompt_edit"] = default_system_prompt
+                st.session_state["expert_user_prompt_edit"] = default_user_prompt
+                st.caption("Prompts auto rechargés pour les données du run courant.")
+            st.session_state["expert_prompt_data_signature"] = prompt_data_signature
 
         templates = _load_expert_prompt_templates()
         template_names = sorted(list(templates.keys()))
@@ -4306,6 +4132,166 @@ if 'wfo_results' in st.session_state:
                     "final_backtest": expert_last.get("final_backtest", {}),
                 }
             )
+
+            st.markdown("#### Question de suivi à l'Expert")
+            st.caption("Pose une question sur l'analyse ci-dessus ou donne une instruction supplémentaire.")
+            followup_history = st.session_state.get("expert_followup_history", [])
+            if not isinstance(followup_history, list):
+                followup_history = []
+
+            mt_c1, mt_c2 = st.columns([1.2, 1.2])
+            with mt_c1:
+                followup_multi_turn = st.checkbox(
+                    "Mode multi-tour",
+                    value=True,
+                    key="expert_followup_multi_turn",
+                    help="Conserve l'historique de conversation et le transmet au prochain tour.",
+                )
+            with mt_c2:
+                followup_context_turns = st.number_input(
+                    "Tours de contexte",
+                    min_value=1,
+                    max_value=12,
+                    value=6,
+                    step=1,
+                    key="expert_followup_context_turns",
+                    help="Nombre de tours précédents réinjectés dans la prochaine question.",
+                    disabled=not followup_multi_turn,
+                )
+            followup_question = st.text_area(
+                "Votre question/instruction",
+                key="expert_followup_prompt",
+                height=120,
+                placeholder="Ex: Quelle fenêtre montre le meilleur compromis robustesse/performance et pourquoi ?"
+            )
+            ask_col, clear_col = st.columns([1.2, 1])
+            with ask_col:
+                if st.button("Envoyer la question à l'Expert", key="expert_followup_submit", width="stretch"):
+                    clean_expert_api_key = str(expert_api_key or "").strip()
+                    question_text = str(followup_question or "").strip()
+                    if not clean_expert_api_key:
+                        st.warning("Renseigne une clé API Expert pour envoyer une question de suivi.")
+                    elif not question_text:
+                        st.warning("Saisis une question ou une instruction avant l'envoi.")
+                    else:
+                        clean_base_url = str(expert_base_url or "").strip()
+                        if clean_base_url.endswith("/chat/completions"):
+                            clean_base_url = clean_base_url[: -len("/chat/completions")]
+                        if clean_base_url.endswith("/v1/chat/completions"):
+                            clean_base_url = clean_base_url[: -len("/chat/completions")]
+
+                        llm_cfg = LLMConfig(
+                            provider=expert_provider,
+                            model=expert_model.strip() or default_model,
+                            api_key=clean_expert_api_key,
+                            base_url=(clean_base_url or None),
+                            temperature=float(expert_temp),
+                            timeout_s=float(expert_timeout),
+                            max_tokens=int(expert_max_tokens),
+                            retries=int(expert_retries),
+                        )
+                        followup_gateway = OpenAICompatibleGateway()
+
+                        convo_context = []
+                        if followup_multi_turn and followup_history:
+                            safe_n = int(followup_context_turns)
+                            for ex in followup_history[-safe_n:]:
+                                if not isinstance(ex, dict):
+                                    continue
+                                convo_context.append(
+                                    {
+                                        "created_at": ex.get("created_at"),
+                                        "question": str(ex.get("question", "")),
+                                        "answer": str(ex.get("answer", "")),
+                                    }
+                                )
+
+                        followup_context = _build_followup_context_pack(
+                            results=results,
+                            expert_input_preview=expert_input_preview,
+                            expert_last=expert_last,
+                            question_text=question_text,
+                        )
+                        followup_context["conversation_history"] = convo_context
+                        followup_system_prompt = (
+                            "Tu es l'agent Expert IA de l'application WFO. "
+                            "Tu réponds en français (tolérance aux anglicismes quant/trading). "
+                            "Tu disposes d'un pack de données WFO détaillé (métriques IS/OOS, fenêtres, classements, trials). "
+                            "Réponds de façon lisible pour humain: structuré, factuel, utile. "
+                            "Quand une notion est complexe, ajoute une explication pédagogique simple (1-3 phrases). "
+                            "N'invente pas de données; si info absente, dis-le explicitement. "
+                            "Si un historique multi-tour est fourni, tiens compte des tours précédents."
+                        )
+                        followup_user_prompt = (
+                            "Question utilisateur:\n"
+                            f"{question_text}\n\n"
+                            "Contexte d'analyse Expert (JSON):\n"
+                            f"{json.dumps(followup_context, ensure_ascii=False, default=str)}\n\n"
+                            "Consignes:\n"
+                            "- Réponds directement à la question.\n"
+                            "- Utilise prioritairement les données chiffrées du pack fourni.\n"
+                            "- Si la question concerne un classement de fenêtres, renvoie un classement explicite window->valeur.\n"
+                            "- Cite les éléments clés du run/fenêtres quand disponibles.\n"
+                            "- Propose 1 à 3 actions concrètes si pertinent.\n"
+                            "- Si le sujet est technique, ajoute un encadré \"Explication simple\"."
+                        )
+
+                        with st.spinner("Réponse Expert en cours..."):
+                            try:
+                                followup_answer = followup_gateway.generate(
+                                    followup_system_prompt,
+                                    followup_user_prompt,
+                                    llm_cfg,
+                                )
+                                history = st.session_state.get("expert_followup_history", [])
+                                if not isinstance(history, list):
+                                    history = []
+                                history.append(
+                                    {
+                                        "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+                                        "question": question_text,
+                                        "answer": str(followup_answer or "").strip(),
+                                    }
+                                )
+                                st.session_state["expert_followup_history"] = history[-50:]
+                            except Exception as e:
+                                st.error(f"Erreur lors de la question de suivi Expert: {e}")
+            with clear_col:
+                if st.button("Effacer l'historique Q/R", key="expert_followup_clear", width="stretch"):
+                    st.session_state["expert_followup_history"] = []
+
+            followup_history = st.session_state.get("expert_followup_history", [])
+            if isinstance(followup_history, list) and followup_history:
+                st.markdown("#### Conversation Expert")
+                st.caption("Ordre d'affichage: du plus récent au plus ancien.")
+                if followup_multi_turn:
+                    visible_turns = list(reversed(followup_history[-int(followup_context_turns):]))
+                else:
+                    visible_turns = [followup_history[-1]]
+
+                for idx, ex in enumerate(visible_turns, start=1):
+                    if not isinstance(ex, dict):
+                        continue
+                    q_text = str(ex.get("question", "")).strip()
+                    a_text = str(ex.get("answer", "")).strip()
+                    created_at = str(ex.get("created_at", "")).strip()
+                    st.caption(f"Tour {idx} • {created_at}" if created_at else f"Tour {idx}")
+                    if q_text:
+                        st.markdown(
+                            "<div class='expert-followup-question-preview'>"
+                            "<strong>Votre question</strong><br>"
+                            f"{html.escape(q_text).replace(chr(10), '<br>')}"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+                    if a_text:
+                        st.markdown(
+                            "<div class='expert-followup-answer-box'>"
+                            "<strong>Réponse Expert</strong><br>"
+                            f"{html.escape(a_text).replace(chr(10), '<br>')}"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
 
             download_payload = report_markdown or "Rapport Expert indisponible."
             st.download_button(
