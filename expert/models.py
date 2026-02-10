@@ -3,13 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
-Provider = Literal["openai", "grok"]
+Provider = Literal["openai", "grok", "gemini"]
 DetailLevel = Literal["short", "standard", "expert"]
 AnalysisMode = Literal["summary", "diagnostic", "action_plan", "alerts"]
 
 
 @dataclass
 class LLMConfig:
+    """Provider/model call settings used by the Expert gateway."""
     provider: Provider
     model: str
     api_key: str
@@ -22,6 +23,7 @@ class LLMConfig:
 
 @dataclass
 class ExpertRunContext:
+    """High-level metadata describing the optimization run under analysis."""
     run_id: str
     optimization_regime: str
     timeframe: str
@@ -32,6 +34,7 @@ class ExpertRunContext:
 
 @dataclass
 class ExpertInputData:
+    """Structured dataset sent to the Expert analyzer for interpretation."""
     context: ExpertRunContext
     out_of_sample_performance: List[Dict[str, Any]]
     in_sample_performance: List[Dict[str, Any]]
@@ -47,6 +50,7 @@ class ExpertInputData:
 
 @dataclass
 class ExpertRequest:
+    """User request options controlling Expert analysis mode and detail level."""
     mode: AnalysisMode
     detail_level: DetailLevel
     user_question: Optional[str]
@@ -55,6 +59,7 @@ class ExpertRequest:
 
 @dataclass
 class ExpertResponse:
+    """Normalized Expert output persisted and rendered in the UI."""
     run_id: str
     status: Literal["ok", "partial", "error"]
     result_json: Dict[str, Any]

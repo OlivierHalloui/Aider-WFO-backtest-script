@@ -368,6 +368,7 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
         weight_metric2 = params.get('weight_metric2', 0.0)
         
         def trade_stat(trades, attr_name, default=0.0):
+            """Safely extract a trade statistic from vectorbt trades objects/stats outputs."""
             value = getattr(trades, attr_name, None)
             if value is not None:
                 return value
@@ -392,6 +393,7 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
 
         # Helper to get metric safely
         def get_metric(port, name):
+            """Compute a metric value for scalar or vectorized portfolios."""
             if name == 'max_drawdown':
                 return port.max_drawdown * 100 * -1
             elif name == 'sharpe_ratio':
@@ -410,17 +412,21 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
                 total_ret = port.total_return * 100
                 n_trades = port.trades.count()
                 # Handle division by zero or no trades safely
-                # n_trades can be 0.
-                if n_trades == 0:
-                    return 0.0
-                avg_pl = total_ret / n_trades
-                
-                if hasattr(avg_pl, 'replace'):
-                    avg_pl = avg_pl.replace([np.inf, -np.inf], 0).fillna(0)
-                else:
+                # n_trades may be scalar or a pandas Series (vectorized run).
+                if hasattr(n_trades, 'replace'):
+                    safe_trades = n_trades.replace(0, np.nan)
+                    avg_pl = total_ret / safe_trades
+                    return avg_pl.replace([np.inf, -np.inf], 0).fillna(0)
+
+                try:
+                    if float(n_trades) == 0.0:
+                        return 0.0
+                    avg_pl = total_ret / n_trades
                     if np.isinf(avg_pl) or np.isnan(avg_pl):
-                        avg_pl = 0.0
-                return avg_pl
+                        return 0.0
+                    return avg_pl
+                except Exception:
+                    return 0.0
             return 0.0
 
         m1 = get_metric(portfolio, metric1_name)

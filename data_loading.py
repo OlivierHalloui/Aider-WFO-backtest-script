@@ -17,6 +17,7 @@ def get_dates(config):
     return start_date, end_date
 
 def _normalize_date_range(start_date, end_date):
+    """Normalize string/ts bounds into pandas timestamps suitable for index filtering."""
     start_ts = pd.to_datetime(start_date, errors='coerce') if start_date else None
     end_ts = pd.to_datetime(end_date, errors='coerce') if end_date else None
 
@@ -32,6 +33,7 @@ def _normalize_date_range(start_date, end_date):
     return start_ts, end_ts
 
 def _apply_date_filter(df, start_date, end_date):
+    """Filter a datetime-indexed frame between inclusive start/end bounds."""
     if df is None or df.empty:
         return df
 
@@ -63,6 +65,7 @@ def _apply_date_filter(df, start_date, end_date):
     return df
 
 def get_csv_date_range(file_path):
+    """Read a CSV and return min/max date strings detected in its timestamp column."""
     if not file_path or not os.path.exists(file_path):
         return None, None
 

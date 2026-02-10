@@ -4,8 +4,11 @@ from typing import Any, Dict, List, Tuple
 
 
 class ExpertOutputSchema:
+    """Validation utilities for the expert JSON response contract."""
+
     @staticmethod
     def json_schema_v1() -> Dict[str, Any]:
+        """Return minimal required-key schema for MVP expert responses."""
         return {
             "schema_version": "expert.v1",
             "required_keys": [
@@ -24,6 +27,7 @@ class ExpertOutputSchema:
 
     @staticmethod
     def validate(payload: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validate required keys and fixed schema version on a parsed payload."""
         errors: List[str] = []
         if not isinstance(payload, dict):
             return False, ["Payload is not a JSON object."]

@@ -201,6 +201,7 @@ class NeuralSearchGuide:
         return {key: float(raw[idx] / total) for idx, key in enumerate(self.param_keys)}
 
     def build_guided_grid(self, base_param_grid):
+        """Create a reduced parameter grid guided by NN scores plus exploration safeguards."""
         baseline_combos = int(np.prod([len(v) for v in base_param_grid.values()]))
         if not self.trained:
             return base_param_grid, {
@@ -316,6 +317,7 @@ def _match_prev_value_to_candidates(prev_value, candidates):
 
 
 def _build_prev_best_grid(base_param_grid, prev_best_params):
+    """Build a grid centered on previous-window best values when they still exist in domains."""
     guided_grid = {}
     fixed_count = 0
     for key, values in base_param_grid.items():
@@ -677,6 +679,7 @@ def optimize_parameters(in_sample_df, param_grid, metrics_info, timeframe='5s', 
     return sorted_results, evaluation_count
 
 def get_stable_best_params(optimization_results, param_grid, neighbor_count=5, score_col='combined_score'):
+    """Select a robust best row using neighborhood-averaged scores in normalized param space."""
     if optimization_results is None or optimization_results.empty:
         raise ValueError("optimization_results must be a non-empty DataFrame.")
     if score_col not in optimization_results.columns:
@@ -1037,6 +1040,10 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
         window_result = {
             'window_info': window_dates,
             'optimization_results': optimization_results.head(5).to_dict('records'),
+            # Keep all in-sample trial rows for post-run statistics and replayability.
+            'optimization_trials': optimization_results.to_dict('records'),
+            'optimization_trials_count': int(len(optimization_results)),
+            'evaluations': int(eval_count),
             'best_params': best_params
         }
         

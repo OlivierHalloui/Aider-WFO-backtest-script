@@ -124,10 +124,20 @@ def _trade_stat(trades, attr_name, default=0.0):
 
 
 def _calc_avg_pl(port):
+    """Return average P/L per trade for scalar or vectorized portfolios."""
     try:
         total_ret = port.total_return * 100
         n_trades = port.trades.count()
-        if n_trades is None or n_trades == 0:
+        if n_trades is None:
+            return 0.0
+
+        if hasattr(n_trades, "replace"):
+            safe_trades = n_trades.replace(0, np.nan)
+            avg_pl = total_ret / safe_trades
+            avg_pl = avg_pl.replace([np.inf, -np.inf], 0).fillna(0)
+            return avg_pl
+
+        if float(n_trades) == 0.0:
             return 0.0
         avg_pl = total_ret / n_trades
         if hasattr(avg_pl, "replace"):
@@ -570,6 +580,9 @@ def adaptive_continuous_optimization(
         window_result = {
             "window_info": window_dates,
             "optimization_results": trials_df.head(5).to_dict("records"),
+            # Keep all cycle trial rows for downstream statistical analyses.
+            "optimization_trials": trials_df.to_dict("records"),
+            "optimization_trials_count": int(len(trials_df)),
             "best_params": best_params,
             "cycle_info": cycle_info,
         }

@@ -11,6 +11,8 @@ from .schema import ExpertOutputSchema
 
 
 class ExpertAnalyzer:
+    """Orchestrates prompt building, LLM call, and schema-safe post-processing."""
+
     def __init__(self, llm_gateway: Any, prompt_builder: ExpertPromptBuilder):
         self.llm_gateway = llm_gateway
         self.prompt_builder = prompt_builder
@@ -23,6 +25,7 @@ class ExpertAnalyzer:
         system_prompt_override: str | None = None,
         user_prompt_override: str | None = None,
     ) -> ExpertResponse:
+        """Run one expert analysis call and return a normalized response payload."""
         t0 = time.time()
         warnings = []
         run_id = data.context.run_id
@@ -91,6 +94,7 @@ class ExpertAnalyzer:
         )
 
     def _post_process(self, llm_text: str) -> Dict[str, Any]:
+        """Best-effort parse of JSON output (raw JSON, fenced JSON, or extracted object)."""
         text = (llm_text or "").strip()
         if not text:
             return {}
@@ -129,6 +133,7 @@ class ExpertAnalyzer:
         request: ExpertRequest,
         schema_errors: list[str],
     ) -> Dict[str, Any]:
+        """Fill missing required keys when schema validation failed."""
         out = dict(payload) if isinstance(payload, dict) else {}
         out.setdefault("schema_version", "expert.v1")
         out.setdefault("run_id", data.context.run_id)

@@ -71,3 +71,21 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 - Transmission des métriques finales (return, sharpe, drawdown, win rate, trades) et comparaison buy&hold quand disponibles.
 - Affichage du résumé final backtest transmis dans l'UI Expert.
 - Prompt mis à jour pour exiger une section d'analyse `final_backtest_assessment`.
+- Sélection guidée des modèles LLM dans l'UI Expert:
+- Ajout d'un catalogue de modèles par provider (`openai`, `grok`, `gemini`) avec descriptions métier.
+- Sélecteur `Modèle LLM` basé sur liste + option `Autre (saisie libre)`.
+- Placeholder/hint de `Base URL` adapté automatiquement au provider choisi.
+- Correctifs de compatibilité OpenAI GPT-5 pour Expert IA:
+- Gestion des paramètres API selon modèle (`max_completion_tokens` pour chat GPT-5, température personnalisée ignorée quand non supportée).
+- Ajout du format JSON explicite dans les requêtes OpenAI (`response_format` / `text.format`) pour limiter les sorties non JSON.
+- Détection explicite des réponses tronquées/incomplètes (`finish_reason=length`, `incomplete_details.reason=max_output_tokens`) avec message d'action.
+- Prompt Expert rendu plus concis pour réduire le risque de troncature; `Max tokens` UI relevé à 3000 par défaut.
+- Data Configuration UX:
+- Ajout d'un sélecteur de fichier CSV (`Browse CSV file from disk`) pour choisir un fichier depuis le disque via l'interface.
+- Le fichier uploadé est persisté en copie locale temporaire et renseigne automatiquement `File Path`.
+- Synchronisation automatique des dates Start/End lors d'un nouvel upload.
+- Correctifs robustesse métriques (audit Python):
+- Correction du calcul `avg_pl_per_trade` pour les portefeuilles vectorisés (évite le test ambigu sur Series).
+- Alignement du même correctif dans le moteur adaptatif.
+- Documentation interne renforcée:
+- Ajout de docstrings sur les fonctions principales (`app.py`, `data_loading.py`, `wfo.py`, `expert/*`, `config.py`) pour améliorer lisibilité et maintenance.

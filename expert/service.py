@@ -6,6 +6,8 @@ from .storage import ExpertStorage
 
 
 class ExpertService:
+    """Thin service layer combining analysis execution and persistence."""
+
     def __init__(self, analyzer: ExpertAnalyzer, storage: ExpertStorage):
         self.analyzer = analyzer
         self.storage = storage
@@ -19,6 +21,7 @@ class ExpertService:
         system_prompt_override: str | None = None,
         user_prompt_override: str | None = None,
     ) -> ExpertResponse:
+        """Execute expert analysis and optionally persist report + audit trail."""
         response = self.analyzer.analyze(
             data=data,
             request=request,

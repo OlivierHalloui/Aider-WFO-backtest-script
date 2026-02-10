@@ -10,6 +10,7 @@ class ExpertPromptBuilder:
     """Builds deterministic prompts for expert interpretation."""
 
     def build_system_prompt(self, mode: AnalysisMode, detail_level: DetailLevel) -> str:
+        """Build the role/system instruction tuned for requested mode and detail level."""
         return (
             "Tu es un expert quant senior en validation de strategies de trading. "
             "Tu interpretes des resultats WFO/adaptatifs. "
@@ -22,11 +23,14 @@ class ExpertPromptBuilder:
             "L'analyse doit couvrir explicitement les resultats du final backtest et les comparer au buy&hold si disponible. "
             "Priorise robustesse OOS, risque de sur-optimisation, stabilite parametrique, "
             "et actions concretes de configuration. "
+            "Reste concis pour eviter la troncature: max 4 key_findings, max 4 recommended_actions, "
+            "max 5 alerts, et au plus 2 preuves courtes par finding. "
             "Reponds strictement en JSON valide sans markdown ni texte hors JSON. "
             f"Mode d'analyse: {mode}. Niveau de detail: {detail_level}."
         )
 
     def build_user_prompt(self, data: ExpertInputData, request: ExpertRequest, output_schema: Dict[str, Any]) -> str:
+        """Build task instruction + serialized run data to feed the Expert LLM."""
         payload = {
             "run_context": {
                 "run_id": data.context.run_id,
@@ -51,6 +55,12 @@ class ExpertPromptBuilder:
                 "detail_level": request.detail_level,
                 "include_raw_evidence": request.include_raw_evidence,
                 "user_question": request.user_question or "",
+            },
+            "output_constraints": {
+                "max_key_findings": 4,
+                "max_recommended_actions": 4,
+                "max_alerts": 5,
+                "max_evidence_per_finding": 2,
             },
         }
 
@@ -142,6 +152,7 @@ class ExpertPromptBuilder:
 
     @staticmethod
     def _json_safe(value: Any) -> Any:
+        """Coerce non-JSON-serializable values to string fallback."""
         try:
             json.dumps(value)
             return value

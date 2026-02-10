@@ -11,6 +11,7 @@ import threading
 import hashlib
 import subprocess
 import html
+import tempfile
 
 # Plotly expects np.bool8 on older releases; alias for numpy>=2.0 compatibility.
 if not hasattr(np, "bool8"):
@@ -107,6 +108,22 @@ st.markdown(
         padding-top: 0.40rem;
         padding-bottom: 0.25rem;
     }
+    /* Make the Expert run button more visible. */
+    div.st-key-expert_generate_btn button {
+        background: linear-gradient(135deg, #0f766e, #0ea5e9) !important;
+        color: #f8fbff !important;
+        border: 1px solid rgba(173, 227, 255, 0.55) !important;
+        font-weight: 700 !important;
+        box-shadow: 0 0 0 1px rgba(12, 111, 161, 0.28), 0 8px 18px rgba(5, 70, 110, 0.28) !important;
+    }
+    div.st-key-expert_generate_btn button:hover {
+        background: linear-gradient(135deg, #109684, #1aa9f0) !important;
+        border-color: rgba(208, 242, 255, 0.75) !important;
+    }
+    div.st-key-expert_generate_btn button:focus {
+        outline: 2px solid rgba(136, 226, 255, 0.55) !important;
+        outline-offset: 2px !important;
+    }
     </style>
     """,
     unsafe_allow_html=True
@@ -168,6 +185,7 @@ def _winsorized_mean(series, trim=0.05):
     return s.clip(lower=lower, upper=upper).mean()
 
 def _compute_trade_pnl_metrics(trades_df, trim=0.05):
+    """Compute robust P&L summaries (value and percent) for the trades table."""
     if trades_df is None or trades_df.empty:
         return pd.DataFrame()
 
@@ -731,6 +749,7 @@ def _extract_final_backtest_for_expert(results, current_conf, df_source=None):
     return summary
 
 def _compute_deterministic_expert_alerts(results, current_conf, trials_df=None, final_backtest_summary=None):
+    """Generate deterministic pre-diagnostic alerts before running the Expert LLM."""
     alerts = []
     if not isinstance(results, dict):
         return alerts
@@ -997,6 +1016,7 @@ def _expert_value_to_text(value, digits=2, suffix=""):
     return txt if txt else "insufficient_data"
 
 def _build_expert_markdown_report(result_json, meta=None):
+    """Build a readable markdown report from expert JSON output + run metadata."""
     meta = meta or {}
     r = result_json if isinstance(result_json, dict) else {}
     lines = []
@@ -1405,6 +1425,39 @@ def sync_dates_from_file(force=False):
         st.session_state['end_date'] = max_date
         st.session_state['last_data_file_path'] = file_path
 
+
+def _persist_uploaded_data_file(uploaded_file):
+    if uploaded_file is None:
+        return None, False
+    try:
+        file_id = getattr(uploaded_file, "file_id", f"{uploaded_file.name}:{uploaded_file.size}")
+        existing_id = st.session_state.get("uploaded_data_file_id")
+        existing_path = st.session_state.get("uploaded_data_file_path")
+        if existing_id == file_id and isinstance(existing_path, str) and os.path.exists(existing_path):
+            return existing_path, False
+
+        base_name = os.path.basename(str(uploaded_file.name or "uploaded_data.csv"))
+        safe_name = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in base_name)
+        if not safe_name:
+            safe_name = "uploaded_data.csv"
+        if not safe_name.lower().endswith(".csv"):
+            safe_name = f"{safe_name}.csv"
+
+        digest = hashlib.sha1(f"{file_id}_{time.time_ns()}".encode("utf-8")).hexdigest()[:12]
+        target_dir = os.path.join(tempfile.gettempdir(), "atdmf_streamlit_uploads")
+        os.makedirs(target_dir, exist_ok=True)
+        target_path = os.path.join(target_dir, f"{digest}_{safe_name}")
+
+        with open(target_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+
+        st.session_state["uploaded_data_file_id"] = file_id
+        st.session_state["uploaded_data_file_path"] = target_path
+        return target_path, True
+    except Exception as e:
+        st.error(f"Error while saving uploaded CSV: {e}")
+        return None, False
+
 def load_best_params_into_inputs():
     final_params = st.session_state.get("final_params")
     if not final_params and 'wfo_results' in st.session_state:
@@ -1468,6 +1521,57 @@ PARAMETER_HELP = {
     'macd_slow_length': "Période EMA lente du MACD.",
     'macd_signal_length': "Période de la ligne signal MACD."
 }
+
+EXPERT_MODEL_CATALOG = {
+    "grok": [
+        {
+            "id": "grok-4-1-fast-reasoning",
+            "label": "grok-4-1-fast-reasoning",
+            "description": "Optimisé pour le tool-calling agentique et le raisonnement avancé.",
+        },
+        {
+            "id": "grok-4-1-fast-non-reasoning",
+            "label": "grok-4-1-fast-non-reasoning",
+            "description": "Version plus rapide pour des tâches sans raisonnement lourd.",
+        },
+    ],
+    "openai": [
+        {
+            "id": "gpt-5.2",
+            "label": "GPT-5.2",
+            "description": "Meilleur modèle pour le codage et les tâches agentiques complexes.",
+        },
+        {
+            "id": "gpt-5-mini",
+            "label": "GPT-5 mini",
+            "description": "Version rapide et économique pour des tâches bien définies.",
+        },
+    ],
+    "gemini": [
+        {
+            "id": "gemini-3-pro-preview",
+            "label": "gemini-3-pro-preview",
+            "description": "Flagship actuel, excellent en raisonnement multimodal et agentique (preview).",
+        },
+        {
+            "id": "gemini-3-flash-preview",
+            "label": "gemini-3-flash-preview",
+            "description": "Version rapide et efficace, très performante en raisonnement complexe avec faible latence.",
+        },
+    ],
+}
+
+def _get_expert_model_entries(provider):
+    return EXPERT_MODEL_CATALOG.get(str(provider or "").lower(), EXPERT_MODEL_CATALOG["openai"])
+
+
+def _get_expert_provider_defaults(provider):
+    key = str(provider or "").lower()
+    if key == "grok":
+        return {"base_url": "https://api.x.ai/v1", "label": "Grok"}
+    if key == "gemini":
+        return {"base_url": "https://generativelanguage.googleapis.com/v1beta", "label": "Gemini"}
+    return {"base_url": "https://api.openai.com/v1", "label": "OpenAI"}
 
 ADAPTIVE_PROFILE_DEFS = {
     "custom": {
@@ -2029,6 +2133,20 @@ with st.sidebar:
         )
         
         if data_source == "Local File":
+            uploaded_market_csv = st.file_uploader(
+                "Browse CSV file from disk",
+                type=["csv"],
+                key="market_data_file_upload",
+                help="Choisis un fichier CSV depuis ton disque. Le fichier est copié localement pour être utilisé par le run."
+            )
+            if uploaded_market_csv is not None:
+                uploaded_path, is_new_upload = _persist_uploaded_data_file(uploaded_market_csv)
+                if uploaded_path:
+                    st.session_state["file_path"] = uploaded_path
+                    if is_new_upload:
+                        sync_dates_from_file(force=True)
+                    st.caption(f"Selected file: `{uploaded_market_csv.name}`")
+
             file_path = st.text_input(
                 "File Path",
                 value=DEFAULT_DATA_FILE,
@@ -2036,6 +2154,9 @@ with st.sidebar:
                 on_change=sync_dates_from_file,
                 help="Chemin du CSV OHLCV local. Les dates peuvent être synchronisées automatiquement avec le fichier."
             )
+            uploaded_path = st.session_state.get("uploaded_data_file_path")
+            if isinstance(uploaded_path, str) and os.path.exists(uploaded_path):
+                st.caption(f"Uploaded local copy: `{uploaded_path}`")
             if not os.path.exists(file_path):
                 st.error("File not found! Please check the path.")
         else:
@@ -3822,9 +3943,10 @@ if 'wfo_results' in st.session_state:
         with exp_c1:
             expert_provider = st.selectbox(
                 "Provider",
-                options=["openai", "grok"],
+                options=["openai", "grok", "gemini"],
                 key="expert_provider",
-                help="OpenAI ou endpoint compatible OpenAI (xAI/Grok)."
+                format_func=lambda v: {"openai": "OpenAI", "grok": "Grok", "gemini": "Gemini"}.get(v, v),
+                help="Provider LLM à utiliser pour l'analyse Expert."
             )
             expert_api_key = st.text_input(
                 "API Key Expert",
@@ -3838,13 +3960,45 @@ if 'wfo_results' in st.session_state:
                 key="expert_mode",
             )
         with exp_c2:
-            default_model = "gpt-4o-mini" if expert_provider == "openai" else "grok-4-fast-non-reasoning"
-            expert_model = st.text_input(
-                "Model",
-                value=default_model,
-                key="expert_model",
-                help="Nom exact du modèle API.",
+            provider_models = _get_expert_model_entries(expert_provider)
+            provider_model_ids = [m.get("id") for m in provider_models if isinstance(m, dict) and m.get("id")]
+            provider_model_ids = provider_model_ids if provider_model_ids else ["gpt-5.2"]
+            model_options = provider_model_ids + ["__custom__"]
+            previous_model_choice = str(st.session_state.get("expert_model_select", model_options[0]))
+            if previous_model_choice not in model_options:
+                st.session_state["expert_model_select"] = model_options[0]
+
+            expert_model_choice = st.selectbox(
+                "Modèle LLM",
+                options=model_options,
+                key="expert_model_select",
+                format_func=lambda mid: (
+                    "Autre (saisie libre)"
+                    if mid == "__custom__"
+                    else next((m.get("label", mid) for m in provider_models if m.get("id") == mid), mid)
+                ),
+                help="Choisis un modèle préconfiguré ou saisis un identifiant personnalisé."
             )
+            default_model = provider_model_ids[0]
+            if expert_model_choice == "__custom__":
+                expert_model = st.text_input(
+                    "Modèle personnalisé",
+                    value=str(st.session_state.get("expert_model_custom", default_model)),
+                    key="expert_model_custom",
+                    help="Identifiant exact du modèle à appeler via l'API du provider.",
+                ).strip() or default_model
+            else:
+                expert_model = expert_model_choice
+                model_desc = next((m.get("description", "") for m in provider_models if m.get("id") == expert_model_choice), "")
+                if model_desc:
+                    st.caption(f"Modèle: {model_desc}")
+
+            with st.expander("Voir les modèles disponibles", expanded=False):
+                for model_item in provider_models:
+                    mid = str(model_item.get("id", ""))
+                    mdesc = str(model_item.get("description", ""))
+                    st.markdown(f"- `{mid}`: {mdesc}")
+
             expert_detail_level = st.selectbox(
                 "Niveau de détail",
                 options=["standard", "short", "expert"],
@@ -3857,12 +4011,15 @@ if 'wfo_results' in st.session_state:
             )
 
         with st.expander("Paramètres avancés Expert", expanded=False):
+            provider_defaults = _get_expert_provider_defaults(expert_provider)
+            is_openai_gpt5_model = str(expert_provider).lower() == "openai" and str(expert_model).lower().startswith("gpt-5")
             adv_c1, adv_c2, adv_c3 = st.columns(3)
             with adv_c1:
                 expert_base_url = st.text_input(
                     "Base URL (optionnel)",
                     key="expert_base_url",
-                    placeholder="https://api.openai.com/v1",
+                    placeholder=provider_defaults["base_url"],
+                    help=f"Laisse vide pour utiliser l'URL par défaut {provider_defaults['label']}: {provider_defaults['base_url']}",
                 )
                 expert_temp = st.slider(
                     "Temperature",
@@ -3872,12 +4029,14 @@ if 'wfo_results' in st.session_state:
                     step=0.05,
                     key="expert_temperature",
                 )
+                if is_openai_gpt5_model and float(expert_temp) != 1.0:
+                    st.caption("Info: sur OpenAI GPT-5, la temperature personnalisée est ignorée (valeur par défaut imposée).")
             with adv_c2:
                 expert_max_tokens = st.number_input(
                     "Max tokens",
                     min_value=300,
                     max_value=8000,
-                    value=1800,
+                    value=3000,
                     step=100,
                     key="expert_max_tokens",
                 )
@@ -4052,7 +4211,7 @@ if 'wfo_results' in st.session_state:
                 help="Instruction de tâche + données injectées pour l'analyse."
             )
 
-        if st.button("Générer l'interprétation Expert", key="expert_generate_btn", width="stretch"):
+        if st.button("Générer l'interprétation Expert", key="expert_generate_btn", width="stretch", type="primary"):
             clean_expert_api_key = str(expert_api_key or "").strip()
             if not clean_expert_api_key:
                 st.warning("Renseigne une clé API Expert valide (non vide après suppression des espaces).")
@@ -4115,7 +4274,12 @@ if 'wfo_results' in st.session_state:
                             "used_system_prompt": user_system_prompt,
                             "used_user_prompt": user_prompt,
                         }
-                        st.success("Interprétation Expert générée et sauvegardée dans `reports/expert/`.")
+                        if response.status == "ok":
+                            st.success("Interprétation Expert générée et sauvegardée dans `reports/expert/`.")
+                        elif response.status == "partial":
+                            st.warning("Interprétation Expert partielle générée et sauvegardée dans `reports/expert/`.")
+                        else:
+                            st.error("Échec de génération Expert. Consulte les avertissements pour le diagnostic détaillé.")
 
         expert_last = st.session_state.get("expert_last_response")
         if isinstance(expert_last, dict):

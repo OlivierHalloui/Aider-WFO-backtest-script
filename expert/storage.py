@@ -9,7 +9,10 @@ from .models import ExpertResponse
 
 
 class ExpertStorage:
+    """Persistence helpers for expert reports and append-only audit lines."""
+
     def save_report(self, response: ExpertResponse, folder: str = "reports/expert") -> str:
+        """Save the full expert response payload as a timestamped JSON file."""
         os.makedirs(folder, exist_ok=True)
         ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(folder, f"expert_{response.run_id}_{ts}.json")
@@ -28,6 +31,7 @@ class ExpertStorage:
         return path
 
     def save_audit_line(self, response: ExpertResponse, folder: str = "reports/expert") -> str:
+        """Append compact execution metadata for traceability/monitoring."""
         os.makedirs(folder, exist_ok=True)
         path = os.path.join(folder, "expert_audit.jsonl")
         line = {

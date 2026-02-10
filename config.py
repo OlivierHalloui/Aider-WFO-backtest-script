@@ -36,7 +36,10 @@ DEFAULT_PARAM_GRID = {
 
 # Walk-Forward Optimization settings
 class WFOSettings:
+    """Runtime settings container for classic, NN-guided and adaptive WFO engines."""
+
     def __init__(self):
+        """Initialize default optimization, execution and adaptive-guidance parameters."""
         self.n_windows = 1               # Number of windows to divide data into
         self.train_size = 0.5            # Proportion of window for training
         self.anchored = False            # Whether to use anchored (fixed start date) WFO
