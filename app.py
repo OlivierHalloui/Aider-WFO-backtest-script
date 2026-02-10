@@ -10,6 +10,7 @@ import zipfile
 import threading
 import hashlib
 import subprocess
+import html
 
 # Plotly expects np.bool8 on older releases; alias for numpy>=2.0 compatibility.
 if not hasattr(np, "bool8"):
@@ -29,6 +30,17 @@ from wfo import walk_forward_optimization, OptimizationInterrupted
 from adaptive_optimization import adaptive_continuous_optimization
 from data_loading import load_data, get_csv_date_range
 from strategy import run_backtest
+from expert import (
+    LLMConfig,
+    ExpertRunContext,
+    ExpertInputData,
+    ExpertRequest,
+    OpenAICompatibleGateway,
+    ExpertPromptBuilder,
+    ExpertAnalyzer,
+    ExpertStorage,
+    ExpertService,
+)
 
 # Set page config
 st.set_page_config(
@@ -44,6 +56,61 @@ st.markdown("""
 This dashboard performs **Walk-Forward Optimization (WFO)** on the ATDMF strategy using **VectorBT Pro**.
 Configure your data, strategy parameters, and optimization settings in the sidebar to begin.
 """)
+
+# Global UX: widen main content area and keep sidebar readable.
+st.markdown(
+    """
+    <style>
+    /* Expand central area to use full available width next to the sidebar. */
+    div[data-testid="stAppViewContainer"] > section.main > div.block-container {
+        max-width: none !important;
+        width: 100% !important;
+        padding-left: 0.45rem !important;
+        padding-right: 0.45rem !important;
+    }
+    /* Compact tab labels and allow wrapping so all tabs remain visible. */
+    div[data-testid="stTabs"] button[role="tab"] {
+        padding: 0.22rem 0.42rem !important;
+        font-size: 0.78rem !important;
+        white-space: nowrap;
+    }
+    div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+        gap: 0.06rem;
+        flex-wrap: wrap;
+    }
+    /* Hide +/- steppers in sidebar number inputs for cleaner range editing. */
+    section[data-testid="stSidebar"] div[data-testid="stNumberInput"] button {
+        display: none !important;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stExpander"] details {
+        border: 1px solid rgba(112, 141, 173, 0.55);
+        border-radius: 10px;
+        overflow: hidden;
+        background: rgba(16, 25, 39, 0.55);
+        margin-bottom: 8px;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stExpander"] summary {
+        background: linear-gradient(135deg, rgba(33, 52, 76, 0.96), rgba(24, 39, 59, 0.96));
+        border-bottom: 1px solid rgba(133, 171, 208, 0.30);
+        padding-top: 0.28rem;
+        padding-bottom: 0.28rem;
+    }
+    section[data-testid="stSidebar"] div[data-testid="stExpander"] summary:hover {
+        background: linear-gradient(135deg, rgba(44, 68, 98, 0.98), rgba(30, 50, 75, 0.98));
+    }
+    section[data-testid="stSidebar"] div[data-testid="stExpander"] details[open] summary {
+        background: linear-gradient(135deg, rgba(52, 79, 113, 0.98), rgba(35, 57, 86, 0.98));
+        border-bottom: 1px solid rgba(163, 201, 236, 0.42);
+    }
+    section[data-testid="stSidebar"] div[data-testid="stExpander"] div[role="region"] {
+        background: rgba(12, 20, 31, 0.72);
+        padding-top: 0.40rem;
+        padding-bottom: 0.25rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # ==============================================================================
 # SIDEBAR CONFIGURATION
@@ -425,6 +492,272 @@ def _build_window_info_dataframe(results):
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
+
+def _to_jsonable(value):
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, (pd.Timestamp, datetime.datetime, datetime.date)):
+        return value.isoformat()
+    if isinstance(value, (pd.Timedelta, datetime.timedelta)):
+        return str(value)
+    return value
+
+def _compact_trials_for_expert(trials_df, selected_params=None, top_per_window=5, max_windows=60):
+    if selected_params is None:
+        selected_params = []
+    if trials_df is None or trials_df.empty:
+        return {"top_trials": [], "window_stats": [], "total_trials": 0}
+    if "window" not in trials_df.columns or "combined_score" not in trials_df.columns:
+        return {"top_trials": [], "window_stats": [], "total_trials": int(len(trials_df))}
+
+    df_tmp = trials_df.copy()
+    df_tmp["window"] = pd.to_numeric(df_tmp["window"], errors="coerce")
+    df_tmp["combined_score"] = pd.to_numeric(df_tmp["combined_score"], errors="coerce")
+    df_tmp = df_tmp.dropna(subset=["window", "combined_score"])
+    if df_tmp.empty:
+        return {"top_trials": [], "window_stats": [], "total_trials": int(len(trials_df))}
+
+    df_tmp = df_tmp.sort_values(["window", "combined_score"], ascending=[True, False])
+    windows = sorted(df_tmp["window"].unique().tolist())
+    if len(windows) > max_windows:
+        windows = windows[-max_windows:]
+    df_tmp = df_tmp[df_tmp["window"].isin(windows)]
+
+    safe_params = [p for p in selected_params if p in df_tmp.columns]
+    if not safe_params:
+        candidate_cols = [c for c in df_tmp.columns if c not in {"window", "combined_score", "trial_rank_in_window"}]
+        safe_params = candidate_cols[:8]
+
+    top_rows = []
+    grouped = df_tmp.groupby("window", sort=True)
+    for window_id, g in grouped:
+        for _, row in g.head(int(max(1, top_per_window))).iterrows():
+            item = {
+                "window": int(row["window"]),
+                "combined_score": float(row["combined_score"]),
+            }
+            for p in safe_params:
+                item[p] = _to_jsonable(row.get(p))
+            top_rows.append(item)
+
+    stats_rows = (
+        grouped["combined_score"]
+        .agg(best="max", median="median", q25=lambda x: x.quantile(0.25), q75=lambda x: x.quantile(0.75), n="count")
+        .reset_index()
+    )
+    window_stats = []
+    for _, row in stats_rows.iterrows():
+        window_stats.append({
+            "window": int(row["window"]),
+            "best": float(row["best"]),
+            "median": float(row["median"]),
+            "q25": float(row["q25"]),
+            "q75": float(row["q75"]),
+            "n": int(row["n"]),
+        })
+
+    return {
+        "top_trials": top_rows,
+        "window_stats": window_stats,
+        "total_trials": int(len(df_tmp)),
+        "parameters_used": safe_params,
+    }
+
+def _build_expert_input_data(results, current_conf):
+    if not isinstance(results, dict):
+        return None
+
+    run_meta = st.session_state.get("wfo_run_metadata") or {}
+    run_id = str(run_meta.get("run_id") or f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    selected_params = current_conf.get("selected_params", []) if isinstance(current_conf, dict) else []
+
+    context = ExpertRunContext(
+        run_id=run_id,
+        optimization_regime=str((results.get("mode") or current_conf.get("optimization_regime", "classic"))),
+        timeframe=str(current_conf.get("timeframe", "")),
+        start_date=str(current_conf.get("start_date", "")),
+        end_date=str(current_conf.get("end_date", "")),
+        selected_params=[str(p) for p in selected_params],
+    )
+
+    trials_df = st.session_state.get("all_trials_df")
+    if trials_df is None or getattr(trials_df, "empty", True):
+        trials_df = _build_trials_dataframe_from_results(results)
+
+    compact_trials = _compact_trials_for_expert(
+        trials_df=trials_df,
+        selected_params=selected_params,
+        top_per_window=5,
+        max_windows=60
+    )
+
+    adaptive_guidance = results.get("adaptive_guidance", [])
+    if isinstance(adaptive_guidance, list) and len(adaptive_guidance) > 60:
+        adaptive_guidance = adaptive_guidance[-60:]
+
+    return ExpertInputData(
+        context=context,
+        out_of_sample_performance=results.get("out_of_sample_performance", []),
+        in_sample_performance=results.get("in_sample_performance", []),
+        best_params=results.get("best_params", []),
+        all_trials=compact_trials.get("top_trials", []),
+        adaptive_guidance=adaptive_guidance,
+        adaptive_summary=results.get("adaptive_summary", {}),
+        price_features={
+            "trials_window_stats": compact_trials.get("window_stats", []),
+            "total_trials_compact_source": compact_trials.get("total_trials", 0),
+            "parameters_included_in_trials": compact_trials.get("parameters_used", []),
+        },
+    )
+
+def _render_interpretation_guide(points):
+    """Display a compact interpretation guide below a chart."""
+    if not points:
+        return
+    clean_points = []
+    for point in points:
+        text = str(point).strip()
+        if text:
+            clean_points.append(text)
+    if not clean_points:
+        return
+    st.caption("Guide d'interprétation")
+    st.markdown("\n".join([f"- {p}" for p in clean_points]))
+
+def _expert_value_to_text(value, digits=2, suffix=""):
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        try:
+            val = float(value)
+            if np.isfinite(val):
+                fmt = f"{{:.{int(digits)}f}}"
+                return f"{fmt.format(val)}{suffix}"
+        except Exception:
+            pass
+    if value is None:
+        return "insufficient_data"
+    txt = str(value).strip()
+    return txt if txt else "insufficient_data"
+
+def _build_expert_markdown_report(result_json, meta=None):
+    meta = meta or {}
+    r = result_json if isinstance(result_json, dict) else {}
+    lines = []
+
+    run_id = str(r.get("run_id") or meta.get("run_id") or "n/a")
+    mode = str(r.get("mode") or "n/a")
+    detail = str(r.get("detail_level") or "n/a")
+    lines.append(f"# Rapport Expert IA")
+    lines.append(f"- Run ID: `{run_id}`")
+    lines.append(f"- Mode: `{mode}`")
+    lines.append(f"- Niveau de détail: `{detail}`")
+    lines.append("")
+
+    ga = r.get("global_assessment", {})
+    if isinstance(ga, dict) and ga:
+        lines.append("## Évaluation globale")
+        lines.append(f"- Qualité: **{_expert_value_to_text(ga.get('quality_score'), digits=1, suffix='/100')}**")
+        lines.append(f"- Robustesse: **{_expert_value_to_text(ga.get('robustness_score'), digits=1, suffix='/100')}**")
+        lines.append(f"- Risque de sur-optimisation: **{_expert_value_to_text(ga.get('overfitting_risk_score'), digits=1, suffix='/100')}**")
+        lines.append(f"- Confiance: **{_expert_value_to_text(ga.get('confidence_score'), digits=1, suffix='/100')}**")
+        lines.append("")
+
+    findings = r.get("key_findings", [])
+    if isinstance(findings, list) and findings:
+        lines.append("## Constats clés")
+        for idx, f in enumerate(findings, start=1):
+            if not isinstance(f, dict):
+                continue
+            title = str(f.get("title") or f"Constat {idx}")
+            sev = str(f.get("severity") or "n/a")
+            exp = str(f.get("explanation") or "insufficient_data")
+            lines.append(f"{idx}. **{title}** (sévérité: `{sev}`)")
+            lines.append(f"   - Explication: {exp}")
+            ev = f.get("evidence", [])
+            if isinstance(ev, list) and ev:
+                lines.append(f"   - Preuves:")
+                for e in ev[:5]:
+                    lines.append(f"     - {str(e)}")
+        lines.append("")
+
+    gen = r.get("is_oos_generalization", {})
+    if isinstance(gen, dict) and gen:
+        lines.append("## Généralisation IS/OOS")
+        lines.append(f"- Gap moyen Return (IS-OOS): **{_expert_value_to_text(gen.get('return_gap_mean'))}**")
+        lines.append(f"- Gap moyen Sharpe (IS-OOS): **{_expert_value_to_text(gen.get('sharpe_gap_mean'))}**")
+        lines.append(f"- Tendance du gap: **{_expert_value_to_text(gen.get('gap_trend'))}**")
+        lines.append(f"- Commentaire: {_expert_value_to_text(gen.get('comment'))}")
+        lines.append("")
+
+    ada = r.get("adaptive_diagnostics", {})
+    if isinstance(ada, dict) and ada:
+        lines.append("## Diagnostic Adaptatif")
+        lines.append(
+            f"- Réduction moyenne de l'espace de recherche: **{_expert_value_to_text(ada.get('search_space_reduction_ratio_mean'))}**"
+        )
+        lines.append(f"- État de convergence: **{_expert_value_to_text(ada.get('convergence_state'))}**")
+        ex = ada.get("exploration_vs_exploitation", {})
+        if isinstance(ex, dict) and ex:
+            lines.append(f"- Exploration/Exploitation: **{_expert_value_to_text(ex.get('assessment'))}**")
+            lines.append(f"- Commentaire: {_expert_value_to_text(ex.get('comment'))}")
+        lines.append("")
+
+    actions = r.get("recommended_actions", [])
+    if isinstance(actions, list) and actions:
+        lines.append("## Plan d'action recommandé")
+        sortable = []
+        for i, a in enumerate(actions):
+            if isinstance(a, dict):
+                pr = a.get("priority", i + 1)
+                try:
+                    pr = int(pr)
+                except Exception:
+                    pr = i + 1
+                sortable.append((pr, a))
+        sortable.sort(key=lambda x: x[0])
+        for pr, a in sortable:
+            lines.append(f"{pr}. **{_expert_value_to_text(a.get('action'))}**")
+            lines.append(f"   - Bénéfice attendu: {_expert_value_to_text(a.get('expected_benefit'))}")
+            lines.append(f"   - Risque: {_expert_value_to_text(a.get('risk'))}")
+            lines.append(f"   - Coût estimé: `{_expert_value_to_text(a.get('estimated_cost'))}`")
+        lines.append("")
+
+    alerts = r.get("alerts", [])
+    if isinstance(alerts, list) and alerts:
+        lines.append("## Alertes")
+        for a in alerts:
+            if not isinstance(a, dict):
+                continue
+            lines.append(
+                f"- [{_expert_value_to_text(a.get('severity')).upper()}] "
+                f"{_expert_value_to_text(a.get('type'))}: {_expert_value_to_text(a.get('message'))}"
+            )
+        lines.append("")
+
+    limits = r.get("limitations", [])
+    if isinstance(limits, list) and limits:
+        lines.append("## Limites")
+        for l in limits:
+            lines.append(f"- {_expert_value_to_text(l)}")
+        lines.append("")
+
+    disclaimer = r.get("disclaimer")
+    if disclaimer:
+        lines.append("## Note")
+        lines.append(str(disclaimer))
+
+    return "\n".join(lines).strip()
+
+def _render_expert_human_report(result_json, meta=None):
+    report_md = _build_expert_markdown_report(result_json, meta=meta)
+    if not report_md:
+        st.info("Le rapport Expert est vide ou non interprétable.")
+        return ""
+    st.markdown(report_md)
+    return report_md
 
 def _build_data_source_descriptor(config_snapshot, df):
     descriptor = {
@@ -937,6 +1270,158 @@ def _humanize_seconds(seconds):
     days, hours = divmod(hours, 24)
     return f"{days}j {hours}h"
 
+def _parse_utc_iso(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+def _compute_running_elapsed_seconds(job_state):
+    if not isinstance(job_state, dict):
+        return None
+    started = _parse_utc_iso(job_state.get("started_at_utc"))
+    if started is None:
+        return None
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=datetime.timezone.utc)
+    elapsed = (now_utc - started).total_seconds()
+    if elapsed < 0:
+        return None
+    return float(elapsed)
+
+def _inject_running_animation_css():
+    st.markdown(
+        """
+        <style>
+        @keyframes runPulse {
+            0% { transform: scale(1); box-shadow: 0 0 0 rgba(76, 175, 255, 0.0); }
+            70% { transform: scale(1.08); box-shadow: 0 0 0 8px rgba(76, 175, 255, 0.0); }
+            100% { transform: scale(1); box-shadow: 0 0 0 rgba(76, 175, 255, 0.0); }
+        }
+        @keyframes runShimmer {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+        @keyframes stopPulse {
+            0% { box-shadow: 0 0 0 0 rgba(255, 75, 75, 0.30); }
+            70% { box-shadow: 0 0 0 10px rgba(255, 75, 75, 0.00); }
+            100% { box-shadow: 0 0 0 0 rgba(255, 75, 75, 0.00); }
+        }
+        .run-status-card {
+            border: 1px solid rgba(111, 168, 220, 0.55);
+            border-radius: 12px;
+            background: linear-gradient(135deg, rgba(16, 34, 54, 0.88), rgba(17, 43, 71, 0.88));
+            padding: 0.8rem 0.95rem;
+            margin: 0.3rem 0 0.8rem 0;
+        }
+        .run-status-header {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 700;
+            color: #e8f3ff;
+            margin-bottom: 0.45rem;
+        }
+        .run-status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #4cafef;
+            animation: runPulse 1.6s ease-in-out infinite;
+        }
+        .run-status-meta {
+            color: #b9d6f3;
+            font-size: 0.90rem;
+            line-height: 1.4;
+        }
+        .run-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            border: 1px solid rgba(102, 182, 255, 0.55);
+            border-radius: 999px;
+            background: rgba(20, 51, 84, 0.88);
+            color: #dff0ff;
+            font-size: 0.8rem;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            padding: 0.20rem 0.55rem;
+            margin: 0.2rem 0 0.35rem 0;
+        }
+        .run-badge-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4cafef;
+            animation: runPulse 1.4s ease-in-out infinite;
+        }
+        section[data-testid="stSidebar"] div[data-testid="stProgressBar"] div[role="progressbar"] > div {
+            background-image: linear-gradient(110deg, #3a93ff 20%, #88c6ff 40%, #3a93ff 60%);
+            background-size: 220% 100%;
+            animation: runShimmer 2.1s linear infinite;
+        }
+        .st-key-stop_wfo_btn button {
+            border: 1px solid rgba(255, 109, 109, 0.72) !important;
+            background: linear-gradient(135deg, rgba(95, 24, 24, 0.88), rgba(72, 20, 20, 0.88)) !important;
+            animation: stopPulse 1.9s ease-out infinite;
+        }
+        .st-key-stop_wfo_btn button:hover {
+            background: linear-gradient(135deg, rgba(120, 32, 32, 0.92), rgba(95, 24, 24, 0.92)) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+def _render_running_status_card(job_state, config):
+    if not isinstance(job_state, dict):
+        return
+    message = str(job_state.get("message") or "Optimization running...")
+    progress = float(job_state.get("progress", 0.0) or 0.0)
+    progress = min(max(progress, 0.0), 1.0)
+
+    elapsed = _compute_running_elapsed_seconds(job_state)
+    elapsed_text = _humanize_seconds(elapsed) if elapsed is not None else "n/a"
+
+    eta_seconds = job_state.get("eta_seconds")
+    if eta_seconds is None and elapsed is not None and progress > 1e-6:
+        eta_seconds = elapsed * (1.0 - progress) / progress
+    eta_text = _humanize_seconds(float(eta_seconds)) if eta_seconds is not None else "n/a"
+
+    window_text = job_state.get("window")
+    evaluations = job_state.get("evaluations")
+    run_id = str(job_state.get("run_id") or "n/a")
+    run_short = run_id[-10:] if len(run_id) > 10 else run_id
+    mode = str(config.get("optimization_regime", "classic")).lower()
+    mode_label = (
+        "Adaptive Continuous" if mode == "adaptive_continuous"
+        else "WFO classique"
+    )
+
+    meta_parts = [
+        f"Mode: {mode_label}",
+        f"Progression: {progress * 100:.1f}%",
+        f"Elapsed: {elapsed_text}",
+        f"ETA: {eta_text}",
+        f"Run ID: {html.escape(run_short)}"
+    ]
+    if window_text is not None:
+        meta_parts.append(f"Fenêtre/Cycle: {window_text}")
+    if evaluations is not None:
+        meta_parts.append(f"Évaluations (dernier update): {evaluations}")
+
+    meta_html = "<br>".join(html.escape(str(x)) for x in meta_parts)
+    card_html = f"""
+    <div class="run-status-card">
+        <div class="run-status-header"><span class="run-status-dot"></span>Optimisation en cours</div>
+        <div class="run-status-meta"><strong>Statut:</strong> {html.escape(message)}<br>{meta_html}</div>
+    </div>
+    """
+    st.markdown(card_html, unsafe_allow_html=True)
+
 def _estimate_adaptive_load(start_date, end_date, timeframe_str, train_bars, cycle_bars, trials_per_cycle, max_cycles):
     step_seconds = _timeframe_to_seconds(timeframe_str)
     start_dt = _parse_iso_date(start_date)
@@ -987,11 +1472,12 @@ def _get_observed_seconds_per_trial():
 
 with st.sidebar:
     st.header("⚙️ Configuration")
+    st.caption("Parcours rapide: 1) Données 2) Paramètres 3) Moteur WFO 4) Lancer 5) Exporter")
 
     has_final_params = 'final_params' in st.session_state or 'wfo_results' in st.session_state
     st.sidebar.button(
         "📥 Load Best Params into Inputs",
-        use_container_width=True,
+        width="stretch",
         on_click=load_best_params_into_inputs if has_final_params else None,
         disabled=not has_final_params,
         help="Charge les meilleurs paramètres trouvés dans les champs Min/Max/Step pour préparer un nouveau run."
@@ -1146,19 +1632,23 @@ with st.sidebar:
 
     # Helper to create param inputs
     def param_input(key, label, default_min, default_max, default_step):
-        c1, c2, c3, c4 = st.columns([0.6, 1, 1, 1])
-        
-        # Checkbox state handled by st.session_state via key
-        # Default value is True (checked) if not in state
-        
-        with c1:
+        display_label = str(label).replace("_", " ")
+        # Row 1: activation + parameter label on full width (prevents crushed names).
+        c_toggle, c_label = st.columns([0.14, 0.86])
+        with c_toggle:
             enabled = st.checkbox(
-                key,
+                "Activer",
                 value=True,
                 key=f"check_{key}",
+                label_visibility="collapsed",
                 help=PARAMETER_HELP.get(key, "Active/désactive ce paramètre dans l'optimisation.")
             )
-        
+        with c_label:
+            st.markdown(f"**{display_label}**")
+            st.caption(PARAMETER_HELP.get(key, ""))
+
+        # Row 2: numeric controls in a clean 3-column grid.
+        c2, c3, c4 = st.columns([1, 1, 1])
         with c2:
             min_val = st.number_input(
                 "Min",
@@ -1183,11 +1673,15 @@ with st.sidebar:
                 disabled=not enabled,
                 help=f"Pas d'incrément entre Min et Max pour `{key}`."
             )
+        st.markdown(
+            "<div style='height: 0.15rem; border-bottom: 1px solid rgba(120,145,170,0.20); margin: 0.25rem 0 0.45rem 0;'></div>",
+            unsafe_allow_html=True
+        )
         return enabled, min_val, max_val, step_val
 
     # --- Entry Parameters ---
     with st.expander("2. Entry Parameters", expanded=False):
-        st.info("Configure the search space for entry parameters.")
+        st.info("Configure l'espace de recherche des paramètres d'entrée.")
         
         entry_params = [
             'timeperiod', 'StDev', 'coeff_medianeBBW', 'coef_mediane',
@@ -1208,7 +1702,7 @@ with st.sidebar:
 
     # --- Exit Parameters ---
     with st.expander("3. Exit Parameters", expanded=False):
-        st.info("Configure the search space for exit parameters.")
+        st.info("Configure l'espace de recherche des paramètres de sortie.")
 
         exit_sar_enabled = st.checkbox(
             "Enable Parabolic SAR Exit",
@@ -1270,15 +1764,6 @@ with st.sidebar:
             key='anchored'
         )
         
-        opt_methods = ['grid', 'bayesian', 'optuna']
-        optimization_method = st.selectbox(
-            "Optimization Method",
-            options=opt_methods,
-            index=0,
-            key='optimization_method',
-            help="`grid`: exhaustif, `bayesian/optuna`: recherche probabiliste plus efficace sur grands espaces."
-        )
-
         regime_options = ['classic', 'prev_best_grid', 'nn_guided', 'adaptive_continuous']
         optimization_regime = st.selectbox(
             "WFO Mode",
@@ -1297,8 +1782,28 @@ with st.sidebar:
             help="Choisit la logique globale de construction de grille d'une fenêtre/cycle au suivant."
         )
 
+        opt_methods = ['grid', 'bayesian', 'optuna']
+        if optimization_regime == "adaptive_continuous":
+            optimization_method = st.selectbox(
+                "Optimization Method",
+                options=opt_methods,
+                index=opt_methods.index(st.session_state.get("optimization_method", "grid")) if st.session_state.get("optimization_method", "grid") in opt_methods else 0,
+                key='optimization_method',
+                disabled=True,
+                help="Non utilisé en mode Adaptive Continuous (le moteur adaptatif applique sa propre logique)."
+            )
+            st.caption("En mode Adaptive Continuous, la méthode `grid/bayesian/optuna` n'est pas appliquée.")
+        else:
+            optimization_method = st.selectbox(
+                "Optimization Method",
+                options=opt_methods,
+                index=opt_methods.index(st.session_state.get("optimization_method", "grid")) if st.session_state.get("optimization_method", "grid") in opt_methods else 0,
+                key='optimization_method',
+                help="`grid`: exhaustif, `bayesian/optuna`: recherche probabiliste plus efficace sur grands espaces."
+            )
+
         if optimization_regime == "prev_best_grid":
-            st.caption("Window 1 uses full grid; next windows reuse the previous window best parameter values as grid.")
+            st.caption("Fenêtre 1: grille complète. Fenêtres suivantes: réutilisation des meilleures valeurs de la fenêtre précédente.")
 
         patience_levels = ['Low', 'Medium', 'High']
         patience_level = st.selectbox(
@@ -1350,7 +1855,7 @@ with st.sidebar:
         )
 
         if optimization_regime == "nn_guided":
-            st.caption("NN-guided mode: learns from previous windows and narrows the search space for the next one.")
+            st.caption("Mode guidé RN: apprend des fenêtres précédentes et resserre l'espace de recherche.")
             nn_min_samples = st.number_input(
                 "NN Min Cumulative Trials",
                 min_value=50,
@@ -1415,7 +1920,7 @@ with st.sidebar:
                 key='nn_l2'
             )
         elif optimization_regime == "adaptive_continuous":
-            st.caption("Adaptive Continuous: no fixed WFO windows. The grid evolves cycle after cycle from historical trials.")
+            st.caption("Adaptive Continuous: pas de fenêtres WFO fixes, la grille évolue cycle après cycle via l'historique des trials.")
             profile_keys = list(ADAPTIVE_PROFILE_DEFS.keys())
             default_profile = st.session_state.get("adaptive_profile", "balanced")
             if default_profile not in profile_keys:
@@ -1433,8 +1938,20 @@ with st.sidebar:
             selected_profile_def = ADAPTIVE_PROFILE_DEFS.get(adaptive_profile, ADAPTIVE_PROFILE_DEFS["custom"])
             selected_profile_params = selected_profile_def.get("params")
 
+            notice = st.session_state.pop("adaptive_profile_notice", None)
+            if notice:
+                st.success(notice)
+
             if isinstance(selected_profile_params, dict):
-                if st.session_state.get("adaptive_profile_last_applied") != adaptive_profile:
+                profile_applied = st.session_state.get("adaptive_profile_last_applied")
+                apply_label = "Réappliquer ce profil" if profile_applied == adaptive_profile else "Appliquer ce profil"
+                if profile_applied != adaptive_profile:
+                    st.info("Ce profil n'est pas encore appliqué aux champs ci-dessous.")
+                if st.button(
+                    apply_label,
+                    key="adaptive_profile_apply",
+                    help="Injecte les valeurs du profil dans tous les champs adaptatifs."
+                ):
                     for param_key, param_val in selected_profile_params.items():
                         st.session_state[param_key] = param_val
                     st.session_state["adaptive_profile_last_applied"] = adaptive_profile
@@ -1443,59 +1960,12 @@ with st.sidebar:
             else:
                 st.session_state["adaptive_profile_last_applied"] = "custom"
 
-            notice = st.session_state.pop("adaptive_profile_notice", None)
-            if notice:
-                st.success(notice)
-
-            if isinstance(selected_profile_params, dict):
-                if st.button(
-                    "Réappliquer ce profil",
-                    key="adaptive_profile_reapply",
-                    help="Réinjecte les valeurs du profil dans tous les champs adaptatifs."
-                ):
-                    for param_key, param_val in selected_profile_params.items():
-                        st.session_state[param_key] = param_val
-                    st.session_state["adaptive_profile_last_applied"] = adaptive_profile
-                    st.rerun()
-
             with st.expander("Détails du profil", expanded=False):
                 st.markdown(f"**Objectif:** {selected_profile_def.get('summary', 'n/a')}")
                 st.markdown(f"**Avantages:** {selected_profile_def.get('advantages', 'n/a')}")
                 st.markdown(f"**Limites:** {selected_profile_def.get('drawbacks', 'n/a')}")
                 st.markdown(f"**Spécificité:** {selected_profile_def.get('specificity', 'n/a')}")
                 st.markdown(f"**Impact durée (qualitatif):** {selected_profile_def.get('duration_note', 'n/a')}")
-
-            estimate_source = selected_profile_params if isinstance(selected_profile_params, dict) else {
-                "adaptive_train_bars": int(st.session_state.get("adaptive_train_bars", 5000)),
-                "adaptive_cycle_bars": int(st.session_state.get("adaptive_cycle_bars", 1000)),
-                "adaptive_trials_per_cycle": int(st.session_state.get("adaptive_trials_per_cycle", 150)),
-                "adaptive_max_cycles": int(st.session_state.get("adaptive_max_cycles", 0))
-            }
-            estimate = _estimate_adaptive_load(
-                start_date=start_date,
-                end_date=end_date,
-                timeframe_str=timeframe,
-                train_bars=estimate_source["adaptive_train_bars"],
-                cycle_bars=estimate_source["adaptive_cycle_bars"],
-                trials_per_cycle=estimate_source["adaptive_trials_per_cycle"],
-                max_cycles=estimate_source["adaptive_max_cycles"]
-            )
-            if estimate:
-                observed_sec_per_trial = _get_observed_seconds_per_trial()
-                if observed_sec_per_trial is not None:
-                    eta = estimate["total_trials"] * observed_sec_per_trial
-                    eta_text = _humanize_seconds(eta)
-                    eta_source = f"basée sur ton dernier run (~{observed_sec_per_trial:.3f}s/trial)"
-                else:
-                    eta_low = estimate["total_trials"] * 0.2
-                    eta_high = estimate["total_trials"] * 1.0
-                    eta_text = f"{_humanize_seconds(eta_low)} à {_humanize_seconds(eta_high)}"
-                    eta_source = "fourchette générique (0.2s à 1.0s par trial)"
-                st.info(
-                    "Estimation charge/durée: "
-                    f"~{estimate['bars']:,} bougies, ~{estimate['cycles']:,} cycles, "
-                    f"~{estimate['total_trials']:,} trials, durée estimée {eta_text} ({eta_source})."
-                )
 
             adaptive_train_bars = st.number_input(
                 "Adaptive Train Bars",
@@ -1593,6 +2063,32 @@ with st.sidebar:
                 key='adaptive_oos_weight',
                 help="Poids appliqué au score OOS lors de la mise à jour des statistiques de valeurs."
             )
+
+            estimate = _estimate_adaptive_load(
+                start_date=start_date,
+                end_date=end_date,
+                timeframe_str=timeframe,
+                train_bars=adaptive_train_bars,
+                cycle_bars=adaptive_cycle_bars,
+                trials_per_cycle=adaptive_trials_per_cycle,
+                max_cycles=adaptive_max_cycles
+            )
+            if estimate:
+                observed_sec_per_trial = _get_observed_seconds_per_trial()
+                if observed_sec_per_trial is not None:
+                    eta = estimate["total_trials"] * observed_sec_per_trial
+                    eta_text = _humanize_seconds(eta)
+                    eta_source = f"basée sur ton dernier run (~{observed_sec_per_trial:.3f}s/trial)"
+                else:
+                    eta_low = estimate["total_trials"] * 0.2
+                    eta_high = estimate["total_trials"] * 1.0
+                    eta_text = f"{_humanize_seconds(eta_low)} à {_humanize_seconds(eta_high)}"
+                    eta_source = "fourchette générique (0.2s à 1.0s par trial)"
+                st.info(
+                    "Estimation charge/durée: "
+                    f"~{estimate['bars']:,} bougies, ~{estimate['cycles']:,} cycles, "
+                    f"~{estimate['total_trials']:,} trials, durée estimée {eta_text} ({eta_source})."
+                )
 
     # --- Metrics ---
     with st.expander("5. Performance Metrics", expanded=False):
@@ -1961,6 +2457,24 @@ def run_wfo(config, control=None, job_state=None):
                     w = msg.get('window', 0)
                     job_state['progress'] = min(w / max(1, config['n_windows']), 1.0)
 
+                if msg.get('window') is not None:
+                    job_state['window'] = msg.get('window')
+                if msg.get('evaluations') is not None:
+                    try:
+                        job_state['evaluations'] = int(msg.get('evaluations'))
+                    except Exception:
+                        pass
+                if msg.get('speed') is not None:
+                    try:
+                        job_state['speed'] = float(msg.get('speed'))
+                    except Exception:
+                        pass
+                if msg.get('eta') is not None:
+                    try:
+                        job_state['eta_seconds'] = float(msg.get('eta'))
+                    except Exception:
+                        pass
+
                 if msg.get('message'):
                     job_state['message'] = msg.get('message')
                 else:
@@ -2011,7 +2525,32 @@ st.sidebar.divider()
 # Live Combination Count
 current_conf = get_current_config()
 total_combos = calculate_combinations(current_conf)
-st.sidebar.info(f"📊 Total Parameter Combinations: **{total_combos:,}**")
+if str(current_conf.get("optimization_regime", "")).lower() == "adaptive_continuous":
+    adaptive_estimate = _estimate_adaptive_load(
+        start_date=current_conf.get("start_date"),
+        end_date=current_conf.get("end_date"),
+        timeframe_str=current_conf.get("timeframe"),
+        train_bars=current_conf.get("adaptive_train_bars", 5000),
+        cycle_bars=current_conf.get("adaptive_cycle_bars", 1000),
+        trials_per_cycle=current_conf.get("adaptive_trials_per_cycle", 150),
+        max_cycles=current_conf.get("adaptive_max_cycles", 0)
+    )
+    if adaptive_estimate:
+        sec_per_trial = _get_observed_seconds_per_trial()
+        if sec_per_trial is not None:
+            eta_text = _humanize_seconds(adaptive_estimate["total_trials"] * sec_per_trial)
+            eta_hint = f"ETA ~ {eta_text}"
+        else:
+            eta_hint = "ETA selon machine/données"
+        st.sidebar.info(
+            "📊 Charge adaptative estimée: "
+            f"**{adaptive_estimate['cycles']:,} cycles** | "
+            f"**{adaptive_estimate['total_trials']:,} trials** ({eta_hint})"
+        )
+    else:
+        st.sidebar.info("📊 Charge adaptative: renseigne des dates/timeframe valides pour estimer cycles et trials.")
+else:
+    st.sidebar.info(f"📊 Total Parameter Combinations: **{total_combos:,}**")
 
 if 'wfo_running' not in st.session_state:
     st.session_state['wfo_running'] = False
@@ -2065,7 +2604,8 @@ with col_run:
         if st.button(
             "🚀 Start WFO",
             type="primary",
-            use_container_width=True,
+            key="start_wfo_btn",
+            width="stretch",
             help="Lance l'optimisation selon le mode choisi (WFO classique, grille précédente, NN, ou adaptatif continu)."
         ):
             if not selected_params:
@@ -2082,6 +2622,10 @@ with col_run:
                     'df': None,
                     'error': None,
                     'elapsed': None,
+                    'window': None,
+                    'evaluations': None,
+                    'speed': None,
+                    'eta_seconds': None,
                     'run_id': run_id,
                     'started_at_utc': run_started_at,
                     'ended_at_utc': None,
@@ -2143,7 +2687,7 @@ with col_run:
                 worker.start()
                 st.rerun()
     else:
-        if st.button("🛑 Stop WFO", use_container_width=True, help="Demande un arrêt propre après l'essai en cours."):
+        if st.button("🛑 Stop WFO", key="stop_wfo_btn", width="stretch", help="Demande un arrêt propre après l'essai en cours."):
             control = st.session_state.get('wfo_control')
             if control:
                 control.request_stop()
@@ -2154,8 +2698,14 @@ with col_run:
 
 if st.session_state.get('wfo_running'):
     job_state = st.session_state.get('wfo_job_state', {})
+    _inject_running_animation_css()
+    st.sidebar.markdown(
+        '<div class="run-badge"><span class="run-badge-dot"></span>RUNNING</div>',
+        unsafe_allow_html=True
+    )
     st.sidebar.progress(float(job_state.get('progress', 0.0)))
     st.sidebar.caption(job_state.get('message', "Running..."))
+    _render_running_status_card(job_state, current_conf)
 
 with col_save:
     # Save Config Button
@@ -2165,7 +2715,7 @@ with col_save:
         data=json_config,
         file_name="config.json",
         mime="application/json",
-        use_container_width=True,
+        width="stretch",
         help="Télécharge la configuration actuelle de tous les contrôles de la sidebar."
     )
 
@@ -2218,7 +2768,7 @@ if "wfo_results" in st.session_state:
         )
     if st.sidebar.button(
         "💾 Save Results to Disk",
-        use_container_width=True,
+        width="stretch",
         help="Crée une archive ZIP des résultats dans le dossier `reports/`."
     ):
         zip_buffer = _export_results_zip(
@@ -2238,7 +2788,7 @@ if "wfo_results" in st.session_state:
             data=st.session_state["results_zip_bytes"],
             file_name=os.path.basename(st.session_state.get("results_zip_path", "wfo_results.zip")),
             mime="application/zip",
-            use_container_width=True,
+            width="stretch",
             help="Télécharge l'archive des résultats en mémoire (JSON/CSV/trades selon disponibilité)."
         )
 else:
@@ -2270,7 +2820,7 @@ if 'wfo_results' in st.session_state:
     )
     if st.sidebar.button(
         "🏆 Run Final Backtest",
-        use_container_width=True,
+        width="stretch",
         help="Exécute un backtest complet avec le meilleur jeu de paramètres sélectionné."
     ):
         run_final_backtest_logic()
@@ -2314,7 +2864,15 @@ if 'wfo_results' in st.session_state:
         col4.metric("Avg Win Rate", f"{oos_df['win_rate'].mean():.2f}%")
     
     # Tabs for different views
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 OOS Performance", "🔍 Parameters", "📉 Drawdowns & Returns", "📋 Raw Data", "🏆 Final Backtest"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "📈 OOS Performance",
+        "🔍 Parameters",
+        "📉 Drawdowns & Returns",
+        "🧠 Adaptive Insights",
+        "🤖 Expert IA",
+        "📋 Raw Data",
+        "🏆 Final Backtest"
+    ])
     
     with tab1:
         # Combined Chart: Price + Windows
@@ -2426,7 +2984,18 @@ if 'wfo_results' in st.session_state:
         # Filter numeric parameters only
         numeric_cols = params_df.select_dtypes(include=[np.number]).columns
         numeric_cols = [c for c in numeric_cols if c not in ['window', 'metric1_name', 'metric2_name']] # Filter out non-params
-        selected_for_opt = st.session_state.get('selected_params', [])
+        # Prefer selected params from the run being visualized (traceability/config in results ZIP),
+        # then fallback to current UI config.
+        selected_for_opt = []
+        run_traceability = results.get("traceability") if isinstance(results, dict) else None
+        if isinstance(run_traceability, dict):
+            run_cfg = run_traceability.get("config")
+            if isinstance(run_cfg, dict):
+                selected_for_opt = run_cfg.get("selected_params") or []
+        if not selected_for_opt:
+            selected_for_opt = current_conf.get("selected_params", []) if isinstance(current_conf, dict) else []
+        if not selected_for_opt:
+            selected_for_opt = st.session_state.get('selected_params', [])
         if selected_for_opt:
             numeric_cols = [c for c in numeric_cols if c in selected_for_opt]
         
@@ -2514,6 +3083,576 @@ if 'wfo_results' in st.session_state:
                 st.plotly_chart(fig_dd, use_container_width=True)
 
     with tab4:
+        st.subheader("Adaptive Optimization Insights")
+        run_mode = str(
+            results.get("mode")
+            or results.get("settings", {}).get("optimization_regime")
+            or current_conf.get("optimization_regime", "classic")
+        ).lower()
+
+        if run_mode != "adaptive_continuous":
+            st.info("Ces graphiques sont disponibles pour le mode `Adaptive Continuous`.")
+        else:
+            trials_df = st.session_state.get("all_trials_df")
+            if trials_df is None or trials_df.empty:
+                trials_df = _build_trials_dataframe_from_results(results)
+            guidance_df = pd.DataFrame(results.get("adaptive_guidance", []))
+            is_perf_df = pd.DataFrame(results.get("in_sample_performance", []))
+            oos_perf_df = pd.DataFrame(results.get("out_of_sample_performance", []))
+
+            # Fallback if adaptive_guidance is not present in old runs/imports.
+            if guidance_df.empty and results.get("window_results"):
+                fallback_rows = []
+                baseline_default = (
+                    results.get("settings", {}).get("baseline_param_combinations")
+                    or results.get("timing", {}).get("param_combinations")
+                )
+                for wr in results.get("window_results", []):
+                    cycle_info = wr.get("cycle_info", {}) if isinstance(wr, dict) else {}
+                    window_info = wr.get("window_info", {}) if isinstance(wr, dict) else {}
+                    cycle_id = cycle_info.get("cycle", window_info.get("window"))
+                    fallback_rows.append({
+                        "window": cycle_id,
+                        "cycle": cycle_id,
+                        "baseline_combinations": baseline_default,
+                        "active_combinations": cycle_info.get("active_combinations"),
+                        "trials_tested": wr.get("optimization_trials_count", cycle_info.get("trials_tested")),
+                        "parameter_weights": {},
+                    })
+                guidance_df = pd.DataFrame(fallback_rows)
+
+            # --- 1) Convergence by cycle ---
+            st.markdown("#### 1) Convergence des scores d'entraînement")
+            if not trials_df.empty and {"window", "combined_score"}.issubset(trials_df.columns):
+                cycle_scores = trials_df[["window", "combined_score"]].copy()
+                cycle_scores["window"] = pd.to_numeric(cycle_scores["window"], errors="coerce")
+                cycle_scores["combined_score"] = pd.to_numeric(cycle_scores["combined_score"], errors="coerce")
+                cycle_scores = cycle_scores.dropna(subset=["window", "combined_score"])
+                if not cycle_scores.empty:
+                    conv_df = cycle_scores.groupby("window")["combined_score"].agg(
+                        best="max",
+                        median="median",
+                        q25=lambda x: x.quantile(0.25),
+                        q75=lambda x: x.quantile(0.75),
+                        std="std",
+                        n="count"
+                    ).reset_index().sort_values("window")
+                    conv_df["std"] = conv_df["std"].fillna(0.0)
+
+                    fig_conv = go.Figure()
+                    fig_conv.add_trace(go.Scatter(
+                        x=conv_df["window"],
+                        y=conv_df["q75"],
+                        mode="lines",
+                        line=dict(width=0),
+                        name="Q75",
+                        showlegend=False,
+                        hovertemplate="Cycle %{x}<br>Q75: %{y:.2f}<extra></extra>"
+                    ))
+                    fig_conv.add_trace(go.Scatter(
+                        x=conv_df["window"],
+                        y=conv_df["q25"],
+                        mode="lines",
+                        line=dict(width=0),
+                        fill="tonexty",
+                        fillcolor="rgba(99, 110, 250, 0.16)",
+                        name="IQR (Q25-Q75)",
+                        hovertemplate="Cycle %{x}<br>Q25: %{y:.2f}<extra></extra>"
+                    ))
+                    fig_conv.add_trace(go.Scatter(
+                        x=conv_df["window"],
+                        y=conv_df["best"],
+                        mode="lines+markers",
+                        name="Best score",
+                        line=dict(color="#00CC96", width=2),
+                        hovertemplate="Cycle %{x}<br>Best: %{y:.2f}<extra></extra>"
+                    ))
+                    fig_conv.add_trace(go.Scatter(
+                        x=conv_df["window"],
+                        y=conv_df["median"],
+                        mode="lines+markers",
+                        name="Median score",
+                        line=dict(color="#FECB52", width=1.7, dash="dot"),
+                        hovertemplate="Cycle %{x}<br>Median: %{y:.2f}<extra></extra>"
+                    ))
+                    fig_conv.update_layout(
+                        template="plotly_dark",
+                        height=390,
+                        title="Évolution des scores des trials par cycle",
+                        xaxis_title="Cycle",
+                        yaxis_title="Score (combined_score)"
+                    )
+                    st.plotly_chart(fig_conv, use_container_width=True)
+                    _render_interpretation_guide([
+                        "La courbe `Best score` qui monte indique que la recherche découvre de meilleures zones.",
+                        "Une bande IQR (Q25-Q75) qui se resserre signale une recherche plus stable.",
+                        "Si `Best` monte mais que `Median` reste basse, les bons résultats sont rares (risque de sur-ajustement local).",
+                    ])
+                else:
+                    st.info("Données de trial insuffisantes pour afficher la convergence.")
+            else:
+                st.info("Les colonnes `window` et `combined_score` sont nécessaires dans `all_trials.csv`.")
+
+            # --- 2) Generalization gap IS vs OOS ---
+            st.markdown("#### 2) Gap de généralisation (IS vs OOS)")
+            if not is_perf_df.empty and not oos_perf_df.empty and "window" in is_perf_df.columns and "window" in oos_perf_df.columns:
+                is_gap = is_perf_df[["window", "return", "sharpe"]].copy()
+                oos_gap = oos_perf_df[["window", "return", "sharpe"]].copy()
+                is_gap = is_gap.rename(columns={"return": "is_return", "sharpe": "is_sharpe"})
+                oos_gap = oos_gap.rename(columns={"return": "oos_return", "sharpe": "oos_sharpe"})
+                gap_df = pd.merge(is_gap, oos_gap, on="window", how="inner")
+                gap_df["window"] = pd.to_numeric(gap_df["window"], errors="coerce")
+                for col in ["is_return", "oos_return", "is_sharpe", "oos_sharpe"]:
+                    gap_df[col] = pd.to_numeric(gap_df[col], errors="coerce")
+                gap_df = gap_df.dropna(subset=["window"]).sort_values("window")
+                gap_df["return_gap"] = gap_df["is_return"] - gap_df["oos_return"]
+                gap_df["sharpe_gap"] = gap_df["is_sharpe"] - gap_df["oos_sharpe"]
+
+                if not gap_df.empty:
+                    fig_gap = go.Figure()
+                    fig_gap.add_trace(go.Bar(
+                        x=gap_df["window"],
+                        y=gap_df["return_gap"],
+                        name="Gap Return (IS - OOS)",
+                        marker_color="rgba(239, 85, 59, 0.75)",
+                        hovertemplate="Cycle %{x}<br>Gap Return: %{y:.2f}<extra></extra>"
+                    ))
+                    fig_gap.add_trace(go.Scatter(
+                        x=gap_df["window"],
+                        y=gap_df["sharpe_gap"],
+                        mode="lines+markers",
+                        name="Gap Sharpe (IS - OOS)",
+                        line=dict(color="#19D3F3", width=2),
+                        hovertemplate="Cycle %{x}<br>Gap Sharpe: %{y:.2f}<extra></extra>"
+                    ))
+                    fig_gap.add_hline(y=0, line_width=1, line_dash="dot", line_color="rgba(255,255,255,0.6)")
+                    fig_gap.update_layout(
+                        template="plotly_dark",
+                        height=360,
+                        title="Écart de performance entre entraînement et validation",
+                        xaxis_title="Cycle"
+                    )
+                    st.plotly_chart(fig_gap, use_container_width=True)
+                    _render_interpretation_guide([
+                        "Un gap proche de 0 signifie une meilleure généralisation hors-échantillon.",
+                        "Un gap durablement positif (IS > OOS) signale un risque de sur-optimisation.",
+                        "Si le gap se réduit au fil des cycles, l'adaptation devient plus robuste.",
+                    ])
+                else:
+                    st.info("Impossible de calculer le gap IS/OOS sur ce run.")
+            else:
+                st.info("Les métriques IS et OOS par cycle sont requises pour ce graphique.")
+
+            # --- 3) Search space vs effort ---
+            st.markdown("#### 3) Compression de l'espace de recherche")
+            if not guidance_df.empty:
+                gdf = guidance_df.copy()
+                gdf["cycle"] = pd.to_numeric(
+                    gdf["cycle"] if "cycle" in gdf.columns else gdf.get("window"),
+                    errors="coerce"
+                )
+                gdf["window"] = pd.to_numeric(gdf.get("window", gdf["cycle"]), errors="coerce")
+                gdf["active_combinations"] = pd.to_numeric(gdf.get("active_combinations"), errors="coerce")
+                gdf["baseline_combinations"] = pd.to_numeric(gdf.get("baseline_combinations"), errors="coerce")
+                gdf["trials_tested"] = pd.to_numeric(gdf.get("trials_tested"), errors="coerce")
+                gdf = gdf.dropna(subset=["cycle"]).sort_values("cycle")
+
+                if not gdf.empty:
+                    fig_space = make_subplots(specs=[[{"secondary_y": True}]])
+                    fig_space.add_trace(go.Bar(
+                        x=gdf["cycle"],
+                        y=gdf["trials_tested"],
+                        name="Trials testés",
+                        marker_color="rgba(254, 203, 82, 0.72)",
+                        hovertemplate="Cycle %{x}<br>Trials: %{y:.0f}<extra></extra>"
+                    ), secondary_y=False)
+                    fig_space.add_trace(go.Scatter(
+                        x=gdf["cycle"],
+                        y=gdf["active_combinations"],
+                        mode="lines+markers",
+                        name="Combinaisons actives",
+                        line=dict(color="#00CC96", width=2),
+                        hovertemplate="Cycle %{x}<br>Active combos: %{y:,.0f}<extra></extra>"
+                    ), secondary_y=True)
+                    if gdf["baseline_combinations"].notna().any():
+                        fig_space.add_trace(go.Scatter(
+                            x=gdf["cycle"],
+                            y=gdf["baseline_combinations"],
+                            mode="lines",
+                            name="Combinaisons baseline",
+                            line=dict(color="#AB63FA", width=1.5, dash="dot"),
+                            hovertemplate="Cycle %{x}<br>Baseline combos: %{y:,.0f}<extra></extra>"
+                        ), secondary_y=True)
+
+                    fig_space.update_layout(
+                        template="plotly_dark",
+                        height=380,
+                        title="Effort de test vs taille de la grille active",
+                        xaxis_title="Cycle"
+                    )
+                    fig_space.update_yaxes(title_text="Trials", secondary_y=False)
+                    if (gdf["active_combinations"] > 0).any():
+                        fig_space.update_yaxes(title_text="Combinaisons", type="log", secondary_y=True)
+                    else:
+                        fig_space.update_yaxes(title_text="Combinaisons", secondary_y=True)
+                    st.plotly_chart(fig_space, use_container_width=True)
+                    _render_interpretation_guide([
+                        "La courbe `Combinaisons actives` doit en général baisser vs baseline: le moteur se focalise.",
+                        "Les `Trials testés` doivent rester compatibles avec le temps de calcul visé.",
+                        "Si les combinaisons explosent sans gain de score, la configuration est trop exploratoire.",
+                    ])
+                else:
+                    st.info("Données de guidance adaptative insuffisantes.")
+            else:
+                st.info("Aucune donnée `adaptive_guidance` détectée pour ce run.")
+
+            # --- 4) Parameter weights evolution ---
+            st.markdown("#### 4) Évolution des poids relatifs par paramètre")
+            weight_rows = []
+            if not guidance_df.empty:
+                for _, row in guidance_df.iterrows():
+                    cycle_id = row.get("cycle", row.get("window"))
+                    weights = row.get("parameter_weights", {})
+                    if isinstance(weights, str):
+                        try:
+                            weights = json.loads(weights)
+                        except Exception:
+                            weights = {}
+                    if not isinstance(weights, dict):
+                        continue
+                    for pname, weight in weights.items():
+                        weight_rows.append({
+                            "cycle": cycle_id,
+                            "parameter": str(pname),
+                            "weight": weight
+                        })
+
+            weights_df = pd.DataFrame(weight_rows)
+            if not weights_df.empty:
+                weights_df["cycle"] = pd.to_numeric(weights_df["cycle"], errors="coerce")
+                weights_df["weight"] = pd.to_numeric(weights_df["weight"], errors="coerce")
+                weights_df = weights_df.dropna(subset=["cycle", "weight"])
+                if not weights_df.empty:
+                    top_params = (
+                        weights_df.groupby("parameter")["weight"]
+                        .mean()
+                        .sort_values(ascending=False)
+                        .head(8)
+                        .index
+                    )
+                    plot_weights_df = weights_df[weights_df["parameter"].isin(top_params)].sort_values("cycle")
+                    fig_weights = px.area(
+                        plot_weights_df,
+                        x="cycle",
+                        y="weight",
+                        color="parameter",
+                        template="plotly_dark",
+                        title="Poids relatifs des paramètres (top 8)"
+                    )
+                    fig_weights.update_layout(height=380, xaxis_title="Cycle", yaxis_title="Poids relatif")
+                    st.plotly_chart(fig_weights, use_container_width=True)
+                    _render_interpretation_guide([
+                        "Un poids élevé indique qu'un paramètre discrimine fortement les scores dans l'historique.",
+                        "Des poids qui changent brutalement peuvent signaler un régime instable.",
+                        "Un paramètre durablement proche de 0 a peu d'impact dans la configuration actuelle.",
+                    ])
+                else:
+                    st.info("Aucun poids paramètre exploitable pour ce run.")
+            else:
+                st.info("Poids adaptatifs non disponibles (run ancien ou export incomplet).")
+
+            # --- 5) Top values leaderboard ---
+            st.markdown("#### 5) Valeurs les plus performantes par paramètre")
+            top_values = (results.get("adaptive_summary") or {}).get("top_values_by_parameter", {})
+            if isinstance(top_values, dict) and top_values:
+                param_options = sorted(top_values.keys())
+                selected_param = st.selectbox(
+                    "Paramètre à analyser",
+                    options=param_options,
+                    key="adaptive_top_values_param"
+                )
+                selected_rows = top_values.get(selected_param) or []
+                selected_df = pd.DataFrame(selected_rows)
+                if not selected_df.empty and {"value", "mean_score"}.issubset(selected_df.columns):
+                    selected_df["mean_score"] = pd.to_numeric(selected_df["mean_score"], errors="coerce")
+                    selected_df["effective_trials"] = pd.to_numeric(selected_df.get("effective_trials"), errors="coerce")
+                    selected_df["value_label"] = selected_df["value"].astype(str)
+                    selected_df = selected_df.sort_values("mean_score", ascending=False)
+                    fig_top_values = px.bar(
+                        selected_df,
+                        x="value_label",
+                        y="mean_score",
+                        color="effective_trials",
+                        text=selected_df["effective_trials"].fillna(0).astype(int),
+                        template="plotly_dark",
+                        title=f"Top valeurs historiques pour `{selected_param}`",
+                        labels={"value_label": "Valeur", "mean_score": "Score moyen", "effective_trials": "Trials effectifs"}
+                    )
+                    fig_top_values.update_layout(height=350)
+                    st.plotly_chart(fig_top_values, use_container_width=True)
+                    _render_interpretation_guide([
+                        "La barre la plus haute donne la valeur historiquement la plus robuste sur ce run.",
+                        "Le nombre de `trials effectifs` aide à distinguer un vrai signal d'un résultat peu observé.",
+                        "Si plusieurs valeurs sont proches, garder de la diversité évite de sur-spécialiser la grille.",
+                    ])
+                else:
+                    st.info("Aucune donnée exploitable pour ce paramètre.")
+            else:
+                st.info("Le résumé `top_values_by_parameter` n'est pas disponible pour ce run.")
+
+    with tab5:
+        st.subheader("🤖 Expert IA - Interprétation MVP")
+        st.caption(
+            "Analyse IA spécialisée des résultats d'optimisation. "
+            "Le MVP utilise un agent unique et un endpoint OpenAI-compatible."
+        )
+
+        exp_c1, exp_c2 = st.columns(2)
+        with exp_c1:
+            expert_provider = st.selectbox(
+                "Provider",
+                options=["openai", "grok"],
+                key="expert_provider",
+                help="OpenAI ou endpoint compatible OpenAI (xAI/Grok)."
+            )
+            expert_api_key = st.text_input(
+                "API Key Expert",
+                type="password",
+                key="expert_api_key",
+                help="Non sauvegardée dans les exports.",
+            )
+            expert_mode = st.selectbox(
+                "Mode d'analyse",
+                options=["diagnostic", "summary", "action_plan", "alerts"],
+                key="expert_mode",
+            )
+        with exp_c2:
+            default_model = "gpt-4o-mini" if expert_provider == "openai" else "grok-4-fast-non-reasoning"
+            expert_model = st.text_input(
+                "Model",
+                value=default_model,
+                key="expert_model",
+                help="Nom exact du modèle API.",
+            )
+            expert_detail_level = st.selectbox(
+                "Niveau de détail",
+                options=["standard", "short", "expert"],
+                key="expert_detail_level",
+            )
+            expert_question = st.text_area(
+                "Question complémentaire (optionnel)",
+                key="expert_user_question",
+                placeholder="Ex: Où vois-tu le plus grand risque de sur-optimisation ?"
+            )
+
+        with st.expander("Paramètres avancés Expert", expanded=False):
+            adv_c1, adv_c2, adv_c3 = st.columns(3)
+            with adv_c1:
+                expert_base_url = st.text_input(
+                    "Base URL (optionnel)",
+                    key="expert_base_url",
+                    placeholder="https://api.openai.com/v1",
+                )
+                expert_temp = st.slider(
+                    "Temperature",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.2,
+                    step=0.05,
+                    key="expert_temperature",
+                )
+            with adv_c2:
+                expert_max_tokens = st.number_input(
+                    "Max tokens",
+                    min_value=300,
+                    max_value=8000,
+                    value=1800,
+                    step=100,
+                    key="expert_max_tokens",
+                )
+                expert_timeout = st.number_input(
+                    "Timeout (s)",
+                    min_value=10,
+                    max_value=300,
+                    value=90,
+                    step=5,
+                    key="expert_timeout_s",
+                )
+            with adv_c3:
+                expert_retries = st.number_input(
+                    "Retries",
+                    min_value=0,
+                    max_value=6,
+                    value=2,
+                    step=1,
+                    key="expert_retries",
+                )
+                include_raw_evidence = st.checkbox(
+                    "Inclure preuves brutes",
+                    value=True,
+                    key="expert_include_raw_evidence",
+                )
+
+        # Prompt preview/editing (single-agent MVP): user can inspect and override prompts before launch.
+        expert_input_preview = _build_expert_input_data(results, current_conf)
+        preview_req = ExpertRequest(
+            mode=expert_mode,
+            detail_level=expert_detail_level,
+            user_question=expert_question.strip() if expert_question else None,
+            include_raw_evidence=bool(include_raw_evidence),
+        )
+        preview_builder = ExpertPromptBuilder()
+        default_system_prompt = preview_builder.build_system_prompt(preview_req.mode, preview_req.detail_level)
+        if expert_input_preview is not None:
+            default_user_prompt = preview_builder.build_user_prompt(
+                data=expert_input_preview,
+                request=preview_req,
+                output_schema={
+                    "schema_version": "expert.v1",
+                    "required_keys": [
+                        "schema_version",
+                        "run_id",
+                        "mode",
+                        "detail_level",
+                        "global_assessment",
+                        "key_findings",
+                        "recommended_actions",
+                        "alerts",
+                        "limitations",
+                        "disclaimer",
+                    ],
+                },
+            )
+        else:
+            default_user_prompt = (
+                "Analyse les donnees ci-dessous et renvoie un JSON unique conforme au schema cible.\n\n"
+                "Donnees: insufficient_data"
+            )
+
+        if "expert_system_prompt_edit" not in st.session_state:
+            st.session_state["expert_system_prompt_edit"] = default_system_prompt
+        if "expert_user_prompt_edit" not in st.session_state:
+            st.session_state["expert_user_prompt_edit"] = default_user_prompt
+
+        c_prompt_a, c_prompt_b = st.columns([1.2, 1.2])
+        with c_prompt_a:
+            if st.button("Charger prompts auto", key="expert_reload_prompts"):
+                st.session_state["expert_system_prompt_edit"] = default_system_prompt
+                st.session_state["expert_user_prompt_edit"] = default_user_prompt
+                st.rerun()
+        with c_prompt_b:
+            st.caption("Les prompts ci-dessous sont ceux utilisés pour l'appel API.")
+
+        with st.expander("Prompts de l'agent Expert (éditables)", expanded=False):
+            st.text_area(
+                "Prompt système",
+                key="expert_system_prompt_edit",
+                height=130,
+                help="Règles de rôle et de style de l'agent Expert."
+            )
+            st.text_area(
+                "Prompt utilisateur",
+                key="expert_user_prompt_edit",
+                height=260,
+                help="Instruction de tâche + données injectées pour l'analyse."
+            )
+
+        if st.button("Générer l'interprétation Expert", key="expert_generate_btn", width="stretch"):
+            clean_expert_api_key = str(expert_api_key or "").strip()
+            if not clean_expert_api_key:
+                st.warning("Renseigne une clé API Expert valide (non vide après suppression des espaces).")
+            else:
+                expert_input = _build_expert_input_data(results, current_conf)
+                if expert_input is None:
+                    st.error("Impossible de construire les données d'entrée Expert.")
+                else:
+                    user_system_prompt = str(st.session_state.get("expert_system_prompt_edit", "") or "").strip()
+                    user_prompt = str(st.session_state.get("expert_user_prompt_edit", "") or "").strip()
+                    if not user_system_prompt or not user_prompt:
+                        st.error("Les prompts Expert ne peuvent pas être vides.")
+                    else:
+                        clean_base_url = str(expert_base_url or "").strip()
+                        if clean_base_url.endswith("/chat/completions"):
+                            clean_base_url = clean_base_url[: -len("/chat/completions")]
+                        if clean_base_url.endswith("/v1/chat/completions"):
+                            clean_base_url = clean_base_url[: -len("/chat/completions")]
+
+                        llm_cfg = LLMConfig(
+                            provider=expert_provider,
+                            model=expert_model.strip() or default_model,
+                            api_key=clean_expert_api_key,
+                            base_url=(clean_base_url or None),
+                            temperature=float(expert_temp),
+                            timeout_s=float(expert_timeout),
+                            max_tokens=int(expert_max_tokens),
+                            retries=int(expert_retries),
+                        )
+                        expert_req = ExpertRequest(
+                            mode=expert_mode,
+                            detail_level=expert_detail_level,
+                            user_question=expert_question.strip() if expert_question else None,
+                            include_raw_evidence=bool(include_raw_evidence),
+                        )
+                        gateway = OpenAICompatibleGateway()
+                        analyzer = ExpertAnalyzer(gateway, ExpertPromptBuilder())
+                        storage = ExpertStorage()
+                        service = ExpertService(analyzer, storage)
+                        with st.spinner("Analyse Expert IA en cours..."):
+                            response = service.run(
+                                data=expert_input,
+                                request=expert_req,
+                                llm_config=llm_cfg,
+                                persist=True,
+                                system_prompt_override=user_system_prompt,
+                                user_prompt_override=user_prompt,
+                            )
+                        st.session_state["expert_last_response"] = {
+                            "status": response.status,
+                            "result_json": response.result_json,
+                            "raw_text": response.raw_text,
+                            "model_info": response.model_info,
+                            "timings_ms": response.timings_ms,
+                            "warnings": response.warnings,
+                            "run_id": response.run_id,
+                            "used_system_prompt": user_system_prompt,
+                            "used_user_prompt": user_prompt,
+                        }
+                        st.success("Interprétation Expert générée et sauvegardée dans `reports/expert/`.")
+
+        expert_last = st.session_state.get("expert_last_response")
+        if isinstance(expert_last, dict):
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Status", str(expert_last.get("status", "n/a")))
+            m2.metric("Provider", str(expert_last.get("model_info", {}).get("provider", "n/a")))
+            m3.metric("Model", str(expert_last.get("model_info", {}).get("model", "n/a")))
+            m4.metric("Latency", f"{int(expert_last.get('timings_ms', {}).get('total', 0))} ms")
+
+            warnings_list = expert_last.get("warnings") or []
+            if warnings_list:
+                st.warning("Avertissements Expert:\n- " + "\n- ".join([str(w) for w in warnings_list]))
+
+            st.markdown("#### Rapport Expert")
+            report_markdown = _render_expert_human_report(
+                expert_last.get("result_json", {}),
+                meta={
+                    "run_id": expert_last.get("run_id"),
+                    "status": expert_last.get("status"),
+                    "provider": expert_last.get("model_info", {}).get("provider"),
+                    "model": expert_last.get("model_info", {}).get("model"),
+                    "latency_ms": expert_last.get("timings_ms", {}).get("total"),
+                }
+            )
+
+            download_payload = report_markdown or "Rapport Expert indisponible."
+            st.download_button(
+                "📥 Télécharger le rapport Expert (Markdown)",
+                data=download_payload,
+                file_name=f"expert_report_{expert_last.get('run_id', 'run')}.md",
+                mime="text/markdown",
+                key="expert_download_report"
+            )
+
+    with tab6:
         st.subheader("Detailed Results Data")
         st.write("Out-of-Sample Metrics:")
         st.dataframe(pd.DataFrame(results['out_of_sample_performance']))
@@ -2529,14 +3668,91 @@ if 'wfo_results' in st.session_state:
 
         if st.session_state.get("window_info_df") is not None:
             st.write("Window Info:")
-            st.dataframe(st.session_state["window_info_df"], use_container_width=True)
+            st.dataframe(st.session_state["window_info_df"], width="stretch")
 
         if st.session_state.get("all_trials_df") is not None:
-            trials_df = st.session_state["all_trials_df"]
-            st.write(f"All Trials (rows: {len(trials_df):,})")
-            st.dataframe(trials_df, use_container_width=True)
+            trials_df = st.session_state["all_trials_df"].copy()
+            st.write(f"All Trials (rows brutes: {len(trials_df):,})")
+
+            c_trials_1, c_trials_2, c_trials_3 = st.columns([1.6, 1.2, 1.2])
+            with c_trials_1:
+                window_options = []
+                if "window" in trials_df.columns:
+                    try:
+                        window_options = sorted([int(w) for w in pd.Series(trials_df["window"]).dropna().unique().tolist()])
+                    except Exception:
+                        window_options = sorted(pd.Series(trials_df["window"]).dropna().unique().tolist())
+                selected_windows = st.multiselect(
+                    "Filtrer fenêtres",
+                    options=window_options,
+                    default=window_options,
+                    key="all_trials_window_filter"
+                )
+            with c_trials_2:
+                score_col = "combined_score" if "combined_score" in trials_df.columns else None
+                min_score = None
+                if score_col:
+                    score_series = pd.to_numeric(trials_df[score_col], errors="coerce")
+                    score_series = score_series.replace([np.inf, -np.inf], np.nan).dropna()
+                    if not score_series.empty:
+                        score_min = float(score_series.min())
+                        score_max = float(score_series.max())
+                        if not np.isfinite(score_min) or not np.isfinite(score_max):
+                            score_min = None
+                            score_max = None
+                        if score_min is not None and score_max is not None:
+                            if score_max < score_min:
+                                score_min, score_max = score_max, score_min
+                            # Sanitize persisted widget state (can contain -inf from previous runs).
+                            current_min = st.session_state.get("all_trials_score_min", score_min)
+                            try:
+                                current_min = float(current_min)
+                            except Exception:
+                                current_min = score_min
+                            if not np.isfinite(current_min):
+                                current_min = score_min
+                            current_min = min(max(current_min, score_min), score_max)
+                            st.session_state["all_trials_score_min"] = current_min
+                            step_val = max(0.001, abs(score_max - score_min) / 200.0)
+
+                            min_score = st.number_input(
+                                "Score min",
+                                min_value=float(score_min),
+                                max_value=float(score_max),
+                                value=float(current_min),
+                                step=float(step_val),
+                                key="all_trials_score_min"
+                            )
+            with c_trials_3:
+                rows_per_page = st.selectbox(
+                    "Lignes/page",
+                    options=[100, 250, 500, 1000, 2000],
+                    index=1,
+                    key="all_trials_page_size"
+                )
+
+            filtered_df = trials_df
+            if selected_windows and "window" in filtered_df.columns:
+                filtered_df = filtered_df[filtered_df["window"].isin(selected_windows)]
+            if min_score is not None and "combined_score" in filtered_df.columns:
+                filtered_df = filtered_df[pd.to_numeric(filtered_df["combined_score"], errors="coerce") >= float(min_score)]
+            if "combined_score" in filtered_df.columns:
+                filtered_df = filtered_df.sort_values("combined_score", ascending=False)
+
+            total_filtered = len(filtered_df)
+            max_page = max(1, int(np.ceil(total_filtered / rows_per_page)))
+            page = st.number_input("Page", min_value=1, max_value=max_page, value=1, step=1, key="all_trials_page")
+            start_idx = (int(page) - 1) * rows_per_page
+            end_idx = start_idx + rows_per_page
+            page_df = filtered_df.iloc[start_idx:end_idx]
+
+            st.caption(
+                f"Affichage {start_idx + 1:,}–{min(end_idx, total_filtered):,} / {total_filtered:,} "
+                f"(filtré depuis {len(trials_df):,} lignes)."
+            )
+            st.dataframe(page_df, width="stretch")
     
-    with tab5:
+    with tab7:
         st.subheader("🏆 Final Backtest Results")
         
         if 'final_portfolio' in st.session_state:
@@ -2696,7 +3912,7 @@ if 'wfo_results' in st.session_state:
             pnl_metrics_df = _compute_trade_pnl_metrics(pd.DataFrame(pf.trades.records), trim=trim_pct / 100.0)
             if not pnl_metrics_df.empty:
                 st.markdown("#### Average P&L per Trade (Multiple Methods)")
-                st.dataframe(pnl_metrics_df, use_container_width=True)
+                st.dataframe(pnl_metrics_df, width="stretch")
 
             st.markdown("#### Performance by Time of Day and Day of Week")
 
@@ -2860,7 +4076,7 @@ if 'wfo_results' in st.session_state:
                     pnl_metrics_df = _compute_trade_pnl_metrics(trades_df, trim=trim_pct / 100.0)
                     if not pnl_metrics_df.empty:
                         st.markdown("#### Average P&L per Trade (Multiple Methods)")
-                        st.dataframe(pnl_metrics_df, use_container_width=True)
+                        st.dataframe(pnl_metrics_df, width="stretch")
                     st.markdown("#### Trades")
                     st.dataframe(trades_df)
             else:

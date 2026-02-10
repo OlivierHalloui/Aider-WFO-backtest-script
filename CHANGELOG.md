@@ -28,6 +28,35 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 - Ajout d'un descripteur de source de données dans `replay_manifest.json` (path, taille, période, lignes chargées).
 - Ajout de profils adaptatifs sélectionnables dans l'UI:
 - `Smoke Test`, `Rapide`, `Équilibré`, `Robuste`, `Réactif`, `Conservateur`, `Exploratoire`, `Custom`.
-- Auto-application du preset au changement de profil + bouton de réapplication.
+- Application explicite du preset via bouton (pas d'auto-réécriture des champs).
 - Panneau explicatif par profil (objectif, avantages, limites, spécificités, impact durée).
 - Estimation de charge et durée (bougies, cycles, trials, ETA) selon période/timeframe configurées.
+- Améliorations ergonomiques UI:
+- Migration `use_container_width` vers `width` pour anticiper la dépréciation Streamlit.
+- Clarification du mode adaptatif: `Optimization Method` affichée mais désactivée/explicitement non applicable.
+- Carte de charge contextuelle en sidebar (`cycles/trials/ETA`) en mode adaptatif.
+- Table `All Trials` filtrable et paginée (fenêtres, score min, taille de page).
+- Application des profils adaptatifs passée en action explicite (bouton), sans auto-réécriture silencieuse.
+- Ajout d'animations d'attente pendant l'optimisation:
+- Carte de statut animée (progression, elapsed, ETA, cycle/fenêtre).
+- Badge `RUNNING`, barre de progression shimmer et bouton `Stop WFO` avec pulse visuel.
+- Nouveau volet `Adaptive Insights` dans les résultats:
+- Graphiques de convergence des scores par cycle (best, médiane, IQR).
+- Graphique de gap IS/OOS (return et sharpe) pour visualiser la généralisation.
+- Graphique de compression de grille (combinaisons actives vs baseline + trials testés).
+- Graphique d'évolution des poids relatifs par paramètre (top 8).
+- Vue top valeurs historiques par paramètre (`top_values_by_parameter`).
+- Ajout d'un guide d'interprétation directement sous chaque graphique adaptatif.
+- Ajout du module MVP `Expert IA`:
+- Nouveau package `expert/` (gateway LLM OpenAI-compatible, prompt builder, schema, analyzer, storage, service).
+- Nouvel onglet UI `🤖 Expert IA` pour générer une interprétation IA des résultats d'optimisation.
+- Contrat JSON de sortie `expert.v1` avec validation minimale et mode dégradé en cas de réponse partielle.
+- Sauvegarde des interprétations dans `reports/expert/` + journal `expert_audit.jsonl`.
+- Mise en forme de l'analyse Expert pour lecture humaine dans l'UI:
+- Remplacement de l'affichage JSON brut par un rapport structuré (évaluation globale, constats, généralisation, diagnostics adaptatifs, actions, alertes).
+- Export utilisateur du rapport en Markdown (`.md`) au lieu d'un JSON brut.
+- Édition des prompts Expert dans l'UI avant exécution:
+- Affichage du prompt système et du prompt utilisateur dans un panneau éditable.
+- Bouton `Charger prompts auto` pour régénérer le prompt par défaut à partir du contexte courant.
+- Lancement de l'analyse avec les prompts réellement modifiés par l'utilisateur.
+- Prompt codé mis à jour: réponse exigée en français avec tolérance aux anglicismes métier.
