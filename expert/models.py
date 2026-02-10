@@ -40,6 +40,9 @@ class ExpertInputData:
     adaptive_guidance: List[Dict[str, Any]] = field(default_factory=list)
     adaptive_summary: Dict[str, Any] = field(default_factory=dict)
     price_features: Dict[str, Any] = field(default_factory=dict)
+    strategy_context: Dict[str, Any] = field(default_factory=dict)
+    deterministic_alerts: List[Dict[str, Any]] = field(default_factory=list)
+    final_backtest: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

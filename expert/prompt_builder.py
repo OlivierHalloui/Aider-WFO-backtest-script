@@ -16,6 +16,10 @@ class ExpertPromptBuilder:
             "N'invente rien: utilise uniquement les donnees fournies. "
             "Si une information manque, ecris 'insufficient_data'. "
             "Reponds en langue francaise, avec tolerance aux anglicismes de la profession (trading/quant). "
+            "Utilise explicitement le contexte strategie (logique entree/sortie, modules actifs, roles des parametres) "
+            "pour expliquer les observations. "
+            "Confronte les alertes deterministes aux constats statistiques et indique accord/desaccord motive. "
+            "L'analyse doit couvrir explicitement les resultats du final backtest et les comparer au buy&hold si disponible. "
             "Priorise robustesse OOS, risque de sur-optimisation, stabilite parametrique, "
             "et actions concretes de configuration. "
             "Reponds strictement en JSON valide sans markdown ni texte hors JSON. "
@@ -39,6 +43,9 @@ class ExpertPromptBuilder:
             "adaptive_guidance": data.adaptive_guidance,
             "adaptive_summary": data.adaptive_summary,
             "price_features": data.price_features,
+            "strategy_context": data.strategy_context,
+            "deterministic_alerts": data.deterministic_alerts,
+            "final_backtest": data.final_backtest,
             "request": {
                 "mode": request.mode,
                 "detail_level": request.detail_level,
@@ -69,6 +76,22 @@ class ExpertPromptBuilder:
                     "impacted_params": ["param_name"],
                 }
             ],
+            "strategy_alignment": {
+                "entry_logic_fit": "strong|medium|weak|insufficient_data",
+                "exit_logic_fit": "strong|medium|weak|insufficient_data",
+                "comments": ["string"],
+            },
+            "final_backtest_assessment": {
+                "summary": "string",
+                "strategy_return_pct": "number|insufficient_data",
+                "buy_hold_return_pct": "number|insufficient_data",
+                "outperformance_vs_buy_hold_pct": "number|insufficient_data",
+                "max_drawdown_pct": "number|insufficient_data",
+                "sharpe": "number|insufficient_data",
+                "win_rate_pct": "number|insufficient_data",
+                "n_trades": "number|insufficient_data",
+                "comment": "string",
+            },
             "is_oos_generalization": {
                 "return_gap_mean": "number|insufficient_data",
                 "sharpe_gap_mean": "number|insufficient_data",

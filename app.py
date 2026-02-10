@@ -506,6 +506,21 @@ def _to_jsonable(value):
         return str(value)
     return value
 
+def _safe_float_scalar(value):
+    try:
+        if np.isscalar(value):
+            out = float(value)
+            return out if np.isfinite(out) else np.nan
+        arr = np.asarray(value, dtype=float)
+        if arr.size == 0:
+            return np.nan
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return np.nan
+        return float(np.mean(arr))
+    except Exception:
+        return np.nan
+
 def _compact_trials_for_expert(trials_df, selected_params=None, top_per_window=5, max_windows=60):
     if selected_params is None:
         selected_params = []
@@ -567,6 +582,329 @@ def _compact_trials_for_expert(trials_df, selected_params=None, top_per_window=5
         "parameters_used": safe_params,
     }
 
+def _build_strategy_context_for_expert(current_conf):
+    if not isinstance(current_conf, dict):
+        return {}
+    selected_params = [str(p) for p in (current_conf.get("selected_params") or [])]
+
+    entry_params = [
+        "timeperiod", "StDev", "coeff_medianeBBW", "coef_mediane",
+        "fenetre_lowest", "seuil_lowest", "longueur_mediane", "Nb_bars_above"
+    ]
+    exit_params = [
+        "user_exit_sma_length", "sar_start", "sar_increment", "sar_maximum",
+        "macd_fast_length", "macd_slow_length", "macd_signal_length"
+    ]
+
+    parameter_ranges = {}
+    for p in selected_params:
+        p_min = current_conf.get(f"{p}_min")
+        p_max = current_conf.get(f"{p}_max")
+        p_step = current_conf.get(f"{p}_step")
+        parameter_ranges[p] = {
+            "min": _to_jsonable(p_min),
+            "max": _to_jsonable(p_max),
+            "step": _to_jsonable(p_step),
+            "role": PARAMETER_HELP.get(p, ""),
+        }
+
+    enabled_entry = [p for p in selected_params if p in entry_params]
+    enabled_exit = [p for p in selected_params if p in exit_params]
+    fixed_exit = [p for p in exit_params if p not in enabled_exit]
+
+    exit_modules = {
+        "exit_sar_enabled": bool(current_conf.get("exit_sar_enabled", True)),
+        "exit_macd_enabled": bool(current_conf.get("exit_macd_enabled", True)),
+        "exit_macd_type_a": bool(current_conf.get("exit_macd_type_a", True)),
+        "exit_macd_type_b": bool(current_conf.get("exit_macd_type_b", True)),
+    }
+
+    entry_logic = [
+        "Bollinger/BBW: detection de compression via coeff_medianeBBW, coef_mediane et lowest sur fenetre_lowest/seuil_lowest.",
+        "Validation du momentum/filtre via Nb_bars_above et longueur_mediane.",
+        "timeperiod et StDev reglent l'echantillonnage et la largeur des bandes."
+    ]
+    exit_logic = [
+        "Sortie SMA via user_exit_sma_length.",
+        "Sortie Parabolic SAR conditionnee par exit_sar_enabled (sar_start/sar_increment/sar_maximum).",
+        "Sortie MACD conditionnee par exit_macd_enabled (types A/B + macd_fast_length/macd_slow_length/macd_signal_length)."
+    ]
+
+    return {
+        "selected_params": selected_params,
+        "entry_params_enabled": enabled_entry,
+        "exit_params_enabled": enabled_exit,
+        "exit_params_fixed": fixed_exit,
+        "exit_modules": exit_modules,
+        "parameter_ranges": parameter_ranges,
+        "entry_logic_summary": entry_logic,
+        "exit_logic_summary": exit_logic,
+    }
+
+def _extract_final_backtest_for_expert(results, current_conf, df_source=None):
+    summary = {
+        "available": False,
+        "source": "none",
+        "run_final_backtest": False,
+        "final_params": st.session_state.get("final_params"),
+        "final_params_score": _to_jsonable(st.session_state.get("final_params_score")),
+        "final_params_window": _to_jsonable(st.session_state.get("final_params_window")),
+        "is_score": _to_jsonable(st.session_state.get("final_params_is_score")),
+        "oos_score": _to_jsonable(st.session_state.get("final_params_oos_score")),
+    }
+
+    pf = st.session_state.get("final_portfolio")
+    if pf is not None:
+        summary["available"] = True
+        summary["source"] = "final_portfolio"
+        summary["run_final_backtest"] = True
+        try:
+            summary["strategy_total_return_pct"] = float(_safe_float_scalar(getattr(pf, "total_return", np.nan) * 100))
+        except Exception:
+            summary["strategy_total_return_pct"] = None
+        try:
+            summary["strategy_sharpe"] = float(_safe_float_scalar(getattr(pf, "sharpe_ratio", np.nan)))
+        except Exception:
+            summary["strategy_sharpe"] = None
+        try:
+            summary["strategy_max_drawdown_pct"] = float(_safe_float_scalar(getattr(pf, "max_drawdown", np.nan) * 100))
+        except Exception:
+            summary["strategy_max_drawdown_pct"] = None
+        try:
+            summary["strategy_win_rate_pct"] = float(_safe_float_scalar(getattr(getattr(pf, "trades", object()), "win_rate", np.nan) * 100))
+        except Exception:
+            summary["strategy_win_rate_pct"] = None
+        try:
+            summary["strategy_n_trades"] = int(len(pf.trades))
+        except Exception:
+            summary["strategy_n_trades"] = None
+        try:
+            summary["strategy_calmar"] = float(_safe_float_scalar(getattr(pf, "calmar_ratio", np.nan)))
+        except Exception:
+            summary["strategy_calmar"] = None
+        try:
+            summary["strategy_sortino"] = float(_safe_float_scalar(getattr(pf, "sortino_ratio", np.nan)))
+        except Exception:
+            summary["strategy_sortino"] = None
+    else:
+        trades_df = st.session_state.get("final_trades_df")
+        stats_df = st.session_state.get("final_trade_stats_df")
+        if trades_df is not None or stats_df is not None:
+            summary["available"] = True
+            summary["source"] = "zip_import"
+            if trades_df is not None and hasattr(trades_df, "empty") and not trades_df.empty:
+                tdf = trades_df.copy()
+                summary["strategy_n_trades"] = int(len(tdf))
+                if "pnl" in tdf.columns:
+                    pnl_s = pd.to_numeric(tdf["pnl"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+                    if not pnl_s.empty:
+                        summary["trades_pnl_mean"] = float(pnl_s.mean())
+                        summary["trades_pnl_median"] = float(pnl_s.median())
+                ret_s = _get_return_series(tdf)
+                if ret_s is not None:
+                    ret_s = pd.to_numeric(ret_s, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+                    if not ret_s.empty:
+                        summary["trades_return_mean_pct"] = float(ret_s.mean() * 100.0)
+            if stats_df is not None and hasattr(stats_df, "empty") and not stats_df.empty:
+                summary["final_trade_stats_preview"] = stats_df.head(40).to_dict("records")
+
+    # Buy & Hold comparison when price data is available.
+    price_df = st.session_state.get("final_backtest_df")
+    if price_df is None or getattr(price_df, "empty", True):
+        price_df = df_source
+    if price_df is not None and hasattr(price_df, "empty") and not price_df.empty:
+        if "Close" in price_df.columns:
+            px_series = price_df["Close"]
+        else:
+            px_series = price_df.iloc[:, 0]
+        px_series = pd.to_numeric(px_series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        if len(px_series) > 1:
+            initial_price = float(px_series.iloc[0])
+            final_price = float(px_series.iloc[-1])
+            if initial_price != 0 and np.isfinite(initial_price) and np.isfinite(final_price):
+                buy_hold_return_pct = ((final_price / initial_price) - 1.0) * 100.0
+                summary["buy_hold_return_pct"] = float(buy_hold_return_pct)
+                st_ret = summary.get("strategy_total_return_pct")
+                if isinstance(st_ret, (int, float)) and np.isfinite(float(st_ret)):
+                    summary["outperformance_vs_buy_hold_pct"] = float(st_ret - buy_hold_return_pct)
+
+    return summary
+
+def _compute_deterministic_expert_alerts(results, current_conf, trials_df=None, final_backtest_summary=None):
+    alerts = []
+    if not isinstance(results, dict):
+        return alerts
+
+    is_df = pd.DataFrame(results.get("in_sample_performance", []))
+    oos_df = pd.DataFrame(results.get("out_of_sample_performance", []))
+    n_windows = int(max(len(is_df), len(oos_df)))
+
+    if n_windows < 3:
+        alerts.append({
+            "type": "inconclusive",
+            "severity": "medium",
+            "message": f"Peu de fenêtres/cycles exploitables ({n_windows}). Robustesse statistique limitée.",
+            "rule": "n_windows < 3",
+        })
+
+    # Gap IS/OOS overfitting alert.
+    if not is_df.empty and not oos_df.empty and "window" in is_df.columns and "window" in oos_df.columns:
+        merged = pd.merge(
+            is_df[["window", "return", "sharpe"]],
+            oos_df[["window", "return", "sharpe"]],
+            on="window",
+            how="inner",
+            suffixes=("_is", "_oos")
+        )
+        if not merged.empty:
+            for col in ["return_is", "return_oos", "sharpe_is", "sharpe_oos"]:
+                merged[col] = pd.to_numeric(merged[col], errors="coerce")
+            merged = merged.replace([np.inf, -np.inf], np.nan).dropna(subset=["return_is", "return_oos", "sharpe_is", "sharpe_oos"])
+            if not merged.empty:
+                ret_gap = float((merged["return_is"] - merged["return_oos"]).mean())
+                shp_gap = float((merged["sharpe_is"] - merged["sharpe_oos"]).mean())
+                if ret_gap > 8.0 or shp_gap > 0.8:
+                    sev = "high" if ret_gap > 15.0 or shp_gap > 1.2 else "medium"
+                    alerts.append({
+                        "type": "overfitting",
+                        "severity": sev,
+                        "message": (
+                            "Écart IS/OOS élevé détecté "
+                            f"(return_gap_moyen={ret_gap:.2f}, sharpe_gap_moyen={shp_gap:.2f})."
+                        ),
+                        "rule": "mean(IS-OOS) return > 8 or sharpe > 0.8",
+                    })
+                oos_return_series = pd.to_numeric(
+                    oos_df["return"] if "return" in oos_df.columns else pd.Series(dtype=float),
+                    errors="coerce"
+                ).replace([np.inf, -np.inf], np.nan).dropna()
+                oos_return_mean = float(oos_return_series.mean()) if not oos_return_series.empty else 0.0
+                if oos_return_mean <= 0:
+                    alerts.append({
+                        "type": "oos_underperformance",
+                        "severity": "medium",
+                        "message": "Rendement OOS moyen <= 0. Vérifier robustesse et adéquation des paramètres.",
+                        "rule": "mean(oos_return) <= 0",
+                    })
+
+    # Parameter instability alert.
+    best_params_df = pd.DataFrame(results.get("best_params", []))
+    selected_params = current_conf.get("selected_params", []) if isinstance(current_conf, dict) else []
+    numeric_instability = []
+    if not best_params_df.empty and selected_params:
+        for p in selected_params:
+            if p in best_params_df.columns:
+                s = pd.to_numeric(best_params_df[p], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+                if len(s) >= 4:
+                    mean_abs = float(abs(s.mean()))
+                    std_v = float(s.std(ddof=0))
+                    if mean_abs > 1e-9:
+                        cv = std_v / mean_abs
+                        if cv > 0.35:
+                            numeric_instability.append((p, cv))
+    if numeric_instability:
+        numeric_instability.sort(key=lambda x: x[1], reverse=True)
+        top = ", ".join([f"{p} (cv={cv:.2f})" for p, cv in numeric_instability[:4]])
+        alerts.append({
+            "type": "instability",
+            "severity": "medium",
+            "message": f"Instabilité paramétrique détectée: {top}.",
+            "rule": "cv(param) > 0.35 sur >=4 fenêtres",
+        })
+
+    # Trial volume alert.
+    if trials_df is not None and not getattr(trials_df, "empty", True):
+        total_trials = int(len(trials_df))
+    else:
+        total_trials = 0
+        for wr in results.get("window_results", []):
+            try:
+                total_trials += int(wr.get("optimization_trials_count", 0))
+            except Exception:
+                continue
+    if n_windows > 0:
+        avg_trials = total_trials / max(1, n_windows)
+        if avg_trials < 30:
+            alerts.append({
+                "type": "insufficient_trials",
+                "severity": "medium",
+                "message": f"Volume d'essais faible: ~{avg_trials:.1f} trials/fenêtre.",
+                "rule": "avg_trials_per_window < 30",
+            })
+
+    # Final backtest underperformance vs Buy & Hold.
+    if isinstance(final_backtest_summary, dict) and final_backtest_summary:
+        outperf = final_backtest_summary.get("outperformance_vs_buy_hold_pct")
+        if isinstance(outperf, (int, float)) and np.isfinite(float(outperf)):
+            outperf = float(outperf)
+            if outperf < -5.0:
+                sev = "high" if outperf < -12.0 else "medium"
+                alerts.append({
+                    "type": "final_backtest_underperformance",
+                    "severity": sev,
+                    "message": (
+                        "Final backtest sous-performe le buy&hold "
+                        f"de {abs(outperf):.2f} points de pourcentage."
+                    ),
+                    "rule": "strategy_return - buy_hold_return < -5%",
+                })
+
+    return alerts
+
+def _expert_prompt_templates_path():
+    folder = os.path.join(os.path.dirname(__file__), "reports", "expert")
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, "prompt_templates.json")
+
+def _load_expert_prompt_templates():
+    path = _expert_prompt_templates_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        templates = data.get("templates", {})
+        return templates if isinstance(templates, dict) else {}
+    except Exception:
+        return {}
+
+def _save_expert_prompt_templates(templates):
+    path = _expert_prompt_templates_path()
+    payload = {
+        "schema_version": "expert_prompt_templates.v1",
+        "updated_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "templates": templates if isinstance(templates, dict) else {},
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+def _render_deterministic_alerts(alerts):
+    if not alerts:
+        st.info("Aucune alerte déterministe déclenchée.")
+        return
+    severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+    sorted_alerts = sorted(
+        [a for a in alerts if isinstance(a, dict)],
+        key=lambda a: severity_rank.get(str(a.get("severity", "low")).lower(), 0),
+        reverse=True
+    )
+    for alert in sorted_alerts:
+        sev = str(alert.get("severity", "low")).lower()
+        msg = str(alert.get("message", "Alerte"))
+        typ = str(alert.get("type", "other"))
+        rule = str(alert.get("rule", ""))
+        text = f"[{typ}] {msg}"
+        if rule:
+            text += f"\nRègle: {rule}"
+        if sev in {"critical", "high"}:
+            st.error(text)
+        elif sev == "medium":
+            st.warning(text)
+        else:
+            st.info(text)
+
 def _build_expert_input_data(results, current_conf):
     if not isinstance(results, dict):
         return None
@@ -599,6 +937,19 @@ def _build_expert_input_data(results, current_conf):
     if isinstance(adaptive_guidance, list) and len(adaptive_guidance) > 60:
         adaptive_guidance = adaptive_guidance[-60:]
 
+    strategy_context = _build_strategy_context_for_expert(current_conf)
+    final_backtest_summary = _extract_final_backtest_for_expert(
+        results=results,
+        current_conf=current_conf,
+        df_source=st.session_state.get("df")
+    )
+    deterministic_alerts = _compute_deterministic_expert_alerts(
+        results=results,
+        current_conf=current_conf,
+        trials_df=trials_df,
+        final_backtest_summary=final_backtest_summary
+    )
+
     return ExpertInputData(
         context=context,
         out_of_sample_performance=results.get("out_of_sample_performance", []),
@@ -612,6 +963,9 @@ def _build_expert_input_data(results, current_conf):
             "total_trials_compact_source": compact_trials.get("total_trials", 0),
             "parameters_included_in_trials": compact_trials.get("parameters_used", []),
         },
+        strategy_context=strategy_context,
+        deterministic_alerts=deterministic_alerts,
+        final_backtest=final_backtest_summary,
     )
 
 def _render_interpretation_guide(points):
@@ -656,6 +1010,52 @@ def _build_expert_markdown_report(result_json, meta=None):
     lines.append(f"- Niveau de détail: `{detail}`")
     lines.append("")
 
+    deterministic_alerts = meta.get("deterministic_alerts", []) if isinstance(meta, dict) else []
+    if isinstance(deterministic_alerts, list) and deterministic_alerts:
+        lines.append("## Alertes automatiques (règles déterministes)")
+        for a in deterministic_alerts:
+            if not isinstance(a, dict):
+                continue
+            sev = _expert_value_to_text(a.get("severity")).upper()
+            typ = _expert_value_to_text(a.get("type"))
+            msg = _expert_value_to_text(a.get("message"))
+            rule = _expert_value_to_text(a.get("rule"))
+            lines.append(f"- [{sev}] {typ}: {msg}")
+            if rule != "insufficient_data":
+                lines.append(f"  - Règle: {rule}")
+        lines.append("")
+
+    fb_assessment = r.get("final_backtest_assessment", {})
+    fb_meta = meta.get("final_backtest", {}) if isinstance(meta, dict) else {}
+    if (isinstance(fb_assessment, dict) and fb_assessment) or (isinstance(fb_meta, dict) and fb_meta):
+        lines.append("## Final Backtest")
+        if isinstance(fb_assessment, dict) and fb_assessment:
+            lines.append(f"- Synthèse IA: {_expert_value_to_text(fb_assessment.get('summary'))}")
+            lines.append(f"- Return stratégie: **{_expert_value_to_text(fb_assessment.get('strategy_return_pct'))}%**")
+            lines.append(f"- Return buy&hold: **{_expert_value_to_text(fb_assessment.get('buy_hold_return_pct'))}%**")
+            lines.append(
+                f"- Sur/Sous-performance vs buy&hold: **{_expert_value_to_text(fb_assessment.get('outperformance_vs_buy_hold_pct'))} pts**"
+            )
+            lines.append(f"- Max Drawdown: **{_expert_value_to_text(fb_assessment.get('max_drawdown_pct'))}%**")
+            lines.append(f"- Sharpe: **{_expert_value_to_text(fb_assessment.get('sharpe'))}**")
+            lines.append(f"- Win Rate: **{_expert_value_to_text(fb_assessment.get('win_rate_pct'))}%**")
+            lines.append(f"- Nombre de trades: **{_expert_value_to_text(fb_assessment.get('n_trades'))}**")
+            comment = _expert_value_to_text(fb_assessment.get("comment"))
+            if comment != "insufficient_data":
+                lines.append(f"- Commentaire: {comment}")
+        elif isinstance(fb_meta, dict) and fb_meta:
+            # Fallback when LLM did not produce final_backtest_assessment.
+            lines.append(f"- Return stratégie: **{_expert_value_to_text(fb_meta.get('strategy_total_return_pct'))}%**")
+            lines.append(f"- Return buy&hold: **{_expert_value_to_text(fb_meta.get('buy_hold_return_pct'))}%**")
+            lines.append(
+                f"- Sur/Sous-performance vs buy&hold: **{_expert_value_to_text(fb_meta.get('outperformance_vs_buy_hold_pct'))} pts**"
+            )
+            lines.append(f"- Max Drawdown: **{_expert_value_to_text(fb_meta.get('strategy_max_drawdown_pct'))}%**")
+            lines.append(f"- Sharpe: **{_expert_value_to_text(fb_meta.get('strategy_sharpe'))}**")
+            lines.append(f"- Win Rate: **{_expert_value_to_text(fb_meta.get('strategy_win_rate_pct'))}%**")
+            lines.append(f"- Nombre de trades: **{_expert_value_to_text(fb_meta.get('strategy_n_trades'))}**")
+        lines.append("")
+
     ga = r.get("global_assessment", {})
     if isinstance(ga, dict) and ga:
         lines.append("## Évaluation globale")
@@ -681,6 +1081,17 @@ def _build_expert_markdown_report(result_json, meta=None):
                 lines.append(f"   - Preuves:")
                 for e in ev[:5]:
                     lines.append(f"     - {str(e)}")
+        lines.append("")
+
+    strategy_alignment = r.get("strategy_alignment", {})
+    if isinstance(strategy_alignment, dict) and strategy_alignment:
+        lines.append("## Alignement avec la logique stratégie")
+        lines.append(f"- Cohérence logique d'entrée: **{_expert_value_to_text(strategy_alignment.get('entry_logic_fit'))}**")
+        lines.append(f"- Cohérence logique de sortie: **{_expert_value_to_text(strategy_alignment.get('exit_logic_fit'))}**")
+        comments = strategy_alignment.get("comments", [])
+        if isinstance(comments, list) and comments:
+            for c in comments[:6]:
+                lines.append(f"- {str(c)}")
         lines.append("")
 
     gen = r.get("is_oos_generalization", {})
@@ -3493,8 +3904,38 @@ if 'wfo_results' in st.session_state:
                     key="expert_include_raw_evidence",
                 )
 
-        # Prompt preview/editing (single-agent MVP): user can inspect and override prompts before launch.
+        # Prompt preview/editing (phase 1): strategy-aware input + deterministic alerts + template management.
         expert_input_preview = _build_expert_input_data(results, current_conf)
+        preview_alerts = expert_input_preview.deterministic_alerts if expert_input_preview else []
+        preview_strategy = expert_input_preview.strategy_context if expert_input_preview else {}
+        preview_final_backtest = expert_input_preview.final_backtest if expert_input_preview else {}
+
+        st.markdown("#### Pré-diagnostic automatique (sans IA)")
+        _render_deterministic_alerts(preview_alerts)
+
+        with st.expander("Contexte stratégie transmis à l'Expert", expanded=False):
+            if preview_strategy:
+                st.markdown("**Modules de sortie actifs**")
+                st.write(preview_strategy.get("exit_modules", {}))
+                st.markdown("**Paramètres d'entrée optimisés**")
+                st.write(preview_strategy.get("entry_params_enabled", []))
+                st.markdown("**Paramètres de sortie optimisés**")
+                st.write(preview_strategy.get("exit_params_enabled", []))
+                st.markdown("**Règles d'entrée (résumé)**")
+                for item in preview_strategy.get("entry_logic_summary", []):
+                    st.markdown(f"- {item}")
+                st.markdown("**Règles de sortie (résumé)**")
+                for item in preview_strategy.get("exit_logic_summary", []):
+                    st.markdown(f"- {item}")
+            else:
+                st.info("Contexte stratégie indisponible.")
+
+        with st.expander("Résumé final backtest transmis à l'Expert", expanded=False):
+            if isinstance(preview_final_backtest, dict) and preview_final_backtest:
+                st.write(preview_final_backtest)
+            else:
+                st.info("Aucune donnée de final backtest disponible pour ce run.")
+
         preview_req = ExpertRequest(
             mode=expert_mode,
             detail_level=expert_detail_level,
@@ -3533,6 +3974,60 @@ if 'wfo_results' in st.session_state:
             st.session_state["expert_system_prompt_edit"] = default_system_prompt
         if "expert_user_prompt_edit" not in st.session_state:
             st.session_state["expert_user_prompt_edit"] = default_user_prompt
+
+        templates = _load_expert_prompt_templates()
+        template_names = sorted(list(templates.keys()))
+        st.markdown("#### Templates de prompts")
+        tpl_c1, tpl_c2 = st.columns([1.4, 1])
+        with tpl_c1:
+            selected_tpl_name = st.selectbox(
+                "Template existant",
+                options=["(aucun)"] + template_names,
+                key="expert_prompt_template_select",
+                help="Sélectionne un template sauvegardé pour le charger ou le supprimer."
+            )
+        with tpl_c2:
+            new_tpl_name = st.text_input(
+                "Nom template",
+                key="expert_prompt_template_name",
+                placeholder="ex: strategy_v2_fr"
+            )
+
+        tpl_btn_1, tpl_btn_2, tpl_btn_3 = st.columns([1, 1, 1])
+        with tpl_btn_1:
+            if st.button("Sauvegarder template", key="expert_prompt_template_save", width="stretch"):
+                target_name = str(new_tpl_name or "").strip()
+                if not target_name:
+                    st.warning("Renseigne un nom de template avant sauvegarde.")
+                else:
+                    templates[target_name] = {
+                        "updated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                        "mode": expert_mode,
+                        "detail_level": expert_detail_level,
+                        "system_prompt": str(st.session_state.get("expert_system_prompt_edit", "")),
+                        "user_prompt": str(st.session_state.get("expert_user_prompt_edit", "")),
+                    }
+                    _save_expert_prompt_templates(templates)
+                    st.success(f"Template `{target_name}` sauvegardé.")
+        with tpl_btn_2:
+            if st.button("Charger template", key="expert_prompt_template_load", width="stretch"):
+                if selected_tpl_name == "(aucun)" or selected_tpl_name not in templates:
+                    st.warning("Sélectionne un template valide à charger.")
+                else:
+                    selected_tpl = templates[selected_tpl_name]
+                    st.session_state["expert_system_prompt_edit"] = str(selected_tpl.get("system_prompt", default_system_prompt))
+                    st.session_state["expert_user_prompt_edit"] = str(selected_tpl.get("user_prompt", default_user_prompt))
+                    st.success(f"Template `{selected_tpl_name}` chargé.")
+                    st.rerun()
+        with tpl_btn_3:
+            if st.button("Supprimer template", key="expert_prompt_template_delete", width="stretch"):
+                if selected_tpl_name == "(aucun)" or selected_tpl_name not in templates:
+                    st.warning("Sélectionne un template valide à supprimer.")
+                else:
+                    templates.pop(selected_tpl_name, None)
+                    _save_expert_prompt_templates(templates)
+                    st.success(f"Template `{selected_tpl_name}` supprimé.")
+                    st.rerun()
 
         c_prompt_a, c_prompt_b = st.columns([1.2, 1.2])
         with c_prompt_a:
@@ -3614,6 +4109,9 @@ if 'wfo_results' in st.session_state:
                             "timings_ms": response.timings_ms,
                             "warnings": response.warnings,
                             "run_id": response.run_id,
+                            "deterministic_alerts": expert_input.deterministic_alerts,
+                            "strategy_context": expert_input.strategy_context,
+                            "final_backtest": expert_input.final_backtest,
                             "used_system_prompt": user_system_prompt,
                             "used_user_prompt": user_prompt,
                         }
@@ -3640,6 +4138,8 @@ if 'wfo_results' in st.session_state:
                     "provider": expert_last.get("model_info", {}).get("provider"),
                     "model": expert_last.get("model_info", {}).get("model"),
                     "latency_ms": expert_last.get("timings_ms", {}).get("total"),
+                    "deterministic_alerts": expert_last.get("deterministic_alerts", []),
+                    "final_backtest": expert_last.get("final_backtest", {}),
                 }
             )
 

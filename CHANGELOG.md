@@ -60,3 +60,14 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 - Bouton `Charger prompts auto` pour régénérer le prompt par défaut à partir du contexte courant.
 - Lancement de l'analyse avec les prompts réellement modifiés par l'utilisateur.
 - Prompt codé mis à jour: réponse exigée en français avec tolérance aux anglicismes métier.
+## 2026-02-10
+
+- Upgrade Expert IA Phase 1:
+- Prompt Expert orienté stratégie: injection du contexte entrée/sortie, modules de sortie actifs et rôle des paramètres.
+- Ajout d'alertes déterministes (sans LLM) affichées avant l'analyse: overfitting IS/OOS, instabilité paramètres, insuffisance de trials, runs peu concluants.
+- Ajout d'une gestion de templates de prompts dans l'UI Expert (sauvegarder/charger/supprimer).
+- Rapport Expert enrichi avec section d'alertes déterministes et section d'alignement stratégie.
+- Couverture explicite du final backtest dans l'Expert:
+- Transmission des métriques finales (return, sharpe, drawdown, win rate, trades) et comparaison buy&hold quand disponibles.
+- Affichage du résumé final backtest transmis dans l'UI Expert.
+- Prompt mis à jour pour exiger une section d'analyse `final_backtest_assessment`.
