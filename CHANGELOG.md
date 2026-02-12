@@ -2,6 +2,122 @@
 
 Toutes les évolutions notables de l'application WFO sont documentées ici.
 
+## 2026-02-12
+
+- V3 block 1 implémenté: premier mode `pine_imported` exécutable pour la stratégie de test `docs/wfoe_v3/strategy_test.txt`.
+- Ajout d'un runtime dédié `apps/wfo_engine/pine_v3/runtime_adapter.py`:
+  - génération des signaux d'entrée/sortie BB + SMA (version test),
+  - backtest scalaire et vectorisé compatible avec le moteur WFO existant.
+- Résolution d'adapter étendue (`apps/wfo_engine/strategy_adapters.py`):
+  - `resolve_strategy_adapter` retourne désormais un adapter Pine pour `strategy_test` (ID alias/source reconnue),
+  - messages d'erreur explicites pour les autres stratégies Pine non encore supportées.
+- Déblocage du lancement WFO en UI pour le cas supporté:
+  - vérification de compatibilité stricte conservée,
+  - validation runtime via `resolve_strategy_adapter` avant lancement.
+- Final backtest UI rendu agnostique du mode stratégie:
+  - remplacement des appels directs `run_backtest` par `strategy_adapter.run_backtest` (cas classique et "Rejouer une fenêtre").
+- `get_param_grid` adapté en mode `pine_imported`:
+  - SAR/MACD forcés à `False` pour éviter des combinaisons inutiles sur la stratégie test.
+- Tests ajoutés: `apps/wfo_engine/tests/test_pine_strategy_test_adapter.py` (résolution adapter + exécution scalaire/vectorisée).
+- Import Pine enrichi: la stratégie peut désormais être accompagnée de fichiers de librairie (`.txt/.pine`) via l'UI.
+  - Persistance locale des librairies dans `reports/pine_imports/`.
+  - Précheck Pine enrichi avec le contexte librairies (compte/noms fournis).
+  - Export ZIP des librairies (`pine_libraries_manifest.json` + `pine_libraries/*`) et rechargement renforcé côté replay.
+  - Traçabilité ajoutée dans `config`/`results.json` (`pine_library_files`, `pine_library_names`, `pine_library_paths`).
+- P1.3 (phase assistée) amorcé: mapping explicite des imports Pine vers des modules Python locaux.
+  - UI ajoutée: section "Mapping imports Pine -> modules Python" avec validation immédiate des cibles (`.py` local ou module importable).
+  - Précheck enrichi avec `import_resolution` (résolu/non résolu par import), compteurs et mapping saisi utilisateur.
+  - Compatibilité `strict` ajustée: un import externe devient non-bloquant si 100% des imports sont résolus (fichier librairie + mapping Python valide).
+  - Export/replay enrichi: `pine_import_mapping` dans `results.json` et `import_mapping.json` dans le ZIP.
+  - `strategy_spec.v1` enrichi avec `imports_detail` et `import_resolution` (si disponibles).
+- Branchement runtime du mapping imports (phase assistée):
+  - `resolve_strategy_adapter(...)` transmet désormais la config Pine complète au runtime adapter.
+  - En mode `pine_imported`, le strict est appliqué côté resolver si `pine_compatibility_blocking=true` (même hors UI).
+  - Le runtime `strategy_test` charge les modules Python mappés (alias Pine) et tente d'utiliser `BBT1.cross_bbw_low_signal` quand disponible, avec fallback sécurisé sur l'implémentation locale.
+  - Tests étendus sur l'adapter (`strict blocking` + propagation `runtime_config`).
+- Analyse des fonctions importées renforcée (précheck):
+  - extraction des appels `Alias.fonction(...)` dans la stratégie Pine,
+  - extraction des fonctions déclarées dans les fichiers de librairie Pine fournis,
+  - comparaison automatique appelées/trouvées/manquantes par import (`import_resolution` enrichi),
+  - intégration des compteurs de couverture dans le score de compatibilité strict.
+- P1.1 amorcé: génération déterministe de module Python depuis `strategy_spec.v1`:
+  - nouveau module `apps/wfo_engine/pine_v3/codegen.py` (`generate_strategy_module_from_spec`),
+  - génération d'un `generated_strategy.py` persistant dans `reports/pine_imports/generated/`,
+  - affichage du module généré dans l'UI (section "Generated Strategy Module (P1.1)"),
+  - export/replay ZIP enrichi avec `generated_strategy.py`,
+  - `resolve_strategy_adapter` charge dynamiquement le module généré si disponible.
+- Ajout d'une brique MTF V3 dédiée `apps/wfo_engine/pine_v3/mtf.py` pour préparer le support `request.security`:
+  - helpers `resample_ohlcv`, `realign_series_to_base`, `request_security_series`, `request_security_signal`.
+  - alignement anti-lookahead via `realign_opening`/`realign_closing` (VectorBT Pro).
+  - tests unitaires ajoutés: `apps/wfo_engine/tests/test_pine_v3_mtf.py`.
+
+## 2026-02-11
+
+- Lancement du lot 0 de cadrage pour WFOE V3 (support Pine Script v6) avec nouveaux livrables dans `docs/wfoe_v3/`:
+- `README.md`: perimetre, references et objectifs du lot 0.
+- `compatibilite_pine_v6.md`: matrice de compatibilite Pine v6 (niveaux S0/S1/S2/S3) et scope V3 initial.
+- `architecture_cible_v3.md`: architecture cible, interface `StrategyAdapter`, pipeline d'artefacts et integration au moteur existant.
+- `backlog_v3_p0_p1_p2.md`: backlog priorise avec criteres d'acceptation (P0/P1/P2) et estimation de charge.
+- `risques_et_garde_fous.md`: registre de risques, mitigations et Definition of Done lot 0.
+- Implementation P0.1 (mode strategie) dans WFOE:
+- Ajout des champs `strategy_mode` et `strategy_id` dans la config et la persistance JSON.
+- Ajout des controles UI `Strategy Mode`/`Strategy ID` dans `WFO Engine Settings`.
+- Blocage explicite du lancement en mode `pine_imported` (non executable a ce stade) avec message utilisateur.
+- Propagation de `strategy_mode`/`strategy_id` dans la tracabilite run (UI + exports).
+- Validation defensive cote services (`run_service.py` et `main.py`) pour refuser les modes non supportes.
+- Implementation P0.2 (import + pre-analyse Pine):
+- Ajout d'un importeur `Import Pine Strategy (.txt/.pine)` dans la section `WFO Engine Settings` quand `Strategy Mode = pine_imported`.
+- Sauvegarde locale du fichier importe dans `reports/pine_imports/` pour tracabilite et reprise de session.
+- Ajout d'une pre-analyse syntaxique minimale:
+  - verification `//@version`
+  - verification presence `strategy(...)`
+  - detection de features critiques (`request.security`, `request.security_lower_tf`, ordres `strategy.*`, `import`)
+  - statut `valid/invalid` avec erreurs et avertissements actionnables.
+- Exposition des metadonnees Pine dans la configuration sauvegardee (`pine_file_path`, `pine_precheck_status`, `pine_source_sha1`, etc.).
+- Implementation P0.3 (rapport de compatibilite Pine):
+- Ajout d'un mode de compatibilite Pine (`strict`, `assist`, `manual`) dans l'UI.
+- Generation d'un rapport de compatibilite `pine_compatibility.v1` (niveaux S0/S1/S2/S3) base sur la pre-analyse.
+- Calcul d'un score de compatibilite, liste des items bloquants et recommandations actionnables.
+- Blocage explicite en mode `strict` si incompatibilites S0 detectees.
+- Export du rapport dans les artefacts (`results.json`, `pine_compatibility_report.json`, `pine_precheck_report.json`) et rechargement depuis ZIP.
+- Implementation P0.4 (`strategy_spec.v1` + validation schema):
+- Ajout d'un module dedie `apps/wfo_engine/pine_v3/spec.py` pour:
+  - generer un `strategy_spec.v1` a partir d'un script Pine (metadata source, imports, inputs, capabilities),
+  - valider strictement le contrat JSON via `strategy_spec_validation.v1`.
+- Integration UI: generation/validation automatique du spec apres pre-analyse Pine valide, avec panneau de lecture du spec et des erreurs/warnings de validation.
+- Persistance du spec dans la configuration courante (`strategy_spec_schema_version`, `strategy_spec_valid`, `strategy_spec_sha256`).
+- Export/reimport des artefacts spec dans les ZIP:
+  - `strategy_spec.v1.json`
+  - `strategy_spec_validation.json`
+  - + miroir dans `results.json` pour exploitation ulterieure.
+- Implementation P0.5 (`StrategyAdapter` + branchement moteur):
+- Ajout du module `apps/wfo_engine/strategy_adapters.py` avec:
+  - interface `StrategyAdapter`,
+  - implementation `ATDMFAdapter` (mode natif),
+  - resolver central `resolve_strategy_adapter(...)`.
+- Refactor du moteur WFO et adaptatif pour supprimer les appels directs `run_backtest`:
+  - `wfo.py` et `adaptive_optimization.py` utilisent désormais `strategy_adapter.run_backtest(...)`.
+- Propagation de l'adapter depuis l'orchestration:
+  - `services/run_service.py` résout l'adapter selon `strategy_mode/strategy_id` et l'injecte dans les moteurs.
+  - `main.py` utilise aussi l'adapter (y compris pour le final backtest CLI).
+- Résultat: le moteur d'optimisation est découplé de la logique ATDMF en dur, prêt pour les adapters Pine futurs.
+- Correction du chemin vectorisé grid pour éviter les fallback intempestifs:
+  - Normalisation robuste des paramètres array/scalaires dans `strategy.py` (chunks len=1/len>1).
+  - Alignement des colonnes de signaux vectorisés (notamment `SMAExit` en `per_column=True`).
+  - Gestion sûre des paramètres d'exécution (`order_sizing_mode`, `order_fixed_cash`, `fees_pct`) en mode vectorisé.
+- Implémentation P0.6 (export artefacts V3 + rechargement renforcé):
+  - Export explicite dans le ZIP des artefacts standards V3:
+    - `strategy_source.pine.txt`
+    - `compatibility_report.json`
+    - `strategy_spec.v1.json`
+    - `generation_trace.json`
+  - Ajout d'un manifeste d'artefacts (`pine_artifacts_manifest.json`) et propagation dans `replay_manifest.json`.
+  - Rechargement ZIP renforcé:
+    - lecture des noms canoniques + legacy,
+    - persistance locale de la source Pine rechargée dans `reports/pine_imports/`,
+    - auto-validation du `strategy_spec` si le fichier de validation est absent,
+    - injection des artefacts Pine dans le contexte Expert pour exploitation analytique.
+
 ## 2026-02-08
 
 - Ajout d'une traçabilité d'exécution dans l'UI et les exports:
@@ -62,6 +178,47 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 - Prompt codé mis à jour: réponse exigée en français avec tolérance aux anglicismes métier.
 ## 2026-02-10
 
+- Isolation complète de WFO Engine dans un dossier dédié:
+- Déplacement des scripts coeur (`app.py`, `main.py`, `wfo.py`, `strategy.py`, `indicators.py`, `data_loading.py`, `config.py`, `adaptive_optimization.py`, `visualization.py`, `wfo_save.py`) vers `apps/wfo_engine/`.
+- Déplacement des packages associés (`expert/`, `domain/`, `services/`, `ui/`) vers `apps/wfo_engine/`.
+- Déplacement des tests WFO vers `apps/wfo_engine/tests/`.
+- Ajout de `apps/wfo_engine/README.md` et `apps/wfo_engine/requirements.txt`.
+- Mise à jour des chemins de CI et des instructions de validation (`CONTRIBUTING.md`, PR template, README).
+- Ajout d'un launcher unique `scripts/run_wfoe.sh` pour lancer WFO Engine sans retenir les chemins.
+- Nettoyage racine: suppression des fichiers non liés à l'exécution (`BACKEND_INFO.txt`, `BAYESIAN_CONFIG.txt`, `BAYESIAN_LIMITS.txt`, `PARALLEL_BACKEND_STATUS.txt`, `GEMINI.md`), suppression du doublon `requirements.txt` racine et purge des caches (`.ipynb_checkpoints/`, `__pycache__/`, `.pytest_cache/`).
+- Harmonisation du nommage des exports ZIP de résultats: `Save Results to Disk` utilise désormais la même règle que `Save Config` (mêmes composantes période/timeframe/méthode/fenêtres/trials/régime), avec préfixe `results_wfo_...zip`.
+- UX Templates Expert améliorée: boutons `Sauvegarder/Charger/Supprimer` désormais désactivés quand l'action n'est pas possible, messages d'aide explicites, et ajout d'un module `Importer/Exporter templates JSON` (modes `Fusionner` ou `Remplacer`).
+- Correctif prise en compte des templates Expert:
+- Résolution des alias de clés de prompts lors du chargement/import (`system_prompt/system/prompt_system`, `user_prompt/user/prompt/...`).
+- Verrouillage automatique des prompts custom après chargement de template pour éviter l'écrasement silencieux.
+- Affichage du `Template actif` et du `Template utilisé pour cette analyse` pour vérification explicite.
+- Injection automatique du contexte WFO dans le prompt utilisateur template si absent (ou via placeholder `{{AUTO_WFO_CONTEXT}}`) pour éviter les diagnostics "insufficient_data" sur runs valides.
+- Persistance templates Expert fiabilisée après réorganisation du repo:
+- Chemin canonique des templates unifié vers `reports/expert/prompt_templates.json` (racine repo).
+- Chargement rétrocompatible avec l'ancien chemin et auto-migration/fusion des templates existants.
+- Affichage des rapports Expert sauvegardés dans l'UI:
+- Ajout d'un panneau "Historique des rapports Expert sauvegardés" permettant de sélectionner/charger un fichier `reports/expert/expert_*.json` dans `expert_last_response`.
+- Ajout d'un bouton de purge de l'affichage courant (`Vider rapport affiché`).
+- Durcissement du chemin de persistance `ExpertStorage` pour écrire de manière canonique dans `reports/expert/` indépendamment du dossier de lancement.
+- Correctif UX Templates Expert: suppression de l'exception Streamlit `cannot be modified after the widget ... is instantiated` via un mécanisme de verrouillage différé (`expert_lock_prompts_pending`) appliqué avant instanciation du checkbox.
+- Export PDF ajouté:
+- Nouveau bouton sidebar `📄 Générer rapport PDF` dans `Export Results`.
+- Génération d'un rapport PDF multi-pages incluant synthèse WFO, comparaison IS/OOS, stabilité paramétrique et résumé/courbe du final backtest (quand disponible).
+- Nouveau bouton `⬇️ Download Report (PDF)` et sauvegarde disque avec nommage harmonisé `report_wfo_<...>.pdf`.
+
+- Réorganisation multi-apps:
+- Déplacement de `dbad_app.py` vers `apps/dbad/app.py`.
+- Déplacement de `analyze_exit_signals.py` vers `apps/exit_signals/analyze_exit_signals.py`.
+- Déplacement de `exit_signal_app.py` vers `apps/exit_signals/exit_signal_app.py`.
+- Ajout de `README.md` et `requirements.txt` dédiés dans `apps/dbad/` et `apps/exit_signals/`.
+
+- Durcissement rapide de la gouvernance GitHub:
+- Ajout d'un workflow CI minimal (`.github/workflows/ci.yml`) avec `pytest -q` et vérification de syntaxe (`py_compile`).
+- Ajout d'un template de Pull Request (`.github/pull_request_template.md`).
+- Ajout des politiques `CONTRIBUTING.md` et `SECURITY.md`.
+- Ajout d'un fichier `LICENSE` propriétaire (all rights reserved).
+- Renforcement de `.gitignore` pour ignorer caches Python/Jupyter, secrets Streamlit et artefacts locaux volumineux (`Data/`, `reports/`, `fichiers_configuration_WFO/`).
+
 - Upgrade Expert IA Phase 1:
 - Prompt Expert orienté stratégie: injection du contexte entrée/sortie, modules de sortie actifs et rôle des paramètres.
 - Ajout d'alertes déterministes (sans LLM) affichées avant l'analyse: overfitting IS/OOS, instabilité paramètres, insuffisance de trials, runs peu concluants.
@@ -89,3 +246,7 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 - Alignement du même correctif dans le moteur adaptatif.
 - Documentation interne renforcée:
 - Ajout de docstrings sur les fonctions principales (`app.py`, `data_loading.py`, `wfo.py`, `expert/*`, `config.py`) pour améliorer lisibilité et maintenance.
+- Correctif chemin vectorisé `grid` (suppression fallback lié aux colonnes dupliquées):
+- Cause racine: alignement many-to-many Pandas sur colonnes MultiIndex non uniques dans `create_signal_generators`, provoquant une explosion de dimensions (`32 -> 131072`) lors des masques `exit`.
+- Correction: normalisation systématique des colonnes d'indicateurs en `RangeIndex` uniques avant opérations booléennes et alignements.
+- Correction de régression scalaire associée: gestion explicite du cas `Series` pour `sar_exit_signal` afin d'éviter `AttributeError: 'Series' object has no attribute 'columns'`.
