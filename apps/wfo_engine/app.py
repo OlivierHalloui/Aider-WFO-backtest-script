@@ -101,6 +101,9 @@ from pine_v3.mtf_parity import (
 from pine_v3.runtime_adapter import (
     build_request_security_diagnostics as _build_request_security_diagnostics,
 )
+from pine_v3.llm_migration import (
+    run_llm_spec_migration as _run_llm_spec_migration,
+)
 
 # Set page config
 st.set_page_config(
@@ -571,6 +574,7 @@ def _build_results_payload():
         "pine_codegen_report": st.session_state.get("pine_codegen_report"),
         "pine_generated_module_path": st.session_state.get("pine_generated_module_path"),
         "pine_generation_trace": st.session_state.get("pine_generation_trace"),
+        "pine_llm_migration_report": st.session_state.get("pine_llm_migration_report"),
         "pine_artifacts_manifest": st.session_state.get("pine_artifacts_manifest"),
         "pine_beta_readiness_report": st.session_state.get("pine_beta_readiness_report"),
         "pine_execution_gate_report": st.session_state.get("pine_execution_gate_report"),
@@ -708,6 +712,7 @@ def _build_pine_artifacts_summary_for_expert():
     spec = st.session_state.get("pine_strategy_spec")
     spec_validation = st.session_state.get("pine_strategy_spec_validation")
     trace = st.session_state.get("pine_generation_trace")
+    llm_migration_report = st.session_state.get("pine_llm_migration_report")
     codegen = st.session_state.get("pine_codegen_report")
     beta_readiness = st.session_state.get("pine_beta_readiness_report")
     execution_gate = st.session_state.get("pine_execution_gate_report")
@@ -797,6 +802,11 @@ def _build_pine_artifacts_summary_for_expert():
             "import_mapping_keys": sorted([str(k) for k in import_mapping.keys()]),
             "inputs_count": len(spec.get("inputs") or []) if isinstance(spec, dict) else 0,
             "generation_trace": trace if isinstance(trace, dict) else {},
+            "llm_migration_status": (
+                llm_migration_report.get("status")
+                if isinstance(llm_migration_report, dict)
+                else None
+            ),
             "codegen_status": (codegen.get("status") if isinstance(codegen, dict) else None),
             "beta_ready": bool(beta_readiness.get("beta_ready")) if isinstance(beta_readiness, dict) else None,
             "beta_readiness_score": (
@@ -1990,6 +2000,9 @@ def _build_pine_generation_trace(
     mapping = import_mapping if isinstance(import_mapping, dict) else {}
     codegen = codegen_report if isinstance(codegen_report, dict) else {}
     generated_path = str(generated_module_path or "").strip()
+    llm_report = st.session_state.get("pine_llm_migration_report")
+    llm_report = llm_report if isinstance(llm_report, dict) else {}
+    llm_trace = llm_report.get("trace") if isinstance(llm_report.get("trace"), dict) else {}
 
     has_any = (
         bool(src.get("text"))
@@ -2001,8 +2014,7 @@ def _build_pine_generation_trace(
         or bool(mapping)
         or bool(codegen)
         or bool(generated_path)
-        or bool(parity_ref_payload)
-        or bool(parity_ref_validation)
+        or bool(llm_report)
     )
     if not has_any:
         return {}
@@ -2059,7 +2071,16 @@ def _build_pine_generation_trace(
             "imports_count": len(spec.get("imports") or []) if spec else 0,
             "inputs_count": len(spec.get("inputs") or []) if spec else 0,
         },
-        "llm_used": False,
+        "llm_used": bool(llm_report),
+        "llm_migration": {
+            "status": llm_report.get("status"),
+            "provider": llm_trace.get("provider"),
+            "model": llm_trace.get("model"),
+            "candidate_valid": llm_trace.get("candidate_valid"),
+            "accepted_spec_sha256": llm_trace.get("accepted_spec_sha256"),
+            "errors": llm_report.get("errors", []),
+            "warnings": llm_report.get("warnings", []),
+        },
     }
     return _sanitize_for_json(trace)
 
@@ -2134,6 +2155,7 @@ def _build_pine_artifacts_manifest(
             "has_strategy_spec": bool(spec),
             "has_strategy_spec_validation": bool(spec_val),
             "has_generation_trace": bool(trace),
+            "has_llm_migration_report": bool((trace.get("llm_used")) if isinstance(trace, dict) else False),
             "has_beta_readiness_report": bool(beta),
             "has_execution_gate_report": bool(gate),
             "has_parity_report": bool(parity),
@@ -2167,6 +2189,7 @@ def _build_pine_artifacts_manifest(
                 "strategy_spec_validation": "strategy_spec_validation.json",
                 "generated_strategy_module": "generated_strategy.py",
                 "generation_trace": "generation_trace.json",
+                "llm_migration_report": "pine_llm_migration_report.json",
                 "beta_readiness_report": "pine_beta_readiness_report.json",
                 "execution_gate_report": "pine_execution_gate_report.json",
                 "parity_report": "pine_parity_report.json",
@@ -2300,6 +2323,9 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
         st.session_state["pine_generation_trace"] = pine_generation_trace
     else:
         st.session_state.pop("pine_generation_trace", None)
+        st.session_state.pop("pine_llm_migration_report", None)
+        st.session_state.pop("pine_llm_override_spec", None)
+        st.session_state.pop("pine_llm_override_source_sha1", None)
     if isinstance(pine_beta_readiness_report, dict) and pine_beta_readiness_report:
         st.session_state["pine_beta_readiness_report"] = pine_beta_readiness_report
     else:
@@ -2454,6 +2480,12 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
             zf.writestr("generation_trace.json", json.dumps(pine_generation_trace, indent=2, ensure_ascii=False))
             # Backward-compatible alias.
             zf.writestr("pine_generation_trace.json", json.dumps(pine_generation_trace, indent=2, ensure_ascii=False))
+        pine_llm_migration_report = st.session_state.get("pine_llm_migration_report")
+        if isinstance(pine_llm_migration_report, dict) and pine_llm_migration_report:
+            zf.writestr(
+                "pine_llm_migration_report.json",
+                json.dumps(pine_llm_migration_report, indent=2, ensure_ascii=False),
+            )
         if isinstance(pine_artifacts_manifest, dict) and pine_artifacts_manifest:
             zf.writestr("pine_artifacts_manifest.json", json.dumps(pine_artifacts_manifest, indent=2, ensure_ascii=False))
 
@@ -3439,6 +3471,9 @@ def _load_results_zip(zip_file):
         st.session_state.pop("pine_codegen_report", None)
         st.session_state.pop("pine_generated_module_path", None)
         st.session_state.pop("pine_generation_trace", None)
+        st.session_state.pop("pine_llm_migration_report", None)
+        st.session_state.pop("pine_llm_override_spec", None)
+        st.session_state.pop("pine_llm_override_source_sha1", None)
         st.session_state.pop("pine_artifacts_manifest", None)
         st.session_state.pop("pine_beta_readiness_report", None)
         st.session_state.pop("pine_execution_gate_report", None)
@@ -3507,6 +3542,9 @@ def _load_results_zip(zip_file):
                 pine_trace = payload.get("pine_generation_trace")
                 if isinstance(pine_trace, dict):
                     st.session_state["pine_generation_trace"] = pine_trace
+                pine_llm_report = payload.get("pine_llm_migration_report")
+                if isinstance(pine_llm_report, dict):
+                    st.session_state["pine_llm_migration_report"] = pine_llm_report
                 pine_manifest = payload.get("pine_artifacts_manifest")
                 if isinstance(pine_manifest, dict):
                     st.session_state["pine_artifacts_manifest"] = pine_manifest
@@ -3633,6 +3671,13 @@ def _load_results_zip(zip_file):
             )
             if isinstance(pine_trace, dict):
                 st.session_state["pine_generation_trace"] = pine_trace
+
+            pine_llm_report, _ = _read_json_from_candidates(
+                ["pine_llm_migration_report.json"],
+                "pine_llm_migration_report",
+            )
+            if isinstance(pine_llm_report, dict):
+                st.session_state["pine_llm_migration_report"] = pine_llm_report
 
             pine_manifest, _ = _read_json_from_candidates(
                 ["pine_artifacts_manifest.json"],
@@ -5664,6 +5709,13 @@ with st.sidebar:
                     'strategy_mode': 'strategy_mode', 'strategy_id': 'strategy_id',
                     'pine_file_path': 'pine_file_path', 'pine_compat_mode': 'pine_compat_mode',
                     'pine_spec_parser_backend': 'pine_spec_parser_backend',
+                    'pine_llm_provider': 'pine_llm_provider',
+                    'pine_llm_model': 'pine_llm_model',
+                    'pine_llm_base_url': 'pine_llm_base_url',
+                    'pine_llm_temperature': 'pine_llm_temperature',
+                    'pine_llm_max_tokens': 'pine_llm_max_tokens',
+                    'pine_llm_timeout_s': 'pine_llm_timeout_s',
+                    'pine_llm_retries': 'pine_llm_retries',
                     'pine_generated_module_path': 'pine_generated_module_path',
                     'pine_library_paths': 'pine_library_paths', 'pine_library_names': 'pine_library_names',
                     'pine_import_mapping': 'pine_import_mapping',
@@ -6199,6 +6251,9 @@ with st.sidebar:
                 st.session_state.pop("pine_codegen_report", None)
                 st.session_state.pop("pine_generated_module_path", None)
                 st.session_state.pop("pine_generation_trace", None)
+                st.session_state.pop("pine_llm_migration_report", None)
+                st.session_state.pop("pine_llm_override_spec", None)
+                st.session_state.pop("pine_llm_override_source_sha1", None)
                 st.session_state.pop("pine_artifacts_manifest", None)
                 st.session_state.pop("pine_beta_readiness_report", None)
                 st.session_state.pop("pine_execution_gate_report", None)
@@ -6297,6 +6352,24 @@ with st.sidebar:
                             parser_backend=st.session_state.get("pine_spec_parser_backend", "auto"),
                         )
                         strategy_spec_validation = _validate_strategy_spec_v1(strategy_spec)
+                        llm_override_spec = st.session_state.get("pine_llm_override_spec")
+                        if isinstance(llm_override_spec, dict):
+                            llm_override_sha = str(st.session_state.get("pine_llm_override_source_sha1") or "").strip()
+                            current_sha = str(
+                                ((strategy_spec.get("source") or {}).get("source_sha1") or "")
+                            ).strip()
+                            llm_override_validation = _validate_strategy_spec_v1(llm_override_spec)
+                            if (
+                                llm_override_sha
+                                and current_sha
+                                and llm_override_sha == current_sha
+                                and bool(llm_override_validation.get("valid", False))
+                            ):
+                                strategy_spec = llm_override_spec
+                                strategy_spec_validation = llm_override_validation
+                            elif llm_override_sha and current_sha and llm_override_sha != current_sha:
+                                st.session_state.pop("pine_llm_override_spec", None)
+                                st.session_state.pop("pine_llm_override_source_sha1", None)
                         st.session_state["pine_strategy_spec"] = _sanitize_for_json(strategy_spec)
                         st.session_state["pine_strategy_spec_validation"] = _sanitize_for_json(
                             strategy_spec_validation
@@ -6346,6 +6419,9 @@ with st.sidebar:
                         st.session_state.pop("pine_parity_reference_validation", None)
                         st.session_state.pop("pine_parity_reference_metrics", None)
                         st.session_state.pop("pine_parity_reference_text", None)
+                        st.session_state.pop("pine_llm_migration_report", None)
+                        st.session_state.pop("pine_llm_override_spec", None)
+                        st.session_state.pop("pine_llm_override_source_sha1", None)
                 elif status != "valid":
                     st.session_state.pop("pine_strategy_spec", None)
                     st.session_state.pop("pine_strategy_spec_validation", None)
@@ -6359,6 +6435,9 @@ with st.sidebar:
                     st.session_state.pop("pine_parity_reference_validation", None)
                     st.session_state.pop("pine_parity_reference_metrics", None)
                     st.session_state.pop("pine_parity_reference_text", None)
+                    st.session_state.pop("pine_llm_migration_report", None)
+                    st.session_state.pop("pine_llm_override_spec", None)
+                    st.session_state.pop("pine_llm_override_source_sha1", None)
                     st.session_state.pop("pending_strategy_id", None)
 
                 spec_validation = st.session_state.get("pine_strategy_spec_validation")
@@ -6401,6 +6480,163 @@ with st.sidebar:
                             st.json(strategy_spec)
                         st.markdown("**Validation**")
                         st.json(spec_validation)
+
+                with st.expander("Assistant LLM migration Pine -> spec (P2.1)", expanded=False):
+                    if "pine_llm_provider" not in st.session_state:
+                        st.session_state["pine_llm_provider"] = "openai"
+                    if "pine_llm_model" not in st.session_state:
+                        st.session_state["pine_llm_model"] = "gpt-5-mini"
+                    if "pine_llm_base_url" not in st.session_state:
+                        st.session_state["pine_llm_base_url"] = ""
+                    if "pine_llm_temperature" not in st.session_state:
+                        st.session_state["pine_llm_temperature"] = 0.2
+                    if "pine_llm_max_tokens" not in st.session_state:
+                        st.session_state["pine_llm_max_tokens"] = 4000
+                    if "pine_llm_timeout_s" not in st.session_state:
+                        st.session_state["pine_llm_timeout_s"] = 120
+                    if "pine_llm_retries" not in st.session_state:
+                        st.session_state["pine_llm_retries"] = 1
+
+                    c_llm_1, c_llm_2, c_llm_3 = st.columns(3)
+                    c_llm_1.selectbox(
+                        "Provider",
+                        options=["openai", "grok", "gemini"],
+                        key="pine_llm_provider",
+                        help="Fournisseur LLM utilisé pour proposer un brouillon de strategy_spec.",
+                    )
+                    c_llm_2.text_input(
+                        "Model",
+                        key="pine_llm_model",
+                        help="Ex: gpt-5-mini, gpt-5.2, grok-4-1-fast-reasoning, gemini-3-flash-preview",
+                    )
+                    c_llm_3.text_input(
+                        "Base URL (optionnel)",
+                        key="pine_llm_base_url",
+                        help="Laisser vide pour l'endpoint par défaut du provider.",
+                    )
+
+                    c_llm_4, c_llm_5, c_llm_6, c_llm_7 = st.columns(4)
+                    c_llm_4.slider(
+                        "Temperature",
+                        min_value=0.0,
+                        max_value=1.0,
+                        step=0.1,
+                        key="pine_llm_temperature",
+                    )
+                    c_llm_5.number_input("Max tokens", min_value=256, max_value=12000, step=256, key="pine_llm_max_tokens")
+                    c_llm_6.number_input("Timeout (s)", min_value=10, max_value=600, step=10, key="pine_llm_timeout_s")
+                    c_llm_7.number_input("Retries", min_value=0, max_value=5, step=1, key="pine_llm_retries")
+
+                    st.text_input(
+                        "API Key",
+                        type="password",
+                        key="pine_llm_api_key",
+                        help="Clé non exportée dans la config/resultats. Utilisée uniquement pour l'appel en cours.",
+                    )
+
+                    llm_generate = st.button(
+                        "Générer un brouillon LLM (revalidé)",
+                        key="pine_llm_generate_btn",
+                        width="stretch",
+                        help=(
+                            "Le brouillon LLM n'est jamais accepté sans validation stricte "
+                            "`strategy_spec.v1`. En cas d'échec, fallback déterministe."
+                        ),
+                    )
+                    if llm_generate:
+                        pine_text_for_llm = st.session_state.get("pine_source_text")
+                        if not isinstance(pine_text_for_llm, str) or not pine_text_for_llm.strip():
+                            pine_source_path = str(st.session_state.get("pine_file_path") or "").strip()
+                            if pine_source_path and os.path.exists(pine_source_path):
+                                try:
+                                    pine_text_for_llm, _ = _read_text_file_with_fallback(pine_source_path)
+                                except Exception as e:
+                                    pine_text_for_llm = ""
+                                    st.error(f"Lecture du script Pine impossible: {e}")
+                        if not isinstance(pine_text_for_llm, str) or not pine_text_for_llm.strip():
+                            st.error("Source Pine indisponible: importe/charge d'abord une stratégie valide.")
+                        else:
+                            llm_cfg = LLMConfig(
+                                provider=str(st.session_state.get("pine_llm_provider", "openai")),
+                                model=str(st.session_state.get("pine_llm_model", "gpt-5-mini")),
+                                api_key=str(st.session_state.get("pine_llm_api_key", "")),
+                                base_url=str(st.session_state.get("pine_llm_base_url", "")),
+                                temperature=float(st.session_state.get("pine_llm_temperature", 0.2)),
+                                max_tokens=int(st.session_state.get("pine_llm_max_tokens", 4000)),
+                                timeout_s=int(st.session_state.get("pine_llm_timeout_s", 120)),
+                                retries=int(st.session_state.get("pine_llm_retries", 1)),
+                            )
+                            llm_report = _run_llm_spec_migration(
+                                pine_text=pine_text_for_llm,
+                                source_name=st.session_state.get("pine_source_name", ""),
+                                strategy_id=st.session_state.get("strategy_id", ""),
+                                precheck_report=st.session_state.get("pine_precheck_report"),
+                                compatibility_report=st.session_state.get("pine_compatibility_report"),
+                                parser_backend=st.session_state.get("pine_spec_parser_backend", "auto"),
+                                llm_config=llm_cfg,
+                            )
+                            llm_report = _sanitize_for_json(llm_report)
+                            st.session_state["pine_llm_migration_report"] = llm_report
+
+                            trace = llm_report.get("trace") if isinstance(llm_report, dict) else {}
+                            if isinstance(trace, dict):
+                                current_trace = st.session_state.get("pine_generation_trace")
+                                current_trace = current_trace if isinstance(current_trace, dict) else {}
+                                current_trace["llm_used"] = True
+                                current_trace["llm_migration"] = trace
+                                current_trace["generated_at_utc"] = _utc_now_iso()
+                                st.session_state["pine_generation_trace"] = _sanitize_for_json(current_trace)
+
+                    llm_report_view = st.session_state.get("pine_llm_migration_report")
+                    if isinstance(llm_report_view, dict):
+                        c_r1, c_r2, c_r3 = st.columns(3)
+                        c_r1.metric("LLM Status", str(llm_report_view.get("status", "n/a")))
+                        cand_valid = (
+                            ((llm_report_view.get("candidate_validation") or {}).get("valid"))
+                            if isinstance(llm_report_view.get("candidate_validation"), dict)
+                            else False
+                        )
+                        c_r2.metric("Candidate Valid", "yes" if bool(cand_valid) else "no")
+                        acc_valid = (
+                            ((llm_report_view.get("accepted_validation") or {}).get("valid"))
+                            if isinstance(llm_report_view.get("accepted_validation"), dict)
+                            else False
+                        )
+                        c_r3.metric("Accepted Valid", "yes" if bool(acc_valid) else "no")
+
+                        for w in llm_report_view.get("warnings", []) or []:
+                            st.caption(f"Avertissement: {w}")
+                        for e in llm_report_view.get("errors", []) or []:
+                            st.caption(f"Erreur: {e}")
+
+                        if cand_valid:
+                            if st.button(
+                                "Appliquer le draft LLM validé",
+                                key="pine_llm_apply_valid_spec_btn",
+                                width="stretch",
+                            ):
+                                accepted_spec = llm_report_view.get("accepted_spec")
+                                accepted_validation = llm_report_view.get("accepted_validation")
+                                if isinstance(accepted_spec, dict) and isinstance(accepted_validation, dict) and bool(
+                                    accepted_validation.get("valid", False)
+                                ):
+                                    st.session_state["pine_strategy_spec"] = _sanitize_for_json(accepted_spec)
+                                    st.session_state["pine_strategy_spec_validation"] = _sanitize_for_json(
+                                        accepted_validation
+                                    )
+                                    st.session_state["pine_llm_override_spec"] = _sanitize_for_json(accepted_spec)
+                                    st.session_state["pine_llm_override_source_sha1"] = (
+                                        ((accepted_spec.get("source") or {}).get("source_sha1"))
+                                        if isinstance(accepted_spec.get("source"), dict)
+                                        else None
+                                    )
+                                    st.success("Draft LLM appliqué: strategy_spec.v1 mis à jour.")
+                                else:
+                                    st.error("Impossible d'appliquer: draft LLM non valide.")
+
+                        with st.expander("Trace LLM migration", expanded=False):
+                            if isinstance(llm_report_view.get("trace"), dict):
+                                st.json(llm_report_view.get("trace"))
 
                 codegen_report = st.session_state.get("pine_codegen_report")
                 generated_module_path = st.session_state.get("pine_generated_module_path")
@@ -7511,6 +7747,13 @@ def get_current_config():
         'pine_file_path': st.session_state.get("pine_file_path", ""),
         'pine_compat_mode': st.session_state.get("pine_compat_mode", "strict"),
         'pine_spec_parser_backend': st.session_state.get("pine_spec_parser_backend", "auto"),
+        'pine_llm_provider': st.session_state.get("pine_llm_provider", "openai"),
+        'pine_llm_model': st.session_state.get("pine_llm_model", "gpt-5-mini"),
+        'pine_llm_base_url': st.session_state.get("pine_llm_base_url", ""),
+        'pine_llm_temperature': float(st.session_state.get("pine_llm_temperature", 0.2)),
+        'pine_llm_max_tokens': int(st.session_state.get("pine_llm_max_tokens", 4000)),
+        'pine_llm_timeout_s': int(st.session_state.get("pine_llm_timeout_s", 120)),
+        'pine_llm_retries': int(st.session_state.get("pine_llm_retries", 1)),
         'pine_source_name': st.session_state.get("pine_source_name", ""),
         'pine_library_paths': list(st.session_state.get("pine_library_paths", []) or []),
         'pine_library_names': list(st.session_state.get("pine_library_names", []) or []),
@@ -7530,6 +7773,11 @@ def get_current_config():
         'strategy_spec_parser_backend_used': (
             (pine_spec.get("transcription") or {}).get("parser_backend_used")
             if isinstance(pine_spec.get("transcription"), dict)
+            else None
+        ),
+        'pine_llm_migration_status': (
+            (st.session_state.get("pine_llm_migration_report") or {}).get("status")
+            if isinstance(st.session_state.get("pine_llm_migration_report"), dict)
             else None
         ),
         'pine_beta_ready': bool(pine_beta.get("beta_ready", False)),

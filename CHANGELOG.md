@@ -14,6 +14,12 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
   - en mode `auto`, WFOE tente `pynescript` puis fallback regex déterministe si indisponible/échec,
   - traçabilité ajoutée dans `strategy_spec.transcription` (backend demandé/utilisé, fallback, statut `pynescript`),
   - UI enrichie avec le sélecteur `Pine Spec Parser Backend` et affichage des métriques parser dans le panneau spec.
+- P2.1 amorcé: assistant LLM de migration Pine -> `strategy_spec.v1`:
+  - nouveau module `apps/wfo_engine/pine_v3/llm_migration.py` (prompts déterministes, appel gateway, fallback sécurisé),
+  - règle de sûreté: sortie LLM revalidée par `validate_strategy_spec_v1`; en cas d'échec, fallback vers spec déterministe baseline,
+  - UI enrichie avec section "Assistant LLM migration Pine -> spec (P2.1)" et option d'application du draft validé,
+  - traçabilité ajoutée (`pine_llm_generation_trace.v1`) avec hash prompts/sortie, provider/model et statut d'acceptation,
+  - export/reload ZIP enrichi avec `pine_llm_migration_report.json`.
 - Preuve de parité dédiée MTF ajoutée:
   - nouveau rapport déterministe `pine_mtf_parity_proof.v1` (`apps/wfo_engine/pine_v3/mtf_parity.py`),
   - UI enrichie avec section "Preuve de parité MTF request.security (P1.2)" + métriques/checks/blockers,
