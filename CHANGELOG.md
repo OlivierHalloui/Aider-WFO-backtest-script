@@ -9,6 +9,11 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
   - runtime transpilé: évaluation dédiée de `request.security(...)` (timeframe, gaps, lookahead) via les helpers MTF `request_security_series`,
   - prise en charge des affectations multi-cibles (`[a, b] = request.security(..., [expr1, expr2])`),
   - diagnostics dédiés `pine_request_security_diagnostics.v1` pour tracer les séries MTF générées.
+- Intégration parser Pine optionnelle (recommandation d'architecture):
+  - `strategy_spec.v1` supporte désormais un backend parser configurable (`auto`, `regex`, `pynescript`),
+  - en mode `auto`, WFOE tente `pynescript` puis fallback regex déterministe si indisponible/échec,
+  - traçabilité ajoutée dans `strategy_spec.transcription` (backend demandé/utilisé, fallback, statut `pynescript`),
+  - UI enrichie avec le sélecteur `Pine Spec Parser Backend` et affichage des métriques parser dans le panneau spec.
 - Preuve de parité dédiée MTF ajoutée:
   - nouveau rapport déterministe `pine_mtf_parity_proof.v1` (`apps/wfo_engine/pine_v3/mtf_parity.py`),
   - UI enrichie avec section "Preuve de parité MTF request.security (P1.2)" + métriques/checks/blockers,

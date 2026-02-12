@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
+import importlib.metadata
 import re
 from typing import Any
 
@@ -12,6 +14,119 @@ def _utc_now_iso() -> str:
     import datetime
 
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _parse_with_pynescript(pine_text: str) -> dict[str, Any]:
+    """
+    Try parsing Pine text with pynescript (optional dependency).
+
+    This integration is intentionally conservative:
+    - if pynescript is missing or parsing fails, caller can fallback to regex parser;
+    - AST extraction remains incremental in V3, but this validates parser readiness.
+    """
+    text = str(pine_text or "")
+    info: dict[str, Any] = {
+        "available": False,
+        "version": None,
+        "parse_ok": False,
+        "entrypoint": None,
+        "error": None,
+    }
+    try:
+        pynescript = importlib.import_module("pynescript")
+    except Exception as e:
+        info["error"] = f"pynescript import failed: {e}"
+        return info
+
+    info["available"] = True
+    try:
+        info["version"] = importlib.metadata.version("pynescript")
+    except Exception:
+        info["version"] = None
+
+    candidates: list[tuple[str, str]] = [
+        ("pynescript", "parse"),
+        ("pynescript", "loads"),
+        ("pynescript.parser", "parse"),
+        ("pynescript.ast", "parse"),
+    ]
+    attempted_errors: list[str] = []
+    for module_name, attr_name in candidates:
+        try:
+            mod = importlib.import_module(module_name)
+        except Exception as e:
+            attempted_errors.append(f"{module_name}.{attr_name}: import failed ({e})")
+            continue
+        fn = getattr(mod, attr_name, None)
+        if not callable(fn):
+            attempted_errors.append(f"{module_name}.{attr_name}: not callable")
+            continue
+
+        # Try common parse signatures.
+        for call_style in ("positional", "source", "code", "text", "script"):
+            try:
+                if call_style == "positional":
+                    result = fn(text)
+                elif call_style == "source":
+                    result = fn(source=text)
+                elif call_style == "code":
+                    result = fn(code=text)
+                elif call_style == "text":
+                    result = fn(text=text)
+                else:
+                    result = fn(script=text)
+            except TypeError as e:
+                attempted_errors.append(f"{module_name}.{attr_name}({call_style}): {e}")
+                continue
+            except Exception as e:
+                attempted_errors.append(f"{module_name}.{attr_name}({call_style}): {e}")
+                continue
+            info["parse_ok"] = result is not None
+            info["entrypoint"] = f"{module_name}.{attr_name}({call_style})"
+            if not info["parse_ok"]:
+                attempted_errors.append(f"{module_name}.{attr_name}({call_style}): returned None")
+                continue
+            return info
+
+    info["error"] = "; ".join(attempted_errors[:8]) if attempted_errors else "No parser entrypoint succeeded."
+    return info
+
+
+def _resolve_parser_backend(pine_text: str, parser_backend: str) -> dict[str, Any]:
+    requested = str(parser_backend or "auto").strip().lower()
+    if requested not in {"auto", "regex", "pynescript"}:
+        requested = "auto"
+
+    parse_info: dict[str, Any] = {
+        "requested": requested,
+        "used": "regex",
+        "fallback_to_regex": False,
+        "fallback_reason": None,
+        "pynescript": {
+            "available": False,
+            "version": None,
+            "parse_ok": False,
+            "entrypoint": None,
+            "error": "not_attempted",
+        },
+    }
+
+    if requested == "regex":
+        parse_info["used"] = "regex"
+        parse_info["pynescript"]["error"] = "disabled_by_config"
+        return parse_info
+
+    py_info = _parse_with_pynescript(pine_text)
+    parse_info["pynescript"] = py_info
+    if py_info.get("available") and py_info.get("parse_ok"):
+        parse_info["used"] = "pynescript"
+        return parse_info
+
+    parse_info["used"] = "regex"
+    if requested == "pynescript":
+        parse_info["fallback_to_regex"] = True
+        parse_info["fallback_reason"] = py_info.get("error") or "pynescript parse failed"
+    return parse_info
 
 
 def _normalize_identifier(value: str, default: str = "pine_strategy") -> str:
@@ -463,6 +578,7 @@ def build_strategy_spec_v1_from_pine_text(
     strategy_id: str = "",
     precheck_report: dict[str, Any] | None = None,
     compatibility_report: dict[str, Any] | None = None,
+    parser_backend: str = "auto",
 ) -> dict[str, Any]:
     """Build a first-pass `strategy_spec.v1` object from Pine source text."""
     text = str(pine_text or "")
@@ -477,6 +593,11 @@ def build_strategy_spec_v1_from_pine_text(
     normalized_name = _normalize_identifier(strategy_name, default="imported_pine_strategy")
     final_strategy_id = str(strategy_id or f"pine_{normalized_name}")
 
+    parser_meta = _resolve_parser_backend(pine_text=text, parser_backend=parser_backend)
+
+    # Current V3 extraction remains deterministic and regex-based.
+    # When pynescript parse succeeds, we keep extraction identical but record parser telemetry
+    # so we can progressively switch extraction paths without contract break.
     imports = _extract_imports(text)
     imports_detail = _extract_imports_detail(text)
     inputs = _extract_inputs(text)
@@ -521,6 +642,11 @@ def build_strategy_spec_v1_from_pine_text(
         warnings.append("Imports Pine externes détectés: mapping Python local requis.")
     if capabilities["uses_request_security_lower_tf"]:
         warnings.append("request.security_lower_tf détecté: support partiel/non garanti.")
+    if bool(parser_meta.get("fallback_to_regex")):
+        fallback_reason = str(parser_meta.get("fallback_reason") or "").strip()
+        warnings.append(
+            f"Parser pynescript indisponible/invalide: fallback regex activé ({fallback_reason or 'raison inconnue'})."
+        )
 
     return {
         "schema_version": "strategy_spec.v1",
@@ -546,6 +672,13 @@ def build_strategy_spec_v1_from_pine_text(
         ),
         "inputs": inputs,
         "logic": logic,
+        "transcription": {
+            "parser_backend_requested": parser_meta.get("requested"),
+            "parser_backend_used": parser_meta.get("used"),
+            "fallback_to_regex": bool(parser_meta.get("fallback_to_regex", False)),
+            "fallback_reason": parser_meta.get("fallback_reason"),
+            "pynescript": parser_meta.get("pynescript"),
+        },
         "capabilities": capabilities,
         "compatibility_summary": compatibility_report if isinstance(compatibility_report, dict) else None,
         "warnings": warnings,
@@ -711,6 +844,23 @@ def validate_strategy_spec_v1(spec: dict[str, Any]) -> dict[str, Any]:
                                 errors.append(
                                     f"logic.request_security_calls[{idx}].{key} must be a non-empty string."
                                 )
+
+    transcription = spec.get("transcription")
+    if transcription is not None:
+        if not isinstance(transcription, dict):
+            errors.append("transcription must be an object when provided.")
+        else:
+            for key in ("parser_backend_requested", "parser_backend_used"):
+                if key in transcription and not isinstance(transcription.get(key), str):
+                    errors.append(f"transcription.{key} must be a string.")
+            if (
+                "fallback_to_regex" in transcription
+                and not isinstance(transcription.get("fallback_to_regex"), bool)
+            ):
+                errors.append("transcription.fallback_to_regex must be boolean.")
+            pynescript_meta = transcription.get("pynescript")
+            if pynescript_meta is not None and not isinstance(pynescript_meta, dict):
+                errors.append("transcription.pynescript must be an object when provided.")
 
     capabilities = spec.get("capabilities")
     cap_keys = (

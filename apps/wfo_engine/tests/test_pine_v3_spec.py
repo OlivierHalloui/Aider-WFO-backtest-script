@@ -120,3 +120,44 @@ if ta.crossover(close, sma1_UTP)
     first = calls[0]
     assert first.get("timeframe_expr") == "TF_UTP"
     assert "ta.sma(close, 7)" in str(first.get("expression_expr"))
+
+
+def test_spec_builder_exposes_parser_backend_metadata() -> None:
+    pine_text = """
+//@version=6
+strategy("Demo")
+x = input.int(defval = 10, title = "Len")
+"""
+    spec = build_strategy_spec_v1_from_pine_text(
+        pine_text=pine_text,
+        source_name="demo.txt",
+        strategy_id="pine_demo",
+        compatibility_report={},
+        parser_backend="regex",
+    )
+    transcription = spec.get("transcription") or {}
+    assert transcription.get("parser_backend_requested") == "regex"
+    assert transcription.get("parser_backend_used") == "regex"
+    assert transcription.get("fallback_to_regex") is False
+
+
+def test_spec_builder_forced_pynescript_is_safe_with_fallback() -> None:
+    pine_text = """
+//@version=6
+strategy("Demo")
+x = input.int(defval = 10, title = "Len")
+"""
+    spec = build_strategy_spec_v1_from_pine_text(
+        pine_text=pine_text,
+        source_name="demo.txt",
+        strategy_id="pine_demo",
+        compatibility_report={},
+        parser_backend="pynescript",
+    )
+    transcription = spec.get("transcription") or {}
+    assert transcription.get("parser_backend_requested") == "pynescript"
+    assert transcription.get("parser_backend_used") in {"regex", "pynescript"}
+    if transcription.get("parser_backend_used") == "regex":
+        assert transcription.get("fallback_to_regex") is True
+    validation = validate_strategy_spec_v1(spec)
+    assert validation["valid"] is True, validation

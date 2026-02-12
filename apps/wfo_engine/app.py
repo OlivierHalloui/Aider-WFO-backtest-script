@@ -740,6 +740,7 @@ def _build_pine_artifacts_summary_for_expert():
 
     strategy_meta = (spec.get("strategy") or {}) if isinstance(spec, dict) else {}
     source_meta = (spec.get("source") or {}) if isinstance(spec, dict) else {}
+    transcription_meta = (spec.get("transcription") or {}) if isinstance(spec, dict) else {}
     source_sha1 = None
     if isinstance(precheck, dict):
         source_sha1 = precheck.get("source_sha1")
@@ -765,6 +766,21 @@ def _build_pine_artifacts_summary_for_expert():
             "spec_schema_version": spec.get("schema_version") if isinstance(spec, dict) else None,
             "spec_valid": bool(spec_validation.get("valid", False)) if isinstance(spec_validation, dict) else None,
             "spec_errors_count": len((spec_validation.get("errors") or [])) if isinstance(spec_validation, dict) else 0,
+            "spec_parser_requested": (
+                transcription_meta.get("parser_backend_requested")
+                if isinstance(transcription_meta, dict)
+                else None
+            ),
+            "spec_parser_used": (
+                transcription_meta.get("parser_backend_used")
+                if isinstance(transcription_meta, dict)
+                else None
+            ),
+            "spec_parser_fallback": (
+                bool(transcription_meta.get("fallback_to_regex", False))
+                if isinstance(transcription_meta, dict)
+                else None
+            ),
             "imports": list(spec.get("imports") or []) if isinstance(spec, dict) else [],
             "import_resolution_count": len((precheck.get("import_resolution") or []))
             if isinstance(precheck, dict)
@@ -5647,6 +5663,7 @@ with st.sidebar:
                     'start_date': 'start_date', 'end_date': 'end_date', 'timeframe': 'timeframe',
                     'strategy_mode': 'strategy_mode', 'strategy_id': 'strategy_id',
                     'pine_file_path': 'pine_file_path', 'pine_compat_mode': 'pine_compat_mode',
+                    'pine_spec_parser_backend': 'pine_spec_parser_backend',
                     'pine_generated_module_path': 'pine_generated_module_path',
                     'pine_library_paths': 'pine_library_paths', 'pine_library_names': 'pine_library_names',
                     'pine_import_mapping': 'pine_import_mapping',
@@ -5994,6 +6011,8 @@ with st.sidebar:
             st.caption("Référence Pine v6 (LLM): https://github.com/codenamedevan/pinescriptv6")
             if "pine_compat_mode" not in st.session_state:
                 st.session_state["pine_compat_mode"] = "strict"
+            if "pine_spec_parser_backend" not in st.session_state:
+                st.session_state["pine_spec_parser_backend"] = "auto"
             pine_compat_mode = st.selectbox(
                 "Pine Compatibility Mode",
                 options=["strict", "assist", "manual"],
@@ -6012,6 +6031,27 @@ with st.sidebar:
                     "`strict`: bloque si features incompatibles (S0). "
                     "`assist`: n'empêche pas l'analyse mais signale les risques. "
                     "`manual`: mode exploratoire sans blocage automatique."
+                ),
+            )
+            st.selectbox(
+                "Pine Spec Parser Backend",
+                options=["auto", "regex", "pynescript"],
+                index=["auto", "regex", "pynescript"].index(
+                    st.session_state.get("pine_spec_parser_backend", "auto")
+                    if st.session_state.get("pine_spec_parser_backend", "auto") in ["auto", "regex", "pynescript"]
+                    else "auto"
+                ),
+                key="pine_spec_parser_backend",
+                format_func=lambda v: (
+                    "Auto (pynescript -> fallback regex)"
+                    if v == "auto"
+                    else ("Regex déterministe" if v == "regex" else "pynescript (AST, expérimental)")
+                ),
+                help=(
+                    "Choisit le backend d'analyse pour générer `strategy_spec.v1`. "
+                    "`auto` tente `pynescript` puis bascule en regex si indisponible/échec. "
+                    "`regex` force le parser déterministe actuel. "
+                    "`pynescript` force AST avec fallback regex sécurisé."
                 ),
             )
         else:
@@ -6254,6 +6294,7 @@ with st.sidebar:
                             strategy_id=st.session_state.get("strategy_id", ""),
                             precheck_report=pine_precheck_report,
                             compatibility_report=pine_compatibility_report,
+                            parser_backend=st.session_state.get("pine_spec_parser_backend", "auto"),
                         )
                         strategy_spec_validation = _validate_strategy_spec_v1(strategy_spec)
                         st.session_state["pine_strategy_spec"] = _sanitize_for_json(strategy_spec)
@@ -6334,6 +6375,27 @@ with st.sidebar:
                         st.success("`strategy_spec.v1` valide et prêt pour les prochains lots.")
                     else:
                         st.error("`strategy_spec.v1` invalide: corrige les erreurs avant la suite.")
+                    transcription = (
+                        strategy_spec.get("transcription")
+                        if isinstance(strategy_spec, dict) and isinstance(strategy_spec.get("transcription"), dict)
+                        else {}
+                    )
+                    if transcription:
+                        c_par_1, c_par_2, c_par_3 = st.columns(3)
+                        c_par_1.metric("Parser Requested", str(transcription.get("parser_backend_requested", "n/a")))
+                        c_par_2.metric("Parser Used", str(transcription.get("parser_backend_used", "n/a")))
+                        c_par_3.metric(
+                            "Fallback",
+                            "yes" if bool(transcription.get("fallback_to_regex", False)) else "no",
+                        )
+                        py_meta = transcription.get("pynescript") if isinstance(transcription, dict) else {}
+                        if isinstance(py_meta, dict):
+                            st.caption(
+                                "pynescript: "
+                                f"available={bool(py_meta.get('available', False))}, "
+                                f"parse_ok={bool(py_meta.get('parse_ok', False))}, "
+                                f"entrypoint={py_meta.get('entrypoint') or 'n/a'}"
+                            )
                     with st.expander("strategy_spec.v1 (P0.4)", expanded=False):
                         if isinstance(strategy_spec, dict):
                             st.json(strategy_spec)
@@ -7448,6 +7510,7 @@ def get_current_config():
         'strategy_id': strategy_id,
         'pine_file_path': st.session_state.get("pine_file_path", ""),
         'pine_compat_mode': st.session_state.get("pine_compat_mode", "strict"),
+        'pine_spec_parser_backend': st.session_state.get("pine_spec_parser_backend", "auto"),
         'pine_source_name': st.session_state.get("pine_source_name", ""),
         'pine_library_paths': list(st.session_state.get("pine_library_paths", []) or []),
         'pine_library_names': list(st.session_state.get("pine_library_names", []) or []),
@@ -7464,6 +7527,11 @@ def get_current_config():
         'strategy_spec_valid': bool(pine_spec_validation.get("valid", False)),
         'strategy_spec_sha256': _sha256_json(pine_spec) if pine_spec else None,
         'strategy_spec_validation_errors': len(pine_spec_validation.get("errors", []) or []),
+        'strategy_spec_parser_backend_used': (
+            (pine_spec.get("transcription") or {}).get("parser_backend_used")
+            if isinstance(pine_spec.get("transcription"), dict)
+            else None
+        ),
         'pine_beta_ready': bool(pine_beta.get("beta_ready", False)),
         'pine_beta_readiness_score': pine_beta.get("readiness_score"),
         'pine_enforce_parity_gate': bool(st.session_state.get("pine_enforce_parity_gate", True)),
