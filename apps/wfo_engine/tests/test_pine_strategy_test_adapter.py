@@ -16,6 +16,8 @@ HAS_VBT = importlib.util.find_spec("vectorbtpro") is not None
 pytestmark = pytest.mark.skipif(not HAS_VBT, reason="vectorbtpro is required for pine adapter tests")
 
 if HAS_VBT:
+    from pine_v3.codegen import generate_strategy_module_from_spec
+    from pine_v3.spec import build_strategy_spec_v1_from_pine_text
     from strategy_adapters import resolve_strategy_adapter
 
 
@@ -181,3 +183,73 @@ def test_pine_strategy_test_mtf_filter_reduces_or_equals_entries():
 
     # Confirmation filter should not create additional entries.
     assert mtf_entries <= base_entries
+
+
+def test_generated_pine_adapter_transpiles_non_strategy_test(tmp_path):
+    pine_text = """
+//@version=6
+strategy("Generic Demo")
+len_fast = input.int(defval=10, title="Fast")
+len_slow = input.int(defval=30, title="Slow")
+fast = ta.sma(close, len_fast)
+slow = ta.sma(close, len_slow)
+long_signal = ta.crossover(fast, slow)
+exit_signal = ta.crossunder(fast, slow)
+if long_signal
+    strategy.entry(id="L", direction=strategy.long)
+if exit_signal
+    strategy.close(id="L")
+"""
+    spec = build_strategy_spec_v1_from_pine_text(
+        pine_text=pine_text,
+        source_name="generic_demo.txt",
+        strategy_id="pine_generic_demo",
+        compatibility_report={},
+    )
+    codegen_report = generate_strategy_module_from_spec(
+        strategy_spec=spec,
+        output_dir=str(tmp_path),
+        import_mapping={},
+        import_resolution=[],
+    )
+    module_path = str(codegen_report.get("output_path") or "")
+    assert module_path and os.path.exists(module_path)
+
+    adapter = resolve_strategy_adapter(
+        strategy_mode="pine_imported",
+        strategy_id="pine_generic_demo",
+        config={
+            "pine_generated_module_path": module_path,
+            "pine_strategy_spec": spec,
+        },
+    )
+    df = _mock_ohlc(300)
+    params = {
+        "len_fast": 10,
+        "len_slow": 30,
+        "metric1_name": "sharpe_ratio",
+        "metric2_name": "total_return",
+        "weight_metric1": 1.0,
+        "weight_metric2": 0.0,
+        "order_sizing_mode": "percent_equity",
+        "order_fixed_cash": 10000.0,
+        "fees_pct": 0.0,
+    }
+    signals = adapter.generate_signals(df, params)
+    assert "entry_signal" in signals
+    assert "exit_signal" in signals
+    assert int(signals["entry_signal"].sum()) >= 0
+
+    score = adapter.run_backtest(df, params, timeframe="5s", return_portfolio=False)
+    assert np.isscalar(score) or hasattr(score, "shape")
+
+    vec_params = dict(params)
+    vec_params.update(
+        {
+            "len_fast": np.array([8, 10]),
+            "len_slow": np.array([20, 30]),
+        }
+    )
+    vec_score = adapter.run_backtest(df, vec_params, timeframe="5s", return_portfolio=False)
+    assert hasattr(vec_score, "shape")
+    assert int(len(vec_score)) == 2

@@ -83,6 +83,24 @@ from pine_v3 import (
     validate_strategy_spec_v1 as _validate_strategy_spec_v1,
     generate_strategy_module_from_spec as _generate_strategy_module_from_spec,
 )
+from pine_v3.parity import (
+    build_parity_report as _build_parity_report,
+    build_parity_reference_payload as _build_parity_reference_payload,
+    validate_parity_reference_payload as _validate_parity_reference_payload,
+    DEFAULT_PARITY_THRESHOLDS as _DEFAULT_PARITY_THRESHOLDS,
+    DEFAULT_PARITY_DETAIL_THRESHOLDS as _DEFAULT_PARITY_DETAIL_THRESHOLDS,
+    PARITY_REFERENCE_SCHEMA_VERSION as _PARITY_REFERENCE_SCHEMA_VERSION,
+    normalize_metrics as _normalize_parity_metrics,
+)
+from pine_v3.execution_gate import (
+    build_execution_gate_report as _build_pine_execution_gate_report,
+)
+from pine_v3.mtf_parity import (
+    build_mtf_parity_proof_report as _build_mtf_parity_proof_report,
+)
+from pine_v3.runtime_adapter import (
+    build_request_security_diagnostics as _build_request_security_diagnostics,
+)
 
 # Set page config
 st.set_page_config(
@@ -554,6 +572,14 @@ def _build_results_payload():
         "pine_generated_module_path": st.session_state.get("pine_generated_module_path"),
         "pine_generation_trace": st.session_state.get("pine_generation_trace"),
         "pine_artifacts_manifest": st.session_state.get("pine_artifacts_manifest"),
+        "pine_beta_readiness_report": st.session_state.get("pine_beta_readiness_report"),
+        "pine_execution_gate_report": st.session_state.get("pine_execution_gate_report"),
+        "pine_parity_report": st.session_state.get("pine_parity_report"),
+        "pine_request_security_diagnostics": st.session_state.get("pine_request_security_diagnostics"),
+        "pine_mtf_parity_proof_report": st.session_state.get("pine_mtf_parity_proof_report"),
+        "pine_parity_reference_payload": st.session_state.get("pine_parity_reference_payload"),
+        "pine_parity_reference_validation": st.session_state.get("pine_parity_reference_validation"),
+        "pine_parity_reference_metrics": st.session_state.get("pine_parity_reference_metrics"),
         "pine_source_name": st.session_state.get("pine_source_name"),
         "pine_source_encoding": st.session_state.get("pine_source_encoding"),
         "pine_library_files": st.session_state.get("pine_library_files", []),
@@ -683,6 +709,14 @@ def _build_pine_artifacts_summary_for_expert():
     spec_validation = st.session_state.get("pine_strategy_spec_validation")
     trace = st.session_state.get("pine_generation_trace")
     codegen = st.session_state.get("pine_codegen_report")
+    beta_readiness = st.session_state.get("pine_beta_readiness_report")
+    execution_gate = st.session_state.get("pine_execution_gate_report")
+    parity_report = st.session_state.get("pine_parity_report")
+    request_security_diagnostics = st.session_state.get("pine_request_security_diagnostics")
+    mtf_parity_proof = st.session_state.get("pine_mtf_parity_proof_report")
+    parity_reference = st.session_state.get("pine_parity_reference_metrics")
+    parity_reference_payload = st.session_state.get("pine_parity_reference_payload")
+    parity_reference_validation = st.session_state.get("pine_parity_reference_validation")
     generated_module_path = st.session_state.get("pine_generated_module_path")
     source_text = st.session_state.get("pine_source_text")
     library_files = st.session_state.get("pine_library_files")
@@ -694,6 +728,11 @@ def _build_pine_artifacts_summary_for_expert():
 
     if (
         not any(isinstance(x, dict) and x for x in (precheck, compat, spec, spec_validation, trace))
+        and not isinstance(beta_readiness, dict)
+        and not isinstance(execution_gate, dict)
+        and not isinstance(parity_report, dict)
+        and not isinstance(request_security_diagnostics, dict)
+        and not isinstance(mtf_parity_proof, dict)
         and not isinstance(source_text, str)
         and not library_files
     ):
@@ -743,6 +782,69 @@ def _build_pine_artifacts_summary_for_expert():
             "inputs_count": len(spec.get("inputs") or []) if isinstance(spec, dict) else 0,
             "generation_trace": trace if isinstance(trace, dict) else {},
             "codegen_status": (codegen.get("status") if isinstance(codegen, dict) else None),
+            "beta_ready": bool(beta_readiness.get("beta_ready")) if isinstance(beta_readiness, dict) else None,
+            "beta_readiness_score": (
+                float(beta_readiness.get("readiness_score", 0.0)) if isinstance(beta_readiness, dict) else None
+            ),
+            "execution_gate_status": execution_gate.get("status") if isinstance(execution_gate, dict) else None,
+            "execution_gate_can_run": execution_gate.get("can_run") if isinstance(execution_gate, dict) else None,
+            "execution_gate_blockers_count": len((execution_gate.get("blockers") or []))
+            if isinstance(execution_gate, dict)
+            else 0,
+            "parity_status": parity_report.get("status") if isinstance(parity_report, dict) else None,
+            "parity_pass": (
+                parity_report.get("parity_pass")
+                if isinstance(parity_report, dict) and "parity_pass" in parity_report
+                else None
+            ),
+            "parity_checks_count": len((parity_report.get("checks") or [])) if isinstance(parity_report, dict) else 0,
+            "parity_detail_available": bool(parity_report.get("detail_available", False))
+            if isinstance(parity_report, dict)
+            else None,
+            "parity_detail_pass": (
+                parity_report.get("detail_pass")
+                if isinstance(parity_report, dict) and "detail_pass" in parity_report
+                else None
+            ),
+            "parity_reference_schema_version": (
+                parity_reference_payload.get("schema_version")
+                if isinstance(parity_reference_payload, dict)
+                else None
+            ),
+            "parity_reference_source": (
+                parity_reference_payload.get("source")
+                if isinstance(parity_reference_payload, dict)
+                else {}
+            ),
+            "parity_reference_valid": (
+                bool(parity_reference_validation.get("valid", False))
+                if isinstance(parity_reference_validation, dict)
+                else None
+            ),
+            "parity_reference_metrics_count": (
+                len((parity_reference_payload.get("reference_metrics") or {}))
+                if isinstance(parity_reference_payload, dict)
+                else 0
+            ),
+            "request_security_diagnostics_status": (
+                request_security_diagnostics.get("status")
+                if isinstance(request_security_diagnostics, dict)
+                else None
+            ),
+            "request_security_diagnostics_count": (
+                int(request_security_diagnostics.get("request_security_count", 0))
+                if isinstance(request_security_diagnostics, dict)
+                else 0
+            ),
+            "mtf_parity_proof_status": (
+                mtf_parity_proof.get("status") if isinstance(mtf_parity_proof, dict) else None
+            ),
+            "mtf_parity_proof_pass": (
+                mtf_parity_proof.get("proof_pass")
+                if isinstance(mtf_parity_proof, dict) and "proof_pass" in mtf_parity_proof
+                else None
+            ),
+            "parity_reference_metrics": parity_reference if isinstance(parity_reference, dict) else {},
             "generated_module_path": generated_module_path if isinstance(generated_module_path, str) else None,
             "source_preview": source_preview,
         }
@@ -1883,6 +1985,8 @@ def _build_pine_generation_trace(
         or bool(mapping)
         or bool(codegen)
         or bool(generated_path)
+        or bool(parity_ref_payload)
+        or bool(parity_ref_validation)
     )
     if not has_any:
         return {}
@@ -1955,6 +2059,13 @@ def _build_pine_artifacts_manifest(
     strategy_spec: dict | None,
     strategy_spec_validation: dict | None,
     generation_trace: dict | None,
+    beta_readiness_report: dict | None = None,
+    execution_gate_report: dict | None = None,
+    parity_report: dict | None = None,
+    request_security_diagnostics: dict | None = None,
+    mtf_parity_proof_report: dict | None = None,
+    parity_reference_payload: dict | None = None,
+    parity_reference_validation: dict | None = None,
 ):
     """Build export manifest describing Pine artifacts bundled in the ZIP."""
     src = source_artifact if isinstance(source_artifact, dict) else {}
@@ -1964,6 +2075,13 @@ def _build_pine_artifacts_manifest(
     spec = strategy_spec if isinstance(strategy_spec, dict) else {}
     spec_val = strategy_spec_validation if isinstance(strategy_spec_validation, dict) else {}
     trace = generation_trace if isinstance(generation_trace, dict) else {}
+    beta = beta_readiness_report if isinstance(beta_readiness_report, dict) else {}
+    gate = execution_gate_report if isinstance(execution_gate_report, dict) else {}
+    parity = parity_report if isinstance(parity_report, dict) else {}
+    mtf_diag = request_security_diagnostics if isinstance(request_security_diagnostics, dict) else {}
+    mtf_proof = mtf_parity_proof_report if isinstance(mtf_parity_proof_report, dict) else {}
+    parity_ref_payload = parity_reference_payload if isinstance(parity_reference_payload, dict) else {}
+    parity_ref_validation = parity_reference_validation if isinstance(parity_reference_validation, dict) else {}
     mapping = import_mapping if isinstance(import_mapping, dict) else {}
     codegen = codegen_report if isinstance(codegen_report, dict) else {}
     generated_path = str(generated_module_path or "").strip()
@@ -1975,10 +2093,13 @@ def _build_pine_artifacts_manifest(
         or bool(spec)
         or bool(spec_val)
         or bool(trace)
+        or bool(gate)
         or bool(libs)
         or bool(mapping)
         or bool(codegen)
         or bool(generated_path)
+        or bool(mtf_diag)
+        or bool(mtf_proof)
     )
     if not has_any:
         return {}
@@ -1997,10 +2118,29 @@ def _build_pine_artifacts_manifest(
             "has_strategy_spec": bool(spec),
             "has_strategy_spec_validation": bool(spec_val),
             "has_generation_trace": bool(trace),
+            "has_beta_readiness_report": bool(beta),
+            "has_execution_gate_report": bool(gate),
+            "has_parity_report": bool(parity),
+            "has_request_security_diagnostics": bool(mtf_diag),
+            "has_mtf_parity_proof_report": bool(mtf_proof),
+            "has_parity_reference_payload": bool(parity_ref_payload),
+            "has_parity_reference_validation": bool(parity_ref_validation),
             "source_name": src.get("source_name"),
             "source_sha1": src.get("source_sha1") or pre.get("source_sha1"),
             "compatibility_status": compat.get("status"),
             "strategy_spec_valid": bool(spec_val.get("valid", False)) if spec_val else None,
+            "beta_ready": bool(beta.get("beta_ready")) if beta else None,
+            "execution_gate_status": gate.get("status") if gate else None,
+            "execution_gate_can_run": gate.get("can_run") if gate else None,
+            "parity_pass": parity.get("parity_pass") if parity else None,
+            "request_security_diagnostics_status": mtf_diag.get("status") if mtf_diag else None,
+            "request_security_diagnostics_count": mtf_diag.get("request_security_count") if mtf_diag else None,
+            "mtf_parity_proof_status": mtf_proof.get("status") if mtf_proof else None,
+            "mtf_parity_proof_pass": mtf_proof.get("proof_pass") if mtf_proof else None,
+            "parity_detail_available": bool(parity.get("detail_available", False)) if parity else None,
+            "parity_detail_pass": parity.get("detail_pass") if parity else None,
+            "parity_reference_schema_version": parity_ref_payload.get("schema_version") if parity_ref_payload else None,
+            "parity_reference_valid": parity_ref_validation.get("valid") if parity_ref_validation else None,
             "artifact_files": {
                 "strategy_source": "strategy_source.pine.txt",
                 "libraries_manifest": "pine_libraries_manifest.json",
@@ -2011,6 +2151,14 @@ def _build_pine_artifacts_manifest(
                 "strategy_spec_validation": "strategy_spec_validation.json",
                 "generated_strategy_module": "generated_strategy.py",
                 "generation_trace": "generation_trace.json",
+                "beta_readiness_report": "pine_beta_readiness_report.json",
+                "execution_gate_report": "pine_execution_gate_report.json",
+                "parity_report": "pine_parity_report.json",
+                "request_security_diagnostics": "pine_request_security_diagnostics.json",
+                "mtf_parity_proof_report": "pine_mtf_parity_proof_report.json",
+                "parity_reference_payload": "pine_parity_reference.v1.json",
+                "parity_reference_validation": "pine_parity_reference_validation.json",
+                "parity_reference_metrics_legacy": "pine_parity_reference_metrics.json",
             },
         }
     )
@@ -2051,6 +2199,28 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
         pine_import_mapping = {}
     pine_codegen_report = st.session_state.get("pine_codegen_report")
     pine_generated_module_path = st.session_state.get("pine_generated_module_path")
+    pine_parity_report = st.session_state.get("pine_parity_report")
+    pine_request_security_diagnostics = st.session_state.get("pine_request_security_diagnostics")
+    pine_mtf_parity_proof_report = st.session_state.get("pine_mtf_parity_proof_report")
+    pine_parity_reference_payload = st.session_state.get("pine_parity_reference_payload")
+    pine_parity_reference_validation = st.session_state.get("pine_parity_reference_validation")
+    pine_parity_reference_metrics = st.session_state.get("pine_parity_reference_metrics")
+    pine_beta_readiness_report = _build_pine_beta_readiness_report(
+        precheck_report=pine_precheck_report,
+        compatibility_report=pine_compatibility_report,
+        strategy_spec=pine_strategy_spec,
+        strategy_spec_validation=pine_strategy_spec_validation,
+        codegen_report=pine_codegen_report,
+        generated_module_path=pine_generated_module_path,
+    )
+    pine_execution_gate_report = _build_pine_execution_gate_report(
+        strategy_mode=st.session_state.get("strategy_mode", DEFAULT_STRATEGY_MODE),
+        beta_readiness_report=pine_beta_readiness_report,
+        parity_reference_payload=pine_parity_reference_payload,
+        parity_reference_validation=pine_parity_reference_validation,
+        parity_report=pine_parity_report,
+        enforce_parity_when_reference=bool(st.session_state.get("pine_enforce_parity_gate", True)),
+    )
     pine_source_artifact = _resolve_pine_source_for_artifacts()
     pine_library_artifacts = _resolve_pine_libraries_for_artifacts()
     pine_generation_trace = _build_pine_generation_trace(
@@ -2075,6 +2245,13 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
         strategy_spec=pine_strategy_spec,
         strategy_spec_validation=pine_strategy_spec_validation,
         generation_trace=pine_generation_trace,
+        beta_readiness_report=pine_beta_readiness_report,
+        execution_gate_report=pine_execution_gate_report,
+        parity_report=pine_parity_report,
+        request_security_diagnostics=pine_request_security_diagnostics,
+        mtf_parity_proof_report=pine_mtf_parity_proof_report,
+        parity_reference_payload=pine_parity_reference_payload,
+        parity_reference_validation=pine_parity_reference_validation,
     )
     if isinstance(pine_source_artifact, dict) and pine_source_artifact.get("text"):
         st.session_state["pine_source_text"] = pine_source_artifact.get("text")
@@ -2107,6 +2284,39 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
         st.session_state["pine_generation_trace"] = pine_generation_trace
     else:
         st.session_state.pop("pine_generation_trace", None)
+    if isinstance(pine_beta_readiness_report, dict) and pine_beta_readiness_report:
+        st.session_state["pine_beta_readiness_report"] = pine_beta_readiness_report
+    else:
+        st.session_state.pop("pine_beta_readiness_report", None)
+    if isinstance(pine_execution_gate_report, dict) and pine_execution_gate_report:
+        st.session_state["pine_execution_gate_report"] = pine_execution_gate_report
+    else:
+        st.session_state.pop("pine_execution_gate_report", None)
+    if isinstance(pine_parity_report, dict) and pine_parity_report:
+        st.session_state["pine_parity_report"] = pine_parity_report
+    else:
+        st.session_state.pop("pine_parity_report", None)
+    if isinstance(pine_request_security_diagnostics, dict) and pine_request_security_diagnostics:
+        st.session_state["pine_request_security_diagnostics"] = pine_request_security_diagnostics
+    else:
+        st.session_state.pop("pine_request_security_diagnostics", None)
+    if isinstance(pine_mtf_parity_proof_report, dict) and pine_mtf_parity_proof_report:
+        st.session_state["pine_mtf_parity_proof_report"] = pine_mtf_parity_proof_report
+    else:
+        st.session_state.pop("pine_mtf_parity_proof_report", None)
+    if isinstance(pine_parity_reference_payload, dict) and pine_parity_reference_payload:
+        st.session_state["pine_parity_reference_payload"] = pine_parity_reference_payload
+    else:
+        st.session_state.pop("pine_parity_reference_payload", None)
+    if isinstance(pine_parity_reference_validation, dict) and pine_parity_reference_validation:
+        st.session_state["pine_parity_reference_validation"] = pine_parity_reference_validation
+    else:
+        st.session_state.pop("pine_parity_reference_validation", None)
+    if isinstance(pine_parity_reference_metrics, dict) and pine_parity_reference_metrics:
+        st.session_state["pine_parity_reference_metrics"] = pine_parity_reference_metrics
+    else:
+        st.session_state.pop("pine_parity_reference_metrics", None)
+        st.session_state.pop("pine_parity_reference_text", None)
     if isinstance(pine_artifacts_manifest, dict) and pine_artifacts_manifest:
         st.session_state["pine_artifacts_manifest"] = pine_artifacts_manifest
     else:
@@ -2144,6 +2354,46 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
             zf.writestr(
                 "strategy_spec_validation.json",
                 json.dumps(pine_strategy_spec_validation, indent=2, ensure_ascii=False),
+            )
+        if isinstance(pine_beta_readiness_report, dict) and pine_beta_readiness_report:
+            zf.writestr(
+                "pine_beta_readiness_report.json",
+                json.dumps(pine_beta_readiness_report, indent=2, ensure_ascii=False),
+            )
+        if isinstance(pine_execution_gate_report, dict) and pine_execution_gate_report:
+            zf.writestr(
+                "pine_execution_gate_report.json",
+                json.dumps(pine_execution_gate_report, indent=2, ensure_ascii=False),
+            )
+        if isinstance(pine_parity_report, dict) and pine_parity_report:
+            zf.writestr(
+                "pine_parity_report.json",
+                json.dumps(pine_parity_report, indent=2, ensure_ascii=False),
+            )
+        if isinstance(pine_request_security_diagnostics, dict) and pine_request_security_diagnostics:
+            zf.writestr(
+                "pine_request_security_diagnostics.json",
+                json.dumps(pine_request_security_diagnostics, indent=2, ensure_ascii=False),
+            )
+        if isinstance(pine_mtf_parity_proof_report, dict) and pine_mtf_parity_proof_report:
+            zf.writestr(
+                "pine_mtf_parity_proof_report.json",
+                json.dumps(pine_mtf_parity_proof_report, indent=2, ensure_ascii=False),
+            )
+        if isinstance(pine_parity_reference_payload, dict) and pine_parity_reference_payload:
+            zf.writestr(
+                "pine_parity_reference.v1.json",
+                json.dumps(pine_parity_reference_payload, indent=2, ensure_ascii=False),
+            )
+        if isinstance(pine_parity_reference_validation, dict) and pine_parity_reference_validation:
+            zf.writestr(
+                "pine_parity_reference_validation.json",
+                json.dumps(pine_parity_reference_validation, indent=2, ensure_ascii=False),
+            )
+        if isinstance(pine_parity_reference_metrics, dict) and pine_parity_reference_metrics:
+            zf.writestr(
+                "pine_parity_reference_metrics.json",
+                json.dumps(pine_parity_reference_metrics, indent=2, ensure_ascii=False),
             )
         if isinstance(pine_import_mapping, dict) and pine_import_mapping:
             zf.writestr(
@@ -3165,6 +3415,7 @@ def _load_results_zip(zip_file):
     try:
         # Reset optional imported context to avoid stale cross-run usage.
         st.session_state.pop("expert_context_pack", None)
+        st.session_state.pop("pending_strategy_id", None)
         st.session_state.pop("pine_precheck_report", None)
         st.session_state.pop("pine_compatibility_report", None)
         st.session_state.pop("pine_strategy_spec", None)
@@ -3173,6 +3424,15 @@ def _load_results_zip(zip_file):
         st.session_state.pop("pine_generated_module_path", None)
         st.session_state.pop("pine_generation_trace", None)
         st.session_state.pop("pine_artifacts_manifest", None)
+        st.session_state.pop("pine_beta_readiness_report", None)
+        st.session_state.pop("pine_execution_gate_report", None)
+        st.session_state.pop("pine_parity_report", None)
+        st.session_state.pop("pine_request_security_diagnostics", None)
+        st.session_state.pop("pine_mtf_parity_proof_report", None)
+        st.session_state.pop("pine_parity_reference_payload", None)
+        st.session_state.pop("pine_parity_reference_validation", None)
+        st.session_state.pop("pine_parity_reference_metrics", None)
+        st.session_state.pop("pine_parity_reference_text", None)
         st.session_state.pop("pine_source_text", None)
         st.session_state.pop("pine_library_files", None)
         st.session_state.pop("pine_library_paths", None)
@@ -3234,6 +3494,38 @@ def _load_results_zip(zip_file):
                 pine_manifest = payload.get("pine_artifacts_manifest")
                 if isinstance(pine_manifest, dict):
                     st.session_state["pine_artifacts_manifest"] = pine_manifest
+                pine_beta = payload.get("pine_beta_readiness_report")
+                if isinstance(pine_beta, dict):
+                    st.session_state["pine_beta_readiness_report"] = pine_beta
+                pine_gate = payload.get("pine_execution_gate_report")
+                if isinstance(pine_gate, dict):
+                    st.session_state["pine_execution_gate_report"] = pine_gate
+                pine_parity = payload.get("pine_parity_report")
+                if isinstance(pine_parity, dict):
+                    st.session_state["pine_parity_report"] = pine_parity
+                pine_mtf_diag = payload.get("pine_request_security_diagnostics")
+                if isinstance(pine_mtf_diag, dict):
+                    st.session_state["pine_request_security_diagnostics"] = pine_mtf_diag
+                pine_mtf_proof = payload.get("pine_mtf_parity_proof_report")
+                if isinstance(pine_mtf_proof, dict):
+                    st.session_state["pine_mtf_parity_proof_report"] = pine_mtf_proof
+                pine_parity_payload = payload.get("pine_parity_reference_payload")
+                if isinstance(pine_parity_payload, dict):
+                    st.session_state["pine_parity_reference_payload"] = pine_parity_payload
+                pine_parity_validation = payload.get("pine_parity_reference_validation")
+                if isinstance(pine_parity_validation, dict):
+                    st.session_state["pine_parity_reference_validation"] = pine_parity_validation
+                pine_parity_ref = payload.get("pine_parity_reference_metrics")
+                if isinstance(pine_parity_ref, dict):
+                    st.session_state["pine_parity_reference_metrics"] = pine_parity_ref
+                    if isinstance(st.session_state.get("pine_parity_reference_payload"), dict):
+                        st.session_state["pine_parity_reference_text"] = json.dumps(
+                            st.session_state["pine_parity_reference_payload"], indent=2, ensure_ascii=False
+                        )
+                    else:
+                        st.session_state["pine_parity_reference_text"] = json.dumps(
+                            pine_parity_ref, indent=2, ensure_ascii=False
+                        )
                 if isinstance(payload.get("pine_source_name"), str):
                     st.session_state["pine_source_name"] = payload.get("pine_source_name")
                 if isinstance(payload.get("pine_source_encoding"), str):
@@ -3332,6 +3624,91 @@ def _load_results_zip(zip_file):
             )
             if isinstance(pine_manifest, dict):
                 st.session_state["pine_artifacts_manifest"] = pine_manifest
+
+            pine_beta, _ = _read_json_from_candidates(
+                ["pine_beta_readiness_report.json"],
+                "pine_beta_readiness",
+            )
+            if isinstance(pine_beta, dict):
+                st.session_state["pine_beta_readiness_report"] = pine_beta
+
+            pine_gate, _ = _read_json_from_candidates(
+                ["pine_execution_gate_report.json"],
+                "pine_execution_gate",
+            )
+            if isinstance(pine_gate, dict):
+                st.session_state["pine_execution_gate_report"] = pine_gate
+
+            pine_parity, _ = _read_json_from_candidates(
+                ["pine_parity_report.json"],
+                "pine_parity_report",
+            )
+            if isinstance(pine_parity, dict):
+                st.session_state["pine_parity_report"] = pine_parity
+
+            pine_mtf_diag, _ = _read_json_from_candidates(
+                ["pine_request_security_diagnostics.json"],
+                "pine_request_security_diagnostics",
+            )
+            if isinstance(pine_mtf_diag, dict):
+                st.session_state["pine_request_security_diagnostics"] = pine_mtf_diag
+
+            pine_mtf_proof, _ = _read_json_from_candidates(
+                ["pine_mtf_parity_proof_report.json"],
+                "pine_mtf_parity_proof_report",
+            )
+            if isinstance(pine_mtf_proof, dict):
+                st.session_state["pine_mtf_parity_proof_report"] = pine_mtf_proof
+
+            pine_parity_payload, _ = _read_json_from_candidates(
+                ["pine_parity_reference.v1.json"],
+                "pine_parity_reference_payload",
+            )
+            if isinstance(pine_parity_payload, dict):
+                st.session_state["pine_parity_reference_payload"] = pine_parity_payload
+
+            pine_parity_validation, _ = _read_json_from_candidates(
+                ["pine_parity_reference_validation.json"],
+                "pine_parity_reference_validation",
+            )
+            if isinstance(pine_parity_validation, dict):
+                st.session_state["pine_parity_reference_validation"] = pine_parity_validation
+
+            pine_parity_ref, _ = _read_json_from_candidates(
+                ["pine_parity_reference_metrics.json"],
+                "pine_parity_reference_metrics",
+            )
+            if isinstance(pine_parity_ref, dict):
+                st.session_state["pine_parity_reference_metrics"] = pine_parity_ref
+                if isinstance(st.session_state.get("pine_parity_reference_payload"), dict):
+                    st.session_state["pine_parity_reference_text"] = json.dumps(
+                        st.session_state["pine_parity_reference_payload"], indent=2, ensure_ascii=False
+                    )
+                else:
+                    st.session_state["pine_parity_reference_text"] = json.dumps(
+                        pine_parity_ref, indent=2, ensure_ascii=False
+                    )
+
+            # Normalize/validate parity reference after ZIP load (v1 preferred, legacy tolerated).
+            loaded_parity_payload = st.session_state.get("pine_parity_reference_payload")
+            if isinstance(loaded_parity_payload, dict):
+                loaded_validation = _validate_parity_reference_payload(
+                    loaded_parity_payload,
+                    allow_legacy=False,
+                )
+                normalized_payload = loaded_validation.get("normalized_payload")
+                if isinstance(normalized_payload, dict) and normalized_payload:
+                    _apply_parity_reference_payload(normalized_payload, loaded_validation, update_text=True)
+            elif isinstance(st.session_state.get("pine_parity_reference_metrics"), dict):
+                legacy_payload = _build_parity_reference_payload(
+                    st.session_state.get("pine_parity_reference_metrics"),
+                    source={
+                        "provider": "legacy_zip",
+                        "strategy_id": str(st.session_state.get("strategy_id") or ""),
+                    },
+                )
+                legacy_validation = _validate_parity_reference_payload(legacy_payload, allow_legacy=False)
+                _apply_parity_reference_payload(legacy_payload, legacy_validation, update_text=True)
 
             pine_import_mapping, _ = _read_json_from_candidates(
                 ["import_mapping.json", "pine_import_mapping.json"],
@@ -3466,8 +3843,10 @@ def sync_dates_from_file(force=False):
 
     min_date, max_date = get_csv_date_range(file_path)
     if min_date and max_date:
-        st.session_state['start_date'] = min_date
-        st.session_state['end_date'] = max_date
+        # Never write directly to widget-bound keys here; this callback can
+        # run after widgets are instantiated in the same Streamlit cycle.
+        st.session_state['pending_start_date'] = min_date
+        st.session_state['pending_end_date'] = max_date
         st.session_state['last_data_file_path'] = file_path
 
 
@@ -4026,6 +4405,17 @@ def _precheck_pine_script_text(
         "uses_strategy_exit": bool(re.search(r"\bstrategy\.exit\s*\(", text, flags=re.IGNORECASE)),
         "uses_strategy_close": bool(re.search(r"\bstrategy\.close\s*\(", text, flags=re.IGNORECASE)),
         "uses_strategy_cancel": bool(re.search(r"\bstrategy\.cancel\s*\(", text, flags=re.IGNORECASE)),
+        "uses_strategy_order": bool(re.search(r"\bstrategy\.order\s*\(", text, flags=re.IGNORECASE)),
+        "uses_short_entry": bool(
+            re.search(
+                r"\bstrategy\.entry\s*\([^)]*direction\s*=\s*strategy\.short",
+                text,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        ),
+        "uses_pyramiding": bool(re.search(r"\bpyramiding\s*=", text, flags=re.IGNORECASE)),
+        "uses_loops": bool(re.search(r"^\s*(for|while)\b", text, flags=re.IGNORECASE | re.MULTILINE)),
+        "uses_switch": bool(re.search(r"^\s*switch\b", text, flags=re.IGNORECASE | re.MULTILINE)),
         "import_count": len(import_lines),
         "resolved_import_count": resolved_import_count,
         "unresolved_import_count": unresolved_import_count,
@@ -4131,6 +4521,11 @@ def _build_pine_compatibility_report(precheck_report: dict, compat_mode: str = "
     provided_libraries_count = int(precheck_report.get("provided_libraries_count", 0) or 0)
     uses_security = bool(detected.get("uses_request_security", False))
     uses_lower_tf = bool(detected.get("uses_request_security_lower_tf", False))
+    uses_strategy_order = bool(detected.get("uses_strategy_order", False))
+    uses_short_entry = bool(detected.get("uses_short_entry", False))
+    uses_pyramiding = bool(detected.get("uses_pyramiding", False))
+    uses_loops = bool(detected.get("uses_loops", False))
+    uses_switch = bool(detected.get("uses_switch", False))
     has_strategy_decl = bool(precheck_report.get("has_strategy_declaration", False))
     version = precheck_report.get("detected_version")
     pre_errors = list(precheck_report.get("errors", []) or [])
@@ -4248,6 +4643,63 @@ def _build_pine_compatibility_report(precheck_report: dict, compat_mode: str = "
     else:
         _add_item("request_security_lower_tf", "request.security_lower_tf", "S0", "not_applicable", False)
 
+    if uses_strategy_order:
+        _add_item(
+            "strategy_order",
+            "strategy.order",
+            "S0",
+            "blocked",
+            True,
+            detail="`strategy.order` n'est pas encore couvert par le runtime V3 beta.",
+            blocking=True,
+        )
+    else:
+        _add_item("strategy_order", "strategy.order", "S0", "not_applicable", False)
+
+    if uses_short_entry:
+        _add_item(
+            "short_entries",
+            "Entrées short",
+            "S0",
+            "blocked",
+            True,
+            detail="Le runtime V3 beta est long-only (entries short non supportées).",
+            blocking=True,
+        )
+    else:
+        _add_item("short_entries", "Entrées short", "S0", "not_applicable", False)
+
+    if uses_pyramiding:
+        _add_item(
+            "pyramiding",
+            "Pyramiding",
+            "S0",
+            "blocked",
+            True,
+            detail="Le runtime V3 beta ne reproduit pas encore le pyramiding Pine.",
+            blocking=True,
+        )
+    else:
+        _add_item("pyramiding", "Pyramiding", "S0", "not_applicable", False)
+
+    if uses_loops or uses_switch:
+        labels = []
+        if uses_loops:
+            labels.append("boucles")
+        if uses_switch:
+            labels.append("switch")
+        _add_item(
+            "control_flow_advanced",
+            "Contrôle de flux avancé",
+            "S0",
+            "blocked",
+            True,
+            detail=f"Transpilation V3 beta partielle: {', '.join(labels)} non validés.",
+            blocking=True,
+        )
+    else:
+        _add_item("control_flow_advanced", "Contrôle de flux avancé", "S0", "not_applicable", False)
+
     for code, label, flag in [
         ("strategy_entry", "strategy.entry", bool(detected.get("uses_strategy_entry", False))),
         ("strategy_exit", "strategy.exit", bool(detected.get("uses_strategy_exit", False))),
@@ -4310,6 +4762,22 @@ def _build_pine_compatibility_report(precheck_report: dict, compat_mode: str = "
         recommendations.append(
             "Remplacer ou simplifier request.security_lower_tf pour réduire le risque de non-parité."
         )
+    if uses_strategy_order:
+        recommendations.append(
+            "Remplacer `strategy.order` par des blocs `strategy.entry/exit/close` pour la V3 beta."
+        )
+    if uses_short_entry:
+        recommendations.append(
+            "Retirer les entrées short ou attendre le support short/pyramiding d'une version ultérieure."
+        )
+    if uses_pyramiding:
+        recommendations.append(
+            "Désactiver le pyramiding pour la phase beta (requis pour fiabilité du replay)."
+        )
+    if uses_loops or uses_switch:
+        recommendations.append(
+            "Éviter `for/while/switch` dans la stratégie Pine cible beta ou fournir une stratégie simplifiée."
+        )
     if pre_errors:
         recommendations.append(
             "Corriger d'abord les erreurs de pré-analyse (`//@version`, `strategy(...)`, syntaxe)."
@@ -4341,6 +4809,323 @@ def _build_pine_compatibility_report(precheck_report: dict, compat_mode: str = "
             "recommendations": recommendations,
         }
     )
+
+
+def _build_pine_beta_readiness_report(
+    precheck_report: dict | None,
+    compatibility_report: dict | None,
+    strategy_spec: dict | None,
+    strategy_spec_validation: dict | None,
+    codegen_report: dict | None,
+    generated_module_path: str | None = None,
+):
+    """Compute a deterministic beta-readiness gate for Pine V3 execution."""
+    pre = precheck_report if isinstance(precheck_report, dict) else {}
+    compat = compatibility_report if isinstance(compatibility_report, dict) else {}
+    spec = strategy_spec if isinstance(strategy_spec, dict) else {}
+    spec_val = strategy_spec_validation if isinstance(strategy_spec_validation, dict) else {}
+    codegen = codegen_report if isinstance(codegen_report, dict) else {}
+    module_path = str(generated_module_path or "").strip()
+
+    logic = spec.get("logic") if isinstance(spec.get("logic"), dict) else {}
+    order_rules = logic.get("order_rules") if isinstance(logic.get("order_rules"), list) else []
+    assignments = logic.get("assignments") if isinstance(logic.get("assignments"), list) else []
+
+    runtime_blockers = []
+    for item in (compat.get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        if bool(item.get("blocking", False)):
+            runtime_blockers.append(
+                {
+                    "code": item.get("code"),
+                    "label": item.get("label"),
+                    "detail": item.get("detail"),
+                }
+            )
+
+    checks = [
+        {
+            "id": "precheck_valid",
+            "label": "Pré-analyse Pine valide",
+            "required": True,
+            "passed": str(pre.get("status", "")).lower() == "valid",
+            "detail": None,
+        },
+        {
+            "id": "compatibility_non_blocking",
+            "label": "Compatibilité non bloquante",
+            "required": True,
+            "passed": not bool(compat.get("is_blocking", False)),
+            "detail": f"status={compat.get('status')}",
+        },
+        {
+            "id": "strategy_spec_valid",
+            "label": "strategy_spec.v1 valide",
+            "required": True,
+            "passed": bool(spec_val.get("valid", False)),
+            "detail": f"errors={len(spec_val.get('errors', []) or [])}",
+        },
+        {
+            "id": "logic_order_rules",
+            "label": "Règles d'ordres extraites",
+            "required": True,
+            "passed": len(order_rules) > 0,
+            "detail": f"order_rules={len(order_rules)}, assignments={len(assignments)}",
+        },
+        {
+            "id": "codegen_ok",
+            "label": "Codegen module Python",
+            "required": True,
+            "passed": str(codegen.get("status", "")).lower() == "ok",
+            "detail": f"status={codegen.get('status')}",
+        },
+        {
+            "id": "generated_module_exists",
+            "label": "Module généré disponible",
+            "required": True,
+            "passed": bool(module_path and os.path.exists(module_path)),
+            "detail": module_path or None,
+        },
+        {
+            "id": "runtime_blockers_absent",
+            "label": "Aucun blocker runtime beta",
+            "required": True,
+            "passed": len(runtime_blockers) == 0,
+            "detail": f"blockers={len(runtime_blockers)}",
+        },
+    ]
+
+    required_checks = [c for c in checks if bool(c.get("required", False))]
+    required_passed = [c for c in required_checks if bool(c.get("passed", False))]
+    readiness_score = round((len(required_passed) / max(1, len(required_checks))) * 100.0, 1)
+    beta_ready = len(required_passed) == len(required_checks)
+
+    next_actions = []
+    for check in required_checks:
+        if not bool(check.get("passed", False)):
+            next_actions.append(f"{check.get('label')}: {check.get('detail') or 'à corriger'}")
+    if not next_actions and runtime_blockers:
+        next_actions.extend(
+            [f"{b.get('label')}: {b.get('detail')}" for b in runtime_blockers if isinstance(b, dict)]
+        )
+
+    return _sanitize_for_json(
+        {
+            "schema_version": "pine_beta_readiness.v1",
+            "generated_at_utc": _utc_now_iso(),
+            "beta_ready": bool(beta_ready),
+            "status": "ready" if beta_ready else "not_ready",
+            "readiness_score": readiness_score,
+            "checks": checks,
+            "runtime_blockers": runtime_blockers,
+            "next_actions": next_actions,
+            "strategy_id": (spec.get("strategy") or {}).get("id") if isinstance(spec, dict) else None,
+            "compatibility_status": compat.get("status"),
+            "compatibility_score": compat.get("compatibility_score"),
+        }
+    )
+
+
+def _get_pine_parity_thresholds_from_state() -> dict:
+    """Return parity thresholds from session state with safe defaults."""
+    thresholds = dict(_DEFAULT_PARITY_THRESHOLDS)
+    for key, default_value in _DEFAULT_PARITY_THRESHOLDS.items():
+        state_key = f"pine_parity_{key}"
+        raw_value = st.session_state.get(state_key, default_value)
+        try:
+            thresholds[key] = float(raw_value)
+        except Exception:
+            thresholds[key] = float(default_value)
+    return thresholds
+
+
+def _get_pine_parity_detail_thresholds_from_state() -> dict:
+    """Return detailed parity thresholds (events/trades) from session state."""
+    thresholds = dict(_DEFAULT_PARITY_DETAIL_THRESHOLDS)
+    for key, default_value in _DEFAULT_PARITY_DETAIL_THRESHOLDS.items():
+        state_key = f"pine_parity_{key}"
+        raw_value = st.session_state.get(state_key, default_value)
+        try:
+            thresholds[key] = float(raw_value)
+        except Exception:
+            thresholds[key] = float(default_value)
+    return thresholds
+
+
+def _to_iso_utc(value) -> str | None:
+    """Best-effort conversion to UTC ISO timestamp."""
+    try:
+        ts = pd.to_datetime(value, utc=True, errors="coerce")
+    except Exception:
+        return None
+    if pd.isna(ts):
+        return None
+    try:
+        return ts.to_pydatetime().isoformat()
+    except Exception:
+        return str(ts)
+
+
+def _extract_current_events_and_trades_for_parity(max_items: int = 30000) -> dict:
+    """Extract current runtime entry/exit events and trades for detailed parity."""
+    max_rows = int(max(100, max_items))
+    trades_df = pd.DataFrame()
+    pf = st.session_state.get("final_portfolio")
+    index_ref = None
+
+    if pf is not None:
+        try:
+            trades_df = pd.DataFrame(pf.trades.records)
+        except Exception:
+            trades_df = pd.DataFrame()
+        try:
+            if hasattr(pf, "wrapper"):
+                index_ref = pf.wrapper.index
+        except Exception:
+            index_ref = None
+
+    if trades_df.empty and isinstance(st.session_state.get("final_trades_df"), pd.DataFrame):
+        trades_df = st.session_state.get("final_trades_df").copy()
+    if trades_df.empty:
+        return {"entries": [], "exits": [], "trades": []}
+
+    if len(trades_df) > max_rows:
+        trades_df = trades_df.head(max_rows).copy()
+
+    def _ts_from_row(row, kind: str) -> str | None:
+        direct_cols = [
+            f"{kind}_ts",
+            f"{kind}_time",
+            f"{kind}_timestamp",
+        ]
+        for col in direct_cols:
+            if col in row and pd.notna(row.get(col)):
+                iso = _to_iso_utc(row.get(col))
+                if iso:
+                    return iso
+
+        idx_col = f"{kind}_idx"
+        if idx_col in row and index_ref is not None and pd.notna(row.get(idx_col)):
+            try:
+                idx_val = int(row.get(idx_col))
+                if 0 <= idx_val < len(index_ref):
+                    return _to_iso_utc(index_ref[idx_val])
+            except Exception:
+                return None
+        return None
+
+    entries: list[str] = []
+    exits: list[str] = []
+    trades: list[dict] = []
+
+    for _, row in trades_df.iterrows():
+        entry_iso = _ts_from_row(row, "entry")
+        exit_iso = _ts_from_row(row, "exit")
+        if entry_iso:
+            entries.append(entry_iso)
+        if exit_iso:
+            exits.append(exit_iso)
+        if entry_iso and exit_iso:
+            trade_row = {"entry_time": entry_iso, "exit_time": exit_iso}
+            if "pnl" in row and pd.notna(row.get("pnl")):
+                try:
+                    trade_row["pnl"] = float(row.get("pnl"))
+                except Exception:
+                    pass
+            trades.append(trade_row)
+
+    entries = sorted(set(entries))
+    exits = sorted(set(exits))
+    return {"entries": entries, "exits": exits, "trades": trades}
+
+
+def _extract_current_metrics_for_parity() -> dict:
+    """Extract current runtime metrics for parity checks from final portfolio."""
+    metrics = {}
+    pf = st.session_state.get("final_portfolio")
+    if pf is not None:
+        try:
+            n_trades = int(len(pf.trades))
+            metrics["trade_count"] = n_trades
+            metrics["entry_count"] = n_trades
+            metrics["exit_count"] = n_trades
+        except Exception:
+            pass
+        try:
+            metrics["total_return_pct"] = float(_safe_float_scalar(getattr(pf, "total_return", np.nan) * 100))
+        except Exception:
+            pass
+        try:
+            metrics["max_drawdown_pct"] = float(_safe_float_scalar(getattr(pf, "max_drawdown", np.nan) * 100))
+        except Exception:
+            pass
+        return _normalize_parity_metrics(metrics)
+
+    # Fallback for historical ZIP without final portfolio object.
+    final_summary = _extract_final_backtest_for_expert(
+        st.session_state.get("wfo_results"),
+        get_current_config(),
+        df_source=st.session_state.get("df"),
+    )
+    if isinstance(final_summary, dict):
+        if isinstance(final_summary.get("strategy_n_trades"), (int, float)):
+            n_trades = float(final_summary.get("strategy_n_trades"))
+            metrics["trade_count"] = n_trades
+            metrics["entry_count"] = n_trades
+            metrics["exit_count"] = n_trades
+        if isinstance(final_summary.get("strategy_total_return_pct"), (int, float)):
+            metrics["total_return_pct"] = float(final_summary.get("strategy_total_return_pct"))
+        if isinstance(final_summary.get("strategy_max_drawdown_pct"), (int, float)):
+            metrics["max_drawdown_pct"] = float(final_summary.get("strategy_max_drawdown_pct"))
+    return _normalize_parity_metrics(metrics)
+
+
+def _parse_parity_reference_payload_from_text(
+    raw_text: str,
+    allow_legacy: bool = True,
+) -> tuple[dict, dict, str | None]:
+    """Parse and validate parity reference JSON text to canonical v1 payload."""
+    txt = str(raw_text or "").strip()
+    if not txt:
+        return {}, {}, None
+    try:
+        data = json.loads(txt)
+    except Exception as e:
+        return {}, {}, f"JSON invalide: {e}"
+
+    validation = _validate_parity_reference_payload(data, allow_legacy=allow_legacy)
+    normalized_payload = (
+        validation.get("normalized_payload")
+        if isinstance(validation, dict) and isinstance(validation.get("normalized_payload"), dict)
+        else {}
+    )
+    if not bool((validation or {}).get("valid", False)):
+        err_lines = (validation or {}).get("errors") or []
+        if not isinstance(err_lines, list):
+            err_lines = [str(err_lines)]
+        error_message = "; ".join([str(x) for x in err_lines if str(x).strip()]) or "Référence Pine invalide."
+        return normalized_payload, validation, error_message
+    return normalized_payload, validation, None
+
+
+def _apply_parity_reference_payload(
+    payload: dict,
+    validation: dict | None = None,
+    update_text: bool = False,
+):
+    """Persist canonical parity reference payload and derived session fields."""
+    if not isinstance(payload, dict):
+        return
+    metrics = payload.get("reference_metrics")
+    if not isinstance(metrics, dict):
+        metrics = {}
+    st.session_state["pine_parity_reference_payload"] = payload
+    st.session_state["pine_parity_reference_metrics"] = metrics
+    if bool(update_text):
+        st.session_state["pine_parity_reference_text"] = json.dumps(payload, indent=2, ensure_ascii=False)
+    if isinstance(validation, dict):
+        st.session_state["pine_parity_reference_validation"] = validation
 
 
 def _read_text_file_with_fallback(path: str):
@@ -4865,6 +5650,18 @@ with st.sidebar:
                     'pine_generated_module_path': 'pine_generated_module_path',
                     'pine_library_paths': 'pine_library_paths', 'pine_library_names': 'pine_library_names',
                     'pine_import_mapping': 'pine_import_mapping',
+                    'pine_parity_trade_count_rel_pct': 'pine_parity_trade_count_rel_pct',
+                    'pine_parity_entry_count_rel_pct': 'pine_parity_entry_count_rel_pct',
+                    'pine_parity_exit_count_rel_pct': 'pine_parity_exit_count_rel_pct',
+                    'pine_parity_total_return_abs_pct': 'pine_parity_total_return_abs_pct',
+                    'pine_parity_max_drawdown_abs_pct': 'pine_parity_max_drawdown_abs_pct',
+                    'pine_parity_entry_event_count_rel_pct': 'pine_parity_entry_event_count_rel_pct',
+                    'pine_parity_exit_event_count_rel_pct': 'pine_parity_exit_event_count_rel_pct',
+                    'pine_parity_entry_event_match_min_ratio': 'pine_parity_entry_event_match_min_ratio',
+                    'pine_parity_exit_event_match_min_ratio': 'pine_parity_exit_event_match_min_ratio',
+                    'pine_parity_trade_match_min_ratio': 'pine_parity_trade_match_min_ratio',
+                    'pine_parity_event_time_tolerance_sec': 'pine_parity_event_time_tolerance_sec',
+                    'pine_parity_trade_time_tolerance_sec': 'pine_parity_trade_time_tolerance_sec',
                     'file_path': 'file_path', 'n_windows': 'n_windows', 'train_size': 'train_size',
                     'anchored': 'anchored', 'optimization_method': 'optimization_method',
                     'optimization_regime': 'optimization_regime',
@@ -4971,6 +5768,13 @@ with st.sidebar:
     
     # --- Data Settings ---
     with st.expander("1. Data Configuration", expanded=True):
+        pending_start_date = st.session_state.pop("pending_start_date", None)
+        pending_end_date = st.session_state.pop("pending_end_date", None)
+        if pending_start_date is not None:
+            st.session_state["start_date"] = pending_start_date
+        if pending_end_date is not None:
+            st.session_state["end_date"] = pending_end_date
+
         # NOTE: Removed 'get_conf' usage for value=. The value argument is only used for initialization
         # when key is NOT in session_state. If key IS in session_state (e.g. from loader above), 
         # Streamlit ignores value=. This allows user edits to persist.
@@ -5155,6 +5959,9 @@ with st.sidebar:
             st.session_state["strategy_mode"] = DEFAULT_STRATEGY_MODE
         if "strategy_id" not in st.session_state:
             st.session_state["strategy_id"] = DEFAULT_STRATEGY_ID
+        pending_strategy_id = str(st.session_state.pop("pending_strategy_id", "") or "").strip()
+        if pending_strategy_id and st.session_state.get("strategy_mode") != "native_atdmf":
+            st.session_state["strategy_id"] = pending_strategy_id
         if st.session_state.get("strategy_mode") == "native_atdmf":
             st.session_state["strategy_id"] = DEFAULT_STRATEGY_ID
 
@@ -5353,6 +6160,16 @@ with st.sidebar:
                 st.session_state.pop("pine_generated_module_path", None)
                 st.session_state.pop("pine_generation_trace", None)
                 st.session_state.pop("pine_artifacts_manifest", None)
+                st.session_state.pop("pine_beta_readiness_report", None)
+                st.session_state.pop("pine_execution_gate_report", None)
+                st.session_state.pop("pine_parity_report", None)
+                st.session_state.pop("pine_request_security_diagnostics", None)
+                st.session_state.pop("pine_mtf_parity_proof_report", None)
+                st.session_state.pop("pine_parity_reference_payload", None)
+                st.session_state.pop("pine_parity_reference_validation", None)
+                st.session_state.pop("pine_parity_reference_metrics", None)
+                st.session_state.pop("pine_parity_reference_text", None)
+                st.session_state.pop("pending_strategy_id", None)
                 st.session_state.pop("pine_source_text", None)
                 st.session_state.pop("pine_library_files", None)
                 st.session_state.pop("pine_library_paths", None)
@@ -5447,7 +6264,7 @@ with st.sidebar:
                         st.session_state["pine_source_text"] = pine_text
                         spec_id = ((strategy_spec.get("strategy") or {}).get("id"))
                         if isinstance(spec_id, str) and spec_id.strip():
-                            st.session_state["strategy_id"] = spec_id.strip()
+                            st.session_state["pending_strategy_id"] = spec_id.strip()
 
                         if bool(strategy_spec_validation.get("valid", False)):
                             try:
@@ -5480,11 +6297,28 @@ with st.sidebar:
                         }
                         st.session_state.pop("pine_codegen_report", None)
                         st.session_state.pop("pine_generated_module_path", None)
+                        st.session_state.pop("pine_execution_gate_report", None)
+                        st.session_state.pop("pine_parity_report", None)
+                        st.session_state.pop("pine_request_security_diagnostics", None)
+                        st.session_state.pop("pine_mtf_parity_proof_report", None)
+                        st.session_state.pop("pine_parity_reference_payload", None)
+                        st.session_state.pop("pine_parity_reference_validation", None)
+                        st.session_state.pop("pine_parity_reference_metrics", None)
+                        st.session_state.pop("pine_parity_reference_text", None)
                 elif status != "valid":
                     st.session_state.pop("pine_strategy_spec", None)
                     st.session_state.pop("pine_strategy_spec_validation", None)
                     st.session_state.pop("pine_codegen_report", None)
                     st.session_state.pop("pine_generated_module_path", None)
+                    st.session_state.pop("pine_execution_gate_report", None)
+                    st.session_state.pop("pine_parity_report", None)
+                    st.session_state.pop("pine_request_security_diagnostics", None)
+                    st.session_state.pop("pine_mtf_parity_proof_report", None)
+                    st.session_state.pop("pine_parity_reference_payload", None)
+                    st.session_state.pop("pine_parity_reference_validation", None)
+                    st.session_state.pop("pine_parity_reference_metrics", None)
+                    st.session_state.pop("pine_parity_reference_text", None)
+                    st.session_state.pop("pending_strategy_id", None)
 
                 spec_validation = st.session_state.get("pine_strategy_spec_validation")
                 strategy_spec = st.session_state.get("pine_strategy_spec")
@@ -5520,6 +6354,544 @@ with st.sidebar:
                                     st.code(preview, language="python")
                                 except Exception as preview_error:
                                     st.caption(f"Preview unavailable: {preview_error}")
+
+                beta_readiness_report = _build_pine_beta_readiness_report(
+                    precheck_report=pine_precheck_report,
+                    compatibility_report=pine_compatibility_report,
+                    strategy_spec=st.session_state.get("pine_strategy_spec"),
+                    strategy_spec_validation=st.session_state.get("pine_strategy_spec_validation"),
+                    codegen_report=st.session_state.get("pine_codegen_report"),
+                    generated_module_path=st.session_state.get("pine_generated_module_path"),
+                )
+                if isinstance(beta_readiness_report, dict) and beta_readiness_report:
+                    st.session_state["pine_beta_readiness_report"] = beta_readiness_report
+                    c_beta_1, c_beta_2, c_beta_3 = st.columns(3)
+                    c_beta_1.metric(
+                        "V3 Beta Ready",
+                        "yes" if bool(beta_readiness_report.get("beta_ready", False)) else "no",
+                    )
+                    c_beta_2.metric(
+                        "Readiness Score",
+                        f"{float(beta_readiness_report.get('readiness_score', 0.0)):.1f}/100",
+                    )
+                    c_beta_3.metric(
+                        "Runtime Blockers",
+                        str(len(beta_readiness_report.get("runtime_blockers", []) or [])),
+                    )
+                    if bool(beta_readiness_report.get("beta_ready", False)):
+                        st.success("V3 beta: script prêt pour exécution/replay dans le périmètre supporté.")
+                    else:
+                        st.warning("V3 beta: des conditions bloquantes restent à corriger.")
+                    with st.expander("Pine V3 Beta Readiness", expanded=False):
+                        st.json(beta_readiness_report)
+                else:
+                    st.session_state.pop("pine_beta_readiness_report", None)
+                    st.session_state.pop("pine_execution_gate_report", None)
+
+                if "pine_enforce_parity_gate" not in st.session_state:
+                    st.session_state["pine_enforce_parity_gate"] = True
+                st.checkbox(
+                    "Verrou d'exécution: exiger `parity_pass=true` si une référence Pine est fournie",
+                    key="pine_enforce_parity_gate",
+                    help=(
+                        "Si activé, un run Pine est bloqué tant que la référence de parité est invalide "
+                        "ou que `pine_parity_report.parity_pass` n'est pas vrai."
+                    ),
+                )
+
+                with st.expander("Validation de parité Pine/Python (P1.4)", expanded=False):
+                    st.caption(
+                        "Compare les métriques de référence (Pine) aux métriques runtime Python "
+                        "pour quantifier la parité."
+                    )
+                    st.caption(
+                        f"Format canonique requis: `{_PARITY_REFERENCE_SCHEMA_VERSION}` "
+                        "(JSON structuré avec `reference_metrics`)."
+                    )
+                    st.code(
+                        """{
+  "schema_version": "pine_parity_reference.v1",
+  "generated_at_utc": "2026-02-12T00:00:00+00:00",
+  "source": {
+    "provider": "tradingview",
+    "strategy_id": "my_strategy_v1",
+    "symbol": "BTCUSDT",
+    "timeframe": "5s",
+    "start_date": "2025-01-01",
+    "end_date": "2025-01-30",
+    "notes": "backtest Pine de référence"
+  },
+  "reference_metrics": {
+    "trade_count": 120,
+    "entry_count": 120,
+    "exit_count": 120,
+    "total_return_pct": 18.4,
+    "max_drawdown_pct": -4.2
+  }
+}""",
+                        language="json",
+                    )
+
+                    uploaded_parity_reference = st.file_uploader(
+                        "Charger référence Pine (JSON)",
+                        type=["json"],
+                        key="pine_parity_reference_upload",
+                        help=(
+                            "Charge un JSON de référence Pine. "
+                            "Le format legacy est toléré puis migré vers le format v1."
+                        ),
+                    )
+                    if uploaded_parity_reference is not None:
+                        try:
+                            uploaded_ref_raw = uploaded_parity_reference.read().decode("utf-8")
+                            parsed_payload, parsed_validation, parse_err = _parse_parity_reference_payload_from_text(
+                                uploaded_ref_raw,
+                                allow_legacy=True,
+                            )
+                            if parse_err:
+                                if isinstance(parsed_validation, dict):
+                                    st.session_state["pine_parity_reference_validation"] = parsed_validation
+                                st.error(parse_err)
+                            elif isinstance(parsed_payload, dict) and parsed_payload:
+                                _apply_parity_reference_payload(
+                                    parsed_payload,
+                                    parsed_validation,
+                                    update_text=True,
+                                )
+                                if bool((parsed_validation or {}).get("valid", False)):
+                                    st.success("Référence Pine chargée et validée.")
+                                else:
+                                    st.warning("Référence Pine chargée mais invalide: corrige les erreurs.")
+                                for warn in (parsed_validation or {}).get("warnings", []):
+                                    st.caption(f"Avertissement: {warn}")
+                            else:
+                                st.warning("Le JSON chargé est vide ou non exploitable.")
+                        except Exception as e:
+                            st.warning(f"Impossible de lire le JSON de référence: {e}")
+
+                    pending_ref_text = st.session_state.pop("pending_pine_parity_reference_text", None)
+                    if isinstance(pending_ref_text, str):
+                        st.session_state["pine_parity_reference_text"] = pending_ref_text
+                    if (
+                        "pine_parity_reference_text" not in st.session_state
+                        and isinstance(st.session_state.get("pine_parity_reference_payload"), dict)
+                        and st.session_state.get("pine_parity_reference_payload")
+                    ):
+                        st.session_state["pine_parity_reference_text"] = json.dumps(
+                            st.session_state.get("pine_parity_reference_payload"),
+                            indent=2,
+                            ensure_ascii=False,
+                        )
+                    elif (
+                        "pine_parity_reference_text" not in st.session_state
+                        and isinstance(st.session_state.get("pine_parity_reference_metrics"), dict)
+                        and st.session_state.get("pine_parity_reference_metrics")
+                    ):
+                        bootstrap_payload = _build_parity_reference_payload(
+                            st.session_state.get("pine_parity_reference_metrics"),
+                            source={
+                                "provider": "session_metrics_bootstrap",
+                                "strategy_id": str(st.session_state.get("strategy_id") or ""),
+                            },
+                        )
+                        bootstrap_validation = _validate_parity_reference_payload(
+                            bootstrap_payload,
+                            allow_legacy=False,
+                        )
+                        _apply_parity_reference_payload(bootstrap_payload, bootstrap_validation, update_text=True)
+
+                    parity_reference_text = st.text_area(
+                        "Référence Pine (JSON)",
+                        key="pine_parity_reference_text",
+                        height=200,
+                        help=(
+                            "Colle ici le JSON de référence Pine au format "
+                            f"`{_PARITY_REFERENCE_SCHEMA_VERSION}`."
+                        ),
+                    )
+                    c_ref_btn_1, c_ref_btn_2 = st.columns(2)
+                    with c_ref_btn_1:
+                        if st.button("Appliquer la référence JSON", key="pine_apply_reference_btn", width="stretch"):
+                            parsed_payload, parsed_validation, parse_err = _parse_parity_reference_payload_from_text(
+                                parity_reference_text,
+                                allow_legacy=True,
+                            )
+                            if parse_err:
+                                if isinstance(parsed_validation, dict):
+                                    st.session_state["pine_parity_reference_validation"] = parsed_validation
+                                st.error(parse_err)
+                            elif not parsed_payload:
+                                st.warning("Référence Pine vide ou non reconnue.")
+                            else:
+                                _apply_parity_reference_payload(
+                                    parsed_payload,
+                                    parsed_validation,
+                                    update_text=False,
+                                )
+                                st.session_state["pending_pine_parity_reference_text"] = json.dumps(
+                                    parsed_payload, indent=2, ensure_ascii=False
+                                )
+                                if bool((parsed_validation or {}).get("valid", False)):
+                                    st.success("Référence Pine validée et normalisée.")
+                                else:
+                                    st.error("Référence Pine invalide: corrige les erreurs ci-dessous.")
+                    with c_ref_btn_2:
+                        if st.button("Insérer un template v1", key="pine_insert_reference_template_btn", width="stretch"):
+                            current_detail_template = _extract_current_events_and_trades_for_parity()
+                            template_payload = _build_parity_reference_payload(
+                                reference_metrics=_extract_current_metrics_for_parity(),
+                                reference_events={
+                                    "entries": current_detail_template.get("entries", []),
+                                    "exits": current_detail_template.get("exits", []),
+                                },
+                                reference_trades=current_detail_template.get("trades", []),
+                                source={
+                                    "provider": "manual_template",
+                                    "strategy_id": str(st.session_state.get("strategy_id") or ""),
+                                    "symbol": "",
+                                    "timeframe": str(st.session_state.get("timeframe") or ""),
+                                    "start_date": str(st.session_state.get("start_date") or ""),
+                                    "end_date": str(st.session_state.get("end_date") or ""),
+                                    "notes": "Compléter avant validation.",
+                                },
+                            )
+                            st.session_state["pending_pine_parity_reference_text"] = json.dumps(
+                                template_payload,
+                                indent=2,
+                                ensure_ascii=False,
+                            )
+                            st.info("Template v1 prêt (inclut événements/trades si disponibles). Clique sur `Appliquer la référence JSON`.")
+
+                    reference_validation = st.session_state.get("pine_parity_reference_validation")
+                    if isinstance(reference_validation, dict) and reference_validation:
+                        c_ref_v1, c_ref_v2, c_ref_v3 = st.columns(3)
+                        c_ref_v1.metric(
+                            "Référence v1 valide",
+                            "yes" if bool(reference_validation.get("valid", False)) else "no",
+                        )
+                        c_ref_v2.metric("Erreurs", str(len(reference_validation.get("errors", []) or [])))
+                        c_ref_v3.metric("Avertissements", str(len(reference_validation.get("warnings", []) or [])))
+                        for err in reference_validation.get("errors", []) or []:
+                            st.caption(f"Erreur: {err}")
+                        for warn in reference_validation.get("warnings", []) or []:
+                            st.caption(f"Avertissement: {warn}")
+                        with st.expander("Validation référence Pine (JSON)", expanded=False):
+                            st.json(reference_validation)
+
+                    c_th_1, c_th_2 = st.columns(2)
+                    with c_th_1:
+                        st.number_input(
+                            "Seuil rel. trades (%)",
+                            min_value=0.0,
+                            value=float(st.session_state.get("pine_parity_trade_count_rel_pct", _DEFAULT_PARITY_THRESHOLDS["trade_count_rel_pct"])),
+                            step=0.1,
+                            key="pine_parity_trade_count_rel_pct",
+                            help="Écart relatif max autorisé sur le nombre de trades.",
+                        )
+                        st.number_input(
+                            "Seuil rel. entries (%)",
+                            min_value=0.0,
+                            value=float(st.session_state.get("pine_parity_entry_count_rel_pct", _DEFAULT_PARITY_THRESHOLDS["entry_count_rel_pct"])),
+                            step=0.1,
+                            key="pine_parity_entry_count_rel_pct",
+                        )
+                        st.number_input(
+                            "Seuil rel. exits (%)",
+                            min_value=0.0,
+                            value=float(st.session_state.get("pine_parity_exit_count_rel_pct", _DEFAULT_PARITY_THRESHOLDS["exit_count_rel_pct"])),
+                            step=0.1,
+                            key="pine_parity_exit_count_rel_pct",
+                        )
+                    with c_th_2:
+                        st.number_input(
+                            "Seuil abs. return (%)",
+                            min_value=0.0,
+                            value=float(st.session_state.get("pine_parity_total_return_abs_pct", _DEFAULT_PARITY_THRESHOLDS["total_return_abs_pct"])),
+                            step=0.1,
+                            key="pine_parity_total_return_abs_pct",
+                            help="Écart absolu max autorisé sur le total return (%).",
+                        )
+                        st.number_input(
+                            "Seuil abs. max drawdown (%)",
+                            min_value=0.0,
+                            value=float(st.session_state.get("pine_parity_max_drawdown_abs_pct", _DEFAULT_PARITY_THRESHOLDS["max_drawdown_abs_pct"])),
+                            step=0.1,
+                            key="pine_parity_max_drawdown_abs_pct",
+                            help="Écart absolu max autorisé sur le max drawdown (%).",
+                        )
+                    with st.expander("Seuils détaillés (événements/trades) - Lot 3", expanded=False):
+                        d_th_1, d_th_2 = st.columns(2)
+                        with d_th_1:
+                            st.number_input(
+                                "Seuil rel. count entry-events (%)",
+                                min_value=0.0,
+                                value=float(st.session_state.get("pine_parity_entry_event_count_rel_pct", _DEFAULT_PARITY_DETAIL_THRESHOLDS["entry_event_count_rel_pct"])),
+                                step=0.1,
+                                key="pine_parity_entry_event_count_rel_pct",
+                            )
+                            st.number_input(
+                                "Seuil rel. count exit-events (%)",
+                                min_value=0.0,
+                                value=float(st.session_state.get("pine_parity_exit_event_count_rel_pct", _DEFAULT_PARITY_DETAIL_THRESHOLDS["exit_event_count_rel_pct"])),
+                                step=0.1,
+                                key="pine_parity_exit_event_count_rel_pct",
+                            )
+                            st.number_input(
+                                "Tolérance temps events (sec)",
+                                min_value=0.0,
+                                value=float(st.session_state.get("pine_parity_event_time_tolerance_sec", _DEFAULT_PARITY_DETAIL_THRESHOLDS["event_time_tolerance_sec"])),
+                                step=0.5,
+                                key="pine_parity_event_time_tolerance_sec",
+                            )
+                        with d_th_2:
+                            st.number_input(
+                                "Match min entry-events (ratio)",
+                                min_value=0.0,
+                                max_value=1.0,
+                                value=float(st.session_state.get("pine_parity_entry_event_match_min_ratio", _DEFAULT_PARITY_DETAIL_THRESHOLDS["entry_event_match_min_ratio"])),
+                                step=0.01,
+                                key="pine_parity_entry_event_match_min_ratio",
+                            )
+                            st.number_input(
+                                "Match min exit-events (ratio)",
+                                min_value=0.0,
+                                max_value=1.0,
+                                value=float(st.session_state.get("pine_parity_exit_event_match_min_ratio", _DEFAULT_PARITY_DETAIL_THRESHOLDS["exit_event_match_min_ratio"])),
+                                step=0.01,
+                                key="pine_parity_exit_event_match_min_ratio",
+                            )
+                            st.number_input(
+                                "Match min trades (ratio)",
+                                min_value=0.0,
+                                max_value=1.0,
+                                value=float(st.session_state.get("pine_parity_trade_match_min_ratio", _DEFAULT_PARITY_DETAIL_THRESHOLDS["trade_match_min_ratio"])),
+                                step=0.01,
+                                key="pine_parity_trade_match_min_ratio",
+                            )
+                            st.number_input(
+                                "Tolérance temps trades (sec)",
+                                min_value=0.0,
+                                value=float(st.session_state.get("pine_parity_trade_time_tolerance_sec", _DEFAULT_PARITY_DETAIL_THRESHOLDS["trade_time_tolerance_sec"])),
+                                step=0.5,
+                                key="pine_parity_trade_time_tolerance_sec",
+                            )
+
+                    current_metrics = _extract_current_metrics_for_parity()
+                    current_detail = _extract_current_events_and_trades_for_parity()
+                    reference_payload = st.session_state.get("pine_parity_reference_payload")
+                    if not isinstance(reference_payload, dict):
+                        reference_payload = {}
+                    reference_metrics = reference_payload.get("reference_metrics")
+                    reference_events = reference_payload.get("reference_events")
+                    reference_trades = reference_payload.get("reference_trades")
+                    if not isinstance(reference_metrics, dict):
+                        reference_metrics = st.session_state.get("pine_parity_reference_metrics")
+                        if not isinstance(reference_metrics, dict):
+                            reference_metrics = {}
+                    if not isinstance(reference_events, dict):
+                        reference_events = {}
+                    if not isinstance(reference_trades, list):
+                        reference_trades = []
+
+                    current_events = {
+                        "entries": current_detail.get("entries", []),
+                        "exits": current_detail.get("exits", []),
+                    }
+                    current_trades = current_detail.get("trades", [])
+                    if not isinstance(current_trades, list):
+                        current_trades = []
+                    st.markdown("**Métriques runtime courantes (Python)**")
+                    st.json(current_metrics or {})
+                    st.markdown("**Référence Pine (métriques normalisées)**")
+                    st.json(reference_metrics or {})
+                    c_det_1, c_det_2, c_det_3 = st.columns(3)
+                    c_det_1.metric("Entry events ref/current", f"{len(reference_events.get('entries', []) or [])}/{len(current_events.get('entries', []) or [])}")
+                    c_det_2.metric("Exit events ref/current", f"{len(reference_events.get('exits', []) or [])}/{len(current_events.get('exits', []) or [])}")
+                    c_det_3.metric("Trades ref/current", f"{len(reference_trades)}/{len(current_trades)}")
+
+                    if st.button("Calculer le rapport de parité", key="pine_compute_parity_btn", width="stretch"):
+                        if not reference_metrics:
+                            st.warning("Référence Pine manquante: charge un JSON avant calcul.")
+                        elif not bool((st.session_state.get("pine_parity_reference_validation") or {}).get("valid", False)):
+                            st.warning("Référence Pine invalide: corrige d'abord les erreurs de validation.")
+                        elif not current_metrics:
+                            st.warning("Métriques runtime indisponibles: lance d'abord le final backtest.")
+                        else:
+                            parity_report = _build_parity_report(
+                                reference_metrics=reference_metrics,
+                                current_metrics=current_metrics,
+                                thresholds=_get_pine_parity_thresholds_from_state(),
+                                reference_events=reference_events,
+                                current_events=current_events,
+                                reference_trades=reference_trades,
+                                current_trades=current_trades,
+                                detail_thresholds=_get_pine_parity_detail_thresholds_from_state(),
+                            )
+                            if isinstance(reference_payload, dict) and reference_payload:
+                                parity_report["reference_payload_schema_version"] = reference_payload.get("schema_version")
+                                parity_report["reference_source"] = reference_payload.get("source")
+                            st.session_state["pine_parity_report"] = _sanitize_for_json(parity_report)
+                            if parity_report.get("parity_pass") is True:
+                                st.success("Parité validée (parity_pass=true).")
+                            elif parity_report.get("parity_pass") is False:
+                                st.error("Parité non validée (parity_pass=false).")
+                            else:
+                                st.warning("Parité partielle: référence insuffisante pour statuer.")
+
+                    pine_parity_report = st.session_state.get("pine_parity_report")
+                    if isinstance(pine_parity_report, dict) and pine_parity_report:
+                        c_pr_1, c_pr_2, c_pr_3 = st.columns(3)
+                        c_pr_1.metric("Parity Status", str(pine_parity_report.get("status", "n/a")))
+                        c_pr_2.metric(
+                            "Parity Pass",
+                            (
+                                "yes"
+                                if pine_parity_report.get("parity_pass") is True
+                                else ("no" if pine_parity_report.get("parity_pass") is False else "n/a")
+                            ),
+                        )
+                        c_pr_3.metric("Checks", str(len(pine_parity_report.get("checks", []) or [])))
+                        c_pr_4, c_pr_5 = st.columns(2)
+                        c_pr_4.metric(
+                            "Detail Available",
+                            "yes" if bool(pine_parity_report.get("detail_available", False)) else "no",
+                        )
+                        detail_pass_value = pine_parity_report.get("detail_pass")
+                        c_pr_5.metric(
+                            "Detail Pass",
+                            "yes" if detail_pass_value is True else ("no" if detail_pass_value is False else "n/a"),
+                        )
+                        checks = pine_parity_report.get("checks") or []
+                        if isinstance(checks, list) and checks:
+                            checks_df = pd.DataFrame(checks)
+                            st.dataframe(checks_df, width="stretch")
+                        detail_checks = pine_parity_report.get("detail_checks") or []
+                        if isinstance(detail_checks, list) and detail_checks:
+                            st.markdown("**Detail checks (events/trades)**")
+                            detail_checks_df = pd.DataFrame(detail_checks)
+                            st.dataframe(detail_checks_df, width="stretch")
+                        with st.expander("Rapport de parité (JSON)", expanded=False):
+                            st.json(pine_parity_report)
+
+                pine_spec_for_mtf = st.session_state.get("pine_strategy_spec")
+                pine_spec_for_mtf = pine_spec_for_mtf if isinstance(pine_spec_for_mtf, dict) else {}
+                pine_cap_for_mtf = (
+                    pine_spec_for_mtf.get("capabilities")
+                    if isinstance(pine_spec_for_mtf.get("capabilities"), dict)
+                    else {}
+                )
+                if bool(pine_cap_for_mtf.get("uses_request_security", False)):
+                    with st.expander("Preuve de parité MTF request.security (P1.2)", expanded=False):
+                        st.caption(
+                            "Diagnostic dédié aux séries `request.security` (timeframe, densité, stabilité) "
+                            "et preuve MTF consolidée."
+                        )
+                        if st.button("Générer preuve MTF", key="pine_compute_mtf_proof_btn", width="stretch"):
+                            df_for_mtf = st.session_state.get("final_backtest_df")
+                            if not isinstance(df_for_mtf, pd.DataFrame) or df_for_mtf.empty:
+                                df_for_mtf = st.session_state.get("df")
+                            if not isinstance(df_for_mtf, pd.DataFrame) or df_for_mtf.empty:
+                                st.warning(
+                                    "Données indisponibles pour preuve MTF: lance d'abord un run/backtest."
+                                )
+                            else:
+                                params_for_mtf = (
+                                    st.session_state.get("final_params")
+                                    if isinstance(st.session_state.get("final_params"), dict)
+                                    else {}
+                                )
+                                mtf_diag = _build_request_security_diagnostics(
+                                    df=df_for_mtf,
+                                    params=params_for_mtf,
+                                    strategy_spec=pine_spec_for_mtf,
+                                    external_bindings={},
+                                )
+                                mtf_proof = _build_mtf_parity_proof_report(
+                                    strategy_spec=pine_spec_for_mtf,
+                                    request_security_diagnostics=mtf_diag,
+                                    parity_report=st.session_state.get("pine_parity_report"),
+                                )
+                                st.session_state["pine_request_security_diagnostics"] = _sanitize_for_json(mtf_diag)
+                                st.session_state["pine_mtf_parity_proof_report"] = _sanitize_for_json(mtf_proof)
+                                if bool(mtf_proof.get("proof_pass", False)):
+                                    st.success("Preuve MTF validée.")
+                                else:
+                                    st.warning("Preuve MTF partielle/échouée: consulte les blockers.")
+
+                        mtf_diag_report = st.session_state.get("pine_request_security_diagnostics")
+                        mtf_diag_report = mtf_diag_report if isinstance(mtf_diag_report, dict) else {}
+                        mtf_proof_report = st.session_state.get("pine_mtf_parity_proof_report")
+                        mtf_proof_report = mtf_proof_report if isinstance(mtf_proof_report, dict) else {}
+                        c_mtf_1, c_mtf_2, c_mtf_3 = st.columns(3)
+                        c_mtf_1.metric(
+                            "MTF diagnostics",
+                            str(mtf_diag_report.get("status", "n/a")),
+                        )
+                        c_mtf_2.metric(
+                            "request.security rows",
+                            str(int(mtf_diag_report.get("request_security_count", 0) or 0)),
+                        )
+                        c_mtf_3.metric(
+                            "MTF proof",
+                            (
+                                "pass"
+                                if bool(mtf_proof_report.get("proof_pass", False))
+                                else str(mtf_proof_report.get("status", "n/a"))
+                            ),
+                        )
+                        mtf_rows = mtf_diag_report.get("rows") or []
+                        if isinstance(mtf_rows, list) and mtf_rows:
+                            st.dataframe(pd.DataFrame(mtf_rows), width="stretch")
+                        mtf_blockers = mtf_proof_report.get("blockers") or []
+                        if isinstance(mtf_blockers, list) and mtf_blockers:
+                            st.markdown("**Blockers MTF**")
+                            st.dataframe(pd.DataFrame(mtf_blockers), width="stretch")
+                        with st.expander("Rapport MTF parity proof (JSON)", expanded=False):
+                            if mtf_proof_report:
+                                st.json(mtf_proof_report)
+                            else:
+                                st.caption("Aucun rapport MTF généré.")
+                else:
+                    st.session_state.pop("pine_request_security_diagnostics", None)
+                    st.session_state.pop("pine_mtf_parity_proof_report", None)
+
+                execution_gate_report = _build_pine_execution_gate_report(
+                    strategy_mode=st.session_state.get("strategy_mode", DEFAULT_STRATEGY_MODE),
+                    beta_readiness_report=st.session_state.get("pine_beta_readiness_report"),
+                    parity_reference_payload=st.session_state.get("pine_parity_reference_payload"),
+                    parity_reference_validation=st.session_state.get("pine_parity_reference_validation"),
+                    parity_report=st.session_state.get("pine_parity_report"),
+                    enforce_parity_when_reference=bool(st.session_state.get("pine_enforce_parity_gate", True)),
+                )
+                st.session_state["pine_execution_gate_report"] = _sanitize_for_json(execution_gate_report)
+                c_gate_1, c_gate_2, c_gate_3 = st.columns(3)
+                c_gate_1.metric(
+                    "Execution Gate",
+                    "pass" if bool(execution_gate_report.get("can_run", False)) else "blocked",
+                )
+                c_gate_2.metric(
+                    "Gate blockers",
+                    str(len(execution_gate_report.get("blockers", []) or [])),
+                )
+                c_gate_3.metric(
+                    "Parity enforced",
+                    "yes" if bool(execution_gate_report.get("enforce_parity_when_reference", False)) else "no",
+                )
+                if bool(execution_gate_report.get("can_run", False)):
+                    st.success("Gate exécution Pine V3: prêt à lancer le run.")
+                else:
+                    st.error("Gate exécution Pine V3: lancement bloqué tant que les blockers persistent.")
+                for blocker in execution_gate_report.get("blockers", []) or []:
+                    if not isinstance(blocker, dict):
+                        continue
+                    st.caption(
+                        f"Blocker `{blocker.get('code', 'unknown')}`: "
+                        f"{blocker.get('label', '')} | {blocker.get('detail', '')}"
+                    )
+                for warn in execution_gate_report.get("warnings", []) or []:
+                    st.caption(f"Avertissement gate: {warn}")
+                with st.expander("Pine V3 Execution Gate (Lot 4)", expanded=False):
+                    st.json(execution_gate_report)
         else:
             pine_file_path = st.session_state.get("pine_file_path", "")
             pine_precheck_report = st.session_state.get("pine_precheck_report")
@@ -6050,6 +7422,24 @@ def get_current_config():
     pine_spec = pine_spec if isinstance(pine_spec, dict) else {}
     pine_spec_validation = st.session_state.get("pine_strategy_spec_validation")
     pine_spec_validation = pine_spec_validation if isinstance(pine_spec_validation, dict) else {}
+    pine_beta = st.session_state.get("pine_beta_readiness_report")
+    pine_beta = pine_beta if isinstance(pine_beta, dict) else {}
+    pine_parity = st.session_state.get("pine_parity_report")
+    pine_parity = pine_parity if isinstance(pine_parity, dict) else {}
+    pine_mtf_diag = st.session_state.get("pine_request_security_diagnostics")
+    pine_mtf_diag = pine_mtf_diag if isinstance(pine_mtf_diag, dict) else {}
+    pine_mtf_proof = st.session_state.get("pine_mtf_parity_proof_report")
+    pine_mtf_proof = pine_mtf_proof if isinstance(pine_mtf_proof, dict) else {}
+    pine_execution_gate = st.session_state.get("pine_execution_gate_report")
+    pine_execution_gate = pine_execution_gate if isinstance(pine_execution_gate, dict) else {}
+    pine_parity_reference_payload = st.session_state.get("pine_parity_reference_payload")
+    pine_parity_reference_payload = (
+        pine_parity_reference_payload if isinstance(pine_parity_reference_payload, dict) else {}
+    )
+    pine_parity_reference_validation = st.session_state.get("pine_parity_reference_validation")
+    pine_parity_reference_validation = (
+        pine_parity_reference_validation if isinstance(pine_parity_reference_validation, dict) else {}
+    )
     config = {
         'start_date': start_date,
         'end_date': end_date,
@@ -6074,6 +7464,34 @@ def get_current_config():
         'strategy_spec_valid': bool(pine_spec_validation.get("valid", False)),
         'strategy_spec_sha256': _sha256_json(pine_spec) if pine_spec else None,
         'strategy_spec_validation_errors': len(pine_spec_validation.get("errors", []) or []),
+        'pine_beta_ready': bool(pine_beta.get("beta_ready", False)),
+        'pine_beta_readiness_score': pine_beta.get("readiness_score"),
+        'pine_enforce_parity_gate': bool(st.session_state.get("pine_enforce_parity_gate", True)),
+        'pine_execution_gate_status': pine_execution_gate.get("status"),
+        'pine_execution_gate_can_run': pine_execution_gate.get("can_run"),
+        'pine_execution_gate_blockers_count': len(pine_execution_gate.get("blockers", []) or []),
+        'pine_parity_status': pine_parity.get("status"),
+        'pine_parity_pass': pine_parity.get("parity_pass"),
+        'pine_request_security_diagnostics_status': pine_mtf_diag.get("status"),
+        'pine_request_security_diagnostics_count': int(pine_mtf_diag.get("request_security_count", 0)),
+        'pine_mtf_parity_proof_status': pine_mtf_proof.get("status"),
+        'pine_mtf_parity_proof_pass': pine_mtf_proof.get("proof_pass"),
+        'pine_parity_reference_schema_version': pine_parity_reference_payload.get("schema_version"),
+        'pine_parity_reference_valid': bool(pine_parity_reference_validation.get("valid", False)),
+        'pine_parity_reference_errors': len(pine_parity_reference_validation.get("errors", []) or []),
+        'pine_parity_reference_warnings': len(pine_parity_reference_validation.get("warnings", []) or []),
+        'pine_parity_trade_count_rel_pct': float(st.session_state.get("pine_parity_trade_count_rel_pct", _DEFAULT_PARITY_THRESHOLDS["trade_count_rel_pct"])),
+        'pine_parity_entry_count_rel_pct': float(st.session_state.get("pine_parity_entry_count_rel_pct", _DEFAULT_PARITY_THRESHOLDS["entry_count_rel_pct"])),
+        'pine_parity_exit_count_rel_pct': float(st.session_state.get("pine_parity_exit_count_rel_pct", _DEFAULT_PARITY_THRESHOLDS["exit_count_rel_pct"])),
+        'pine_parity_total_return_abs_pct': float(st.session_state.get("pine_parity_total_return_abs_pct", _DEFAULT_PARITY_THRESHOLDS["total_return_abs_pct"])),
+        'pine_parity_max_drawdown_abs_pct': float(st.session_state.get("pine_parity_max_drawdown_abs_pct", _DEFAULT_PARITY_THRESHOLDS["max_drawdown_abs_pct"])),
+        'pine_parity_entry_event_count_rel_pct': float(st.session_state.get("pine_parity_entry_event_count_rel_pct", _DEFAULT_PARITY_DETAIL_THRESHOLDS["entry_event_count_rel_pct"])),
+        'pine_parity_exit_event_count_rel_pct': float(st.session_state.get("pine_parity_exit_event_count_rel_pct", _DEFAULT_PARITY_DETAIL_THRESHOLDS["exit_event_count_rel_pct"])),
+        'pine_parity_entry_event_match_min_ratio': float(st.session_state.get("pine_parity_entry_event_match_min_ratio", _DEFAULT_PARITY_DETAIL_THRESHOLDS["entry_event_match_min_ratio"])),
+        'pine_parity_exit_event_match_min_ratio': float(st.session_state.get("pine_parity_exit_event_match_min_ratio", _DEFAULT_PARITY_DETAIL_THRESHOLDS["exit_event_match_min_ratio"])),
+        'pine_parity_trade_match_min_ratio': float(st.session_state.get("pine_parity_trade_match_min_ratio", _DEFAULT_PARITY_DETAIL_THRESHOLDS["trade_match_min_ratio"])),
+        'pine_parity_event_time_tolerance_sec': float(st.session_state.get("pine_parity_event_time_tolerance_sec", _DEFAULT_PARITY_DETAIL_THRESHOLDS["event_time_tolerance_sec"])),
+        'pine_parity_trade_time_tolerance_sec': float(st.session_state.get("pine_parity_trade_time_tolerance_sec", _DEFAULT_PARITY_DETAIL_THRESHOLDS["trade_time_tolerance_sec"])),
         'from_file': (data_source == "Local File"),
         'file_path': file_path,
         'selected_params': selected_params,
@@ -6466,16 +7884,48 @@ if st.session_state.get('wfo_running'):
 col_run, col_save = st.sidebar.columns([1, 1])
 
 with col_run:
+    strategy_mode_current = str(current_conf.get("strategy_mode", DEFAULT_STRATEGY_MODE)).lower()
+    pine_gate_for_launch = _build_pine_execution_gate_report(
+        strategy_mode=current_conf.get("strategy_mode", DEFAULT_STRATEGY_MODE),
+        beta_readiness_report=st.session_state.get("pine_beta_readiness_report"),
+        parity_reference_payload=st.session_state.get("pine_parity_reference_payload"),
+        parity_reference_validation=st.session_state.get("pine_parity_reference_validation"),
+        parity_report=st.session_state.get("pine_parity_report"),
+        enforce_parity_when_reference=bool(st.session_state.get("pine_enforce_parity_gate", True)),
+    )
+    st.session_state["pine_execution_gate_report"] = _sanitize_for_json(pine_gate_for_launch)
+    gate_blocks_launch = (
+        strategy_mode_current == "pine_imported"
+        and not bool(pine_gate_for_launch.get("can_run", False))
+    )
+    if gate_blocks_launch:
+        blocker_codes = [
+            str(item.get("code", "unknown"))
+            for item in (pine_gate_for_launch.get("blockers") or [])
+            if isinstance(item, dict)
+        ]
+        st.sidebar.warning(
+            "Pine gate actif: lancement bloqué"
+            + (f" ({', '.join(blocker_codes[:3])})" if blocker_codes else ".")
+        )
     if not st.session_state.get('wfo_running'):
         if st.button(
             "🚀 Start WFO",
             type="primary",
             key="start_wfo_btn",
             width="stretch",
-            help="Lance l'optimisation selon le mode choisi (WFO classique, grille précédente, NN, ou adaptatif continu)."
+            help="Lance l'optimisation selon le mode choisi (WFO classique, grille précédente, NN, ou adaptatif continu).",
+            disabled=gate_blocks_launch,
         ):
-            strategy_mode_current = str(current_conf.get("strategy_mode", DEFAULT_STRATEGY_MODE)).lower()
             adapter_ready = True
+            if gate_blocks_launch:
+                for blocker in pine_gate_for_launch.get("blockers", []) or []:
+                    if isinstance(blocker, dict):
+                        st.error(
+                            f"[{blocker.get('code', 'unknown')}] "
+                            f"{blocker.get('label', '')}: {blocker.get('detail', '')}"
+                        )
+                adapter_ready = False
             if strategy_mode_current != "native_atdmf":
                 compat_mode = str(current_conf.get("pine_compat_mode", "strict")).lower()
                 compat_report = st.session_state.get("pine_compatibility_report")

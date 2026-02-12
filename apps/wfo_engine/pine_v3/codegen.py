@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import hashlib
-import json
+import pprint
 import re
 from typing import Any
 
@@ -29,25 +29,26 @@ def build_generated_strategy_source(
     mapping = import_mapping if isinstance(import_mapping, dict) else {}
     resolution = import_resolution if isinstance(import_resolution, list) else []
 
-    mapping_json = json.dumps(mapping, ensure_ascii=False, indent=2)
-    resolution_json = json.dumps(resolution, ensure_ascii=False, indent=2)
+    mapping_json = pprint.pformat(mapping, sort_dicts=False, width=100)
+    resolution_json = pprint.pformat(resolution, sort_dicts=False, width=100)
+    spec_json = pprint.pformat(spec, sort_dicts=False, width=100)
 
     return (
         '"""Auto-generated Pine adapter module (WFOE V3)."""\n\n'
         "from __future__ import annotations\n\n"
-        "from dataclasses import dataclass\n"
         "from typing import Any\n\n"
-        "from pine_v3.runtime_adapter import PineStrategyTestAdapter\n\n"
+        "from pine_v3.runtime_adapter import GeneratedPineRuntimeAdapter\n\n"
         f"GENERATED_FROM_STRATEGY_ID = {strategy_id!r}\n"
         f"GENERATED_FROM_STRATEGY_NAME = {strategy_name!r}\n"
         f"GENERATED_ADAPTER_ID = {safe_id!r}\n\n"
+        f"GENERATED_STRATEGY_SPEC = {spec_json}\n\n"
         f"EXTERNAL_IMPORT_MAPPING = {mapping_json}\n\n"
         f"EXTERNAL_IMPORT_RESOLUTION = {resolution_json}\n\n"
-        "@dataclass(frozen=True)\n"
         "class GeneratedPineAdapter:\n"
-        "    strategy_mode: str = 'pine_imported'\n"
-        f"    strategy_id: str = {strategy_id!r}\n"
-        "    runtime_config: dict[str, Any] | None = None\n\n"
+        "    strategy_mode = 'pine_imported'\n"
+        f"    strategy_id = {strategy_id!r}\n\n"
+        "    def __init__(self, runtime_config: dict[str, Any] | None = None):\n"
+        "        self.runtime_config = runtime_config\n\n"
         "    def _merged_config(self) -> dict[str, Any]:\n"
         "        cfg = dict(self.runtime_config or {})\n"
         "        if EXTERNAL_IMPORT_MAPPING and not isinstance(cfg.get('pine_import_mapping'), dict):\n"
@@ -59,15 +60,29 @@ def build_generated_strategy_source(
         "            if not isinstance(pre.get('import_resolution'), list):\n"
         "                pre['import_resolution'] = EXTERNAL_IMPORT_RESOLUTION\n"
         "            cfg['pine_precheck_report'] = pre\n"
+        "        if GENERATED_STRATEGY_SPEC and not isinstance(cfg.get('pine_strategy_spec'), dict):\n"
+        "            cfg['pine_strategy_spec'] = GENERATED_STRATEGY_SPEC\n"
         "        return cfg\n\n"
         "    def get_param_space(self) -> dict[str, Any]:\n"
-        "        base = PineStrategyTestAdapter(strategy_id=self.strategy_id, runtime_config=self._merged_config())\n"
+        "        base = GeneratedPineRuntimeAdapter(\n"
+        "            strategy_id=self.strategy_id,\n"
+        "            runtime_config=self._merged_config(),\n"
+        "            strategy_spec=GENERATED_STRATEGY_SPEC,\n"
+        "        )\n"
         "        return base.get_param_space()\n\n"
         "    def generate_signals(self, df, params: dict[str, Any]):\n"
-        "        base = PineStrategyTestAdapter(strategy_id=self.strategy_id, runtime_config=self._merged_config())\n"
+        "        base = GeneratedPineRuntimeAdapter(\n"
+        "            strategy_id=self.strategy_id,\n"
+        "            runtime_config=self._merged_config(),\n"
+        "            strategy_spec=GENERATED_STRATEGY_SPEC,\n"
+        "        )\n"
         "        return base.generate_signals(df, params)\n\n"
         "    def run_backtest(self, df, params: dict[str, Any], timeframe: str = '5s', return_portfolio: bool = True):\n"
-        "        base = PineStrategyTestAdapter(strategy_id=self.strategy_id, runtime_config=self._merged_config())\n"
+        "        base = GeneratedPineRuntimeAdapter(\n"
+        "            strategy_id=self.strategy_id,\n"
+        "            runtime_config=self._merged_config(),\n"
+        "            strategy_spec=GENERATED_STRATEGY_SPEC,\n"
+        "        )\n"
         "        return base.run_backtest(df, params, timeframe=timeframe, return_portfolio=return_portfolio)\n\n"
         "def create_adapter(runtime_config: dict[str, Any] | None = None) -> GeneratedPineAdapter:\n"
         "    return GeneratedPineAdapter(runtime_config=runtime_config)\n"
@@ -117,4 +132,3 @@ def generate_strategy_module_from_spec(
         "strategy_id": strategy_id,
         "source_sha1": source_sha1 or None,
     }
-

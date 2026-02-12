@@ -4,6 +4,58 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 
 ## 2026-02-12
 
+- P1.2 implémenté: support MTF `request.security` dans la transpilation runtime V3:
+  - extraction `strategy_spec.v1` enrichie avec `logic.request_security_calls` (y compris affectations multi-lignes),
+  - runtime transpilé: évaluation dédiée de `request.security(...)` (timeframe, gaps, lookahead) via les helpers MTF `request_security_series`,
+  - prise en charge des affectations multi-cibles (`[a, b] = request.security(..., [expr1, expr2])`),
+  - diagnostics dédiés `pine_request_security_diagnostics.v1` pour tracer les séries MTF générées.
+- Preuve de parité dédiée MTF ajoutée:
+  - nouveau rapport déterministe `pine_mtf_parity_proof.v1` (`apps/wfo_engine/pine_v3/mtf_parity.py`),
+  - UI enrichie avec section "Preuve de parité MTF request.security (P1.2)" + métriques/checks/blockers,
+  - export/replay enrichis: `pine_request_security_diagnostics.json` et `pine_mtf_parity_proof_report.json`,
+  - contexte/config enrichis avec statuts MTF (`pine_request_security_diagnostics_*`, `pine_mtf_parity_proof_*`).
+- P1.4 (lot 4) implémenté: gate d'exécution Pine V3 (hardening bêta):
+  - nouveau module déterministe `pine_execution_gate.v1` (bloqueur/no-go avant `Start WFO` en mode `pine_imported`),
+  - règles de gate: `beta_ready=true` obligatoire, plus `parity_pass=true` si une référence Pine est fournie et que le verrou de parité est activé,
+  - UI enrichie: option `pine_enforce_parity_gate`, statut gate, blockers détaillés, et verrouillage du bouton `Start WFO` si gate en échec,
+  - export/replay enrichi avec `pine_execution_gate_report.json` et persistance dans `results.json`/session,
+  - tests unitaires ajoutés: `apps/wfo_engine/tests/test_pine_v3_execution_gate.py`.
+- P1.4 (lot 3) implémenté: parité avancée événements/trades:
+  - extension du rapport `pine_parity_report.v1` avec `detail_checks` (entry/exit events + trades détaillés),
+  - matching temporel configurable (tolérance secondes) et ratios minimum de correspondance,
+  - UI enrichie avec seuils détaillés, compteurs ref/current et affichage de `detail_pass`,
+  - support du format de référence v1 avec événements/trades (`reference_events`, `reference_trades`) dans le calcul de parité.
+- P1.4 (lot 2) implémenté: référence Pine structurée + contrôles qualité:
+  - format canonique de référence `pine_parity_reference.v1` (payload JSON normalisé),
+  - validation déterministe (`pine_parity_reference_validation.v1`) avec erreurs/avertissements (métriques requises, cohérence counts, valeurs non finies),
+  - UI parité adaptée: import/apply JSON avec normalisation/migration legacy vers v1 et affichage du statut de validation,
+  - export/replay enrichi: `pine_parity_reference.v1.json` + `pine_parity_reference_validation.json` (fallback legacy conservé).
+- P1.4 (lot 1) amorcé: validation de parité Pine/Python en UI + persistance artefacts:
+  - nouvel écran "Validation de parité Pine/Python (P1.4)" avec import JSON de référence, seuils configurables et rapport `parity_pass`,
+  - stockage session/payload de `pine_parity_report` et `pine_parity_reference_metrics`,
+  - export/replay ZIP enrichi avec `pine_parity_report.json` et `pine_parity_reference_metrics.json`,
+  - enrichissement du contexte Expert (`pine_v3_artifacts`) avec statut de parité.
+- V3 beta readiness renforcé:
+  - nouveau rapport déterministe `pine_beta_readiness.v1` calculé depuis précheck + compat + spec + codegen + module généré,
+  - affichage UI (score, blockers runtime, statut go/no-go),
+  - export/replay via `pine_beta_readiness_report.json` (ZIP + `results.json` + payload session).
+- Compatibilité Pine stricte élargie:
+  - détection additionnelle: `strategy.order`, entrées short, `pyramiding`, boucles (`for/while`) et `switch`,
+  - conversion en blockers S0 en mode strict avec recommandations actionnables dédiées.
+- Runtime Pine généré (non `strategy_test`) amélioré:
+  - support des chunks de paramètres vectorisés côté `GeneratedPineRuntimeAdapter`
+    (évaluation interne par combinaison, sans fallback moteur),
+  - test de non-régression ajouté sur exécution vectorisée d'une stratégie générée.
+- V3 Pine codegen/runtime: passage d'un adapter généré délégué (`strategy_test`) à un adapter généré autonome:
+  - `apps/wfo_engine/pine_v3/spec.py` enrichi avec extraction de logique (`logic.assignments`, `logic.order_rules`) depuis le script Pine.
+  - `apps/wfo_engine/pine_v3/runtime_adapter.py` enrichi avec `GeneratedPineRuntimeAdapter`:
+    - transpilation déterministe d'expressions Pine (subset exécutable),
+    - exécution des règles `strategy.entry/exit/close` pour produire des signaux,
+    - backtest générique via `vectorbtpro.Portfolio.from_signals`.
+  - `apps/wfo_engine/pine_v3/codegen.py` mis à jour pour générer un module Python autonome basé sur `GENERATED_STRATEGY_SPEC` (plus de délégation systématique vers `PineStrategyTestAdapter`).
+  - Test runtime ajouté pour une stratégie non `strategy_test`:
+    - `apps/wfo_engine/tests/test_pine_strategy_test_adapter.py::test_generated_pine_adapter_transpiles_non_strategy_test`.
+
 - V3 block 1 implémenté: premier mode `pine_imported` exécutable pour la stratégie de test `docs/wfoe_v3/strategy_test.txt`.
 - Ajout d'un runtime dédié `apps/wfo_engine/pine_v3/runtime_adapter.py`:
   - génération des signaux d'entrée/sortie BB + SMA (version test),

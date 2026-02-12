@@ -132,6 +132,331 @@ def _extract_inputs(text: str) -> list[dict[str, Any]]:
     return inputs
 
 
+def _strip_inline_comment(line: str) -> str:
+    """Remove `//` comments while preserving quoted strings."""
+    out = []
+    in_string = False
+    quote = ""
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        nxt = line[i + 1] if i + 1 < len(line) else ""
+        if in_string:
+            out.append(ch)
+            if ch == quote and (i == 0 or line[i - 1] != "\\"):
+                in_string = False
+        else:
+            if ch in ("'", '"'):
+                in_string = True
+                quote = ch
+                out.append(ch)
+            elif ch == "/" and nxt == "/":
+                break
+            else:
+                out.append(ch)
+        i += 1
+    return "".join(out).rstrip()
+
+
+def _extract_named_string_arg(call_text: str, arg_name: str) -> str:
+    """
+    Extract string argument value from call text.
+
+    Examples:
+    - id='Buy long'
+    - id = "Buy long"
+    """
+    pattern = re.compile(
+        rf"""\b{re.escape(arg_name)}\s*=\s*(['"])(.*?)\1""",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(call_text or "")
+    if match:
+        return str(match.group(2) or "").strip()
+    return ""
+
+
+def _extract_call_action(line: str) -> str:
+    for action in ("entry", "exit", "close", "cancel"):
+        if re.search(rf"""\bstrategy\.{action}\s*\(""", line, flags=re.IGNORECASE):
+            return action
+    return ""
+
+
+def _parse_assignment(stripped_line: str) -> dict[str, Any] | None:
+    """
+    Parse Pine assignment lines into normalized assignment rows.
+
+    Supported examples:
+    - `x = expr`
+    - `x := expr`
+    - `float x = expr`
+    - `[a, b, c] = ta.bb(...)`
+    """
+    line = str(stripped_line or "").strip()
+    if not line:
+        return None
+    lowered = line.lower()
+    if lowered.startswith(("if ", "for ", "while ", "switch ", "return ", "strategy.")):
+        return None
+    if "=>" in line:
+        # Function declaration/lambda-like block.
+        return None
+
+    op = None
+    split_at = -1
+    if ":=" in line:
+        split_at = line.find(":=")
+        op = ":="
+    else:
+        # First plain '=' not part of comparison operators.
+        m = re.search(r"(?<![=!<>])=(?!=)", line)
+        if m:
+            split_at = m.start()
+            op = "="
+    if split_at <= 0 or not op:
+        return None
+
+    lhs = line[:split_at].strip()
+    rhs = line[split_at + len(op) :].strip()
+    if not lhs or not rhs:
+        return None
+
+    if lhs.startswith("[") and lhs.endswith("]"):
+        raw_targets = [x.strip() for x in lhs[1:-1].split(",")]
+        targets = [x for x in raw_targets if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", x)]
+        if not targets:
+            return None
+        return {"targets": targets, "op": op, "expr": rhs}
+
+    if "(" in lhs and ")" in lhs:
+        # Probably function definition or destructuring not handled here.
+        return None
+
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", lhs)
+    if not tokens:
+        return None
+    target = tokens[-1]
+    return {"targets": [target], "op": op, "expr": rhs}
+
+
+def _split_top_level_csv(text: str) -> list[str]:
+    """Split comma-separated args at top-level (ignores nested scopes/strings)."""
+    out: list[str] = []
+    depth = 0
+    in_string = False
+    quote = ""
+    start = 0
+    src = str(text or "")
+    for i, ch in enumerate(src):
+        if in_string:
+            if ch == quote and (i == 0 or src[i - 1] != "\\"):
+                in_string = False
+            continue
+        if ch in ("'", '"'):
+            in_string = True
+            quote = ch
+            continue
+        if ch in "([{":
+            depth += 1
+            continue
+        if ch in ")]}":
+            depth = max(0, depth - 1)
+            continue
+        if ch == "," and depth == 0:
+            out.append(src[start:i].strip())
+            start = i + 1
+    tail = src[start:].strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+def _extract_request_security_details(expr: str) -> dict[str, Any] | None:
+    """
+    Parse `request.security(...)` call details from an expression string.
+
+    Returns normalized fields used by runtime/parity diagnostics.
+    """
+    text = str(expr or "").strip()
+    match = re.match(r"^request\.security\s*\((.*)\)\s*$", text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    args = _split_top_level_csv(match.group(1))
+    if len(args) < 3:
+        return None
+
+    symbol_expr = args[0]
+    timeframe_expr = args[1]
+    expression_expr = args[2]
+
+    gaps_expr = None
+    lookahead_expr = None
+    for arg in args[3:]:
+        if not isinstance(arg, str):
+            continue
+        lowered = arg.lower()
+        if lowered.startswith("gaps"):
+            parts = arg.split("=", 1)
+            if len(parts) == 2:
+                gaps_expr = parts[1].strip()
+        elif lowered.startswith("lookahead"):
+            parts = arg.split("=", 1)
+            if len(parts) == 2:
+                lookahead_expr = parts[1].strip()
+
+    return {
+        "symbol_expr": symbol_expr,
+        "timeframe_expr": timeframe_expr,
+        "expression_expr": expression_expr,
+        "args_count": len(args),
+        "gaps_expr": gaps_expr,
+        "lookahead_expr": lookahead_expr,
+    }
+
+
+def _build_logical_lines(text: str) -> list[dict[str, Any]]:
+    """
+    Build logical statements by merging multiline calls (parentheses/brackets/braces).
+    """
+    rows: list[dict[str, Any]] = []
+    acc: list[str] = []
+    start_line = 1
+    start_indent = 0
+    depth = 0
+    in_string = False
+    quote = ""
+
+    def _append_current():
+        nonlocal acc, start_line, start_indent, depth, in_string, quote
+        if not acc:
+            return
+        merged = " ".join(part.strip() for part in acc if str(part).strip()).strip()
+        if merged:
+            rows.append({"line": start_line, "indent": start_indent, "text": merged})
+        acc = []
+        depth = 0
+        in_string = False
+        quote = ""
+
+    for line_no, raw in enumerate(str(text or "").splitlines(), start=1):
+        cleaned = _strip_inline_comment(raw)
+        if not cleaned.strip():
+            continue
+        if not acc:
+            start_line = line_no
+            start_indent = len(cleaned) - len(cleaned.lstrip(" "))
+
+        acc.append(cleaned)
+        for i, ch in enumerate(cleaned):
+            if in_string:
+                if ch == quote and (i == 0 or cleaned[i - 1] != "\\"):
+                    in_string = False
+                continue
+            if ch in ("'", '"'):
+                in_string = True
+                quote = ch
+                continue
+            if ch in "([{":
+                depth += 1
+                continue
+            if ch in ")]}":
+                depth = max(0, depth - 1)
+                continue
+
+        if depth == 0 and not in_string:
+            _append_current()
+
+    _append_current()
+    return rows
+
+
+def _extract_logic_artifacts(text: str) -> dict[str, Any]:
+    """
+    Extract deterministic logic artifacts from Pine source for codegen/runtime.
+
+    The goal is traceable transcription of:
+    - assignments
+    - order calls and their surrounding `if` conditions
+    """
+    assignments: list[dict[str, Any]] = []
+    order_rules: list[dict[str, Any]] = []
+    request_security_calls: list[dict[str, Any]] = []
+
+    # Stack entries: (indent, condition_expr)
+    if_stack: list[tuple[int, str]] = []
+
+    logical_lines = _build_logical_lines(text)
+    for row in logical_lines:
+        line_no = int(row.get("line", 0) or 0)
+        indent = int(row.get("indent", 0) or 0)
+        stripped = str(row.get("text") or "").strip()
+        if not stripped:
+            continue
+
+        while if_stack and indent <= if_stack[-1][0]:
+            if_stack.pop()
+
+        if re.match(r"^\s*if\s+", stripped, flags=re.IGNORECASE):
+            cond = re.sub(r"^\s*if\s+", "", stripped, flags=re.IGNORECASE).strip()
+            if cond:
+                if_stack.append((indent, cond))
+            continue
+
+        assign_row = _parse_assignment(stripped)
+        if assign_row:
+            expr = str(assign_row["expr"] or "")
+            request_details = _extract_request_security_details(expr)
+            if isinstance(request_details, dict):
+                request_security_calls.append(
+                    {
+                        "line": line_no,
+                        "targets": assign_row["targets"],
+                        "expr": expr,
+                        **request_details,
+                    }
+                )
+            assignments.append(
+                {
+                    "line": line_no,
+                    "targets": assign_row["targets"],
+                    "op": assign_row["op"],
+                    "expr": assign_row["expr"],
+                }
+            )
+
+        action = _extract_call_action(stripped)
+        if action:
+            current_conditions = [expr for _, expr in if_stack]
+            condition_expr = " and ".join(current_conditions) if current_conditions else "true"
+            order_id = _extract_named_string_arg(stripped, "id")
+            direction = _extract_named_string_arg(stripped, "direction")
+            if not order_id:
+                # Fallback: first string literal often carries id for close/cancel.
+                first_string = re.search(r"""(['"])(.*?)\1""", stripped, flags=re.DOTALL)
+                if first_string:
+                    order_id = str(first_string.group(2) or "").strip()
+            order_rules.append(
+                {
+                    "line": line_no,
+                    "action": action,
+                    "id": order_id or None,
+                    "direction": direction or None,
+                    "condition_expr": condition_expr,
+                    "call": stripped,
+                }
+            )
+
+    return {
+        "assignments": assignments,
+        "order_rules": order_rules,
+        "request_security_calls": request_security_calls,
+        "assignment_count": len(assignments),
+        "order_rule_count": len(order_rules),
+        "request_security_count": len(request_security_calls),
+    }
+
+
 def build_strategy_spec_v1_from_pine_text(
     pine_text: str,
     source_name: str = "",
@@ -155,6 +480,7 @@ def build_strategy_spec_v1_from_pine_text(
     imports = _extract_imports(text)
     imports_detail = _extract_imports_detail(text)
     inputs = _extract_inputs(text)
+    logic = _extract_logic_artifacts(text)
 
     detected_precheck = precheck_report.get("detected_features", {}) if isinstance(precheck_report, dict) else {}
     capabilities = {
@@ -219,6 +545,7 @@ def build_strategy_spec_v1_from_pine_text(
             else []
         ),
         "inputs": inputs,
+        "logic": logic,
         "capabilities": capabilities,
         "compatibility_summary": compatibility_report if isinstance(compatibility_report, dict) else None,
         "warnings": warnings,
@@ -318,6 +645,72 @@ def validate_strategy_spec_v1(spec: dict[str, Any]) -> dict[str, Any]:
                 errors.append(f"inputs[{idx}].type must be a string.")
             if "line" in item and not isinstance(item.get("line"), int):
                 errors.append(f"inputs[{idx}].line must be an integer.")
+
+    logic = spec.get("logic")
+    if logic is not None:
+        if not isinstance(logic, dict):
+            errors.append("logic must be an object when provided.")
+        else:
+            assignments = logic.get("assignments")
+            if assignments is not None:
+                if not isinstance(assignments, list):
+                    errors.append("logic.assignments must be an array.")
+                else:
+                    for idx, row in enumerate(assignments):
+                        if not isinstance(row, dict):
+                            errors.append(f"logic.assignments[{idx}] must be an object.")
+                            continue
+                        if not isinstance(row.get("line"), int):
+                            errors.append(f"logic.assignments[{idx}].line must be an integer.")
+                        targets = row.get("targets")
+                        if not isinstance(targets, list) or any(not isinstance(x, str) for x in targets):
+                            errors.append(
+                                f"logic.assignments[{idx}].targets must be an array of strings."
+                            )
+                        if not isinstance(row.get("expr"), str) or not str(row.get("expr")).strip():
+                            errors.append(f"logic.assignments[{idx}].expr must be a non-empty string.")
+            order_rules = logic.get("order_rules")
+            if order_rules is not None:
+                if not isinstance(order_rules, list):
+                    errors.append("logic.order_rules must be an array.")
+                else:
+                    for idx, row in enumerate(order_rules):
+                        if not isinstance(row, dict):
+                            errors.append(f"logic.order_rules[{idx}] must be an object.")
+                            continue
+                        if not isinstance(row.get("line"), int):
+                            errors.append(f"logic.order_rules[{idx}].line must be an integer.")
+                        if not isinstance(row.get("action"), str):
+                            errors.append(f"logic.order_rules[{idx}].action must be a string.")
+                        if not isinstance(row.get("condition_expr"), str):
+                            errors.append(
+                                f"logic.order_rules[{idx}].condition_expr must be a string."
+                            )
+            request_security_calls = logic.get("request_security_calls")
+            if request_security_calls is not None:
+                if not isinstance(request_security_calls, list):
+                    errors.append("logic.request_security_calls must be an array.")
+                else:
+                    for idx, row in enumerate(request_security_calls):
+                        if not isinstance(row, dict):
+                            errors.append(
+                                f"logic.request_security_calls[{idx}] must be an object."
+                            )
+                            continue
+                        if not isinstance(row.get("line"), int):
+                            errors.append(
+                                f"logic.request_security_calls[{idx}].line must be an integer."
+                            )
+                        targets = row.get("targets")
+                        if not isinstance(targets, list) or any(not isinstance(x, str) for x in targets):
+                            errors.append(
+                                f"logic.request_security_calls[{idx}].targets must be an array of strings."
+                            )
+                        for key in ("expr", "timeframe_expr", "expression_expr"):
+                            if not isinstance(row.get(key), str) or not str(row.get(key)).strip():
+                                errors.append(
+                                    f"logic.request_security_calls[{idx}].{key} must be a non-empty string."
+                                )
 
     capabilities = spec.get("capabilities")
     cap_keys = (
