@@ -1,0 +1,785 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ohalloui
+
+//@version=6
+//08/09/2023 V142-145
+//Fait:
+//  - Exit SMA UTC à 30S pour l'UTM 1mn
+//  - Decomment Divergence BB pour Signal T2
+//  - Ajout du critère middle> middle[1] (lignes 331 et l333) pour le signal T1
+//  - Ajout Exit MACD croisement bear (v147)
+//  - Déplacement input critères exit dans groupe exit
+//  - ajouter un critère histo pour l'exit STO (idem sortie SMA UTC)
+//  - ajout croisement type B aux critères Sortie STO 
+//  - Ajout des timeframes Exit SMA UTC pour UTM 2mn/3mn...
+//  - Modifications des filtres croisements (bull & bear) UTM séparation type A et B et histo UTM bear & bull (filtre NOT croisement bear Type A et B) 
+//  - Ajout filtres activables Sto_Overbought UTM et UTP
+//  - Ajout signal de sortie exit Regline_exit_Long_signal (paramétres Regline exit idem longueur BB et Ibarsback filtre regline )
+//  - Modification sortie retournement BB si close >= T1High
+//  - Ajout signal de sortie sur croisement BB% du seuil overbought (defval = 1) //BB_baisse_volat_signal_exit(float Prix = close, int longueurBB = 20, simple float StDev = 2, float overbought = 1 ) 
+//  - Ajout Start et End period pour exit Sto et exit MACD
+//  - Ajout critère Ecart_Bollinger_borne à Signal T0 (activation 'avec écart BB%' et 'Ecart BB% uniquement')
+//  - Modification du filtre SMA UTP par croisement de SMA UTP : UT_principale_SMA_Bullish = (request.security(syminfo.tickerid, TF_UTP, sma1_UTP) >= request.security(syminfo.tickerid, TF_UTP, sma2_UTP)) ?1:0
+//  - markdown du filtre SMA_tendance_LT_Bullish
+//  - suppression de la sélection automatique de l'UTC et de l'UTP
+//  - Ajout de la sélection manuelle des timeframes UTP et UTC
+//  - Ajout des selections mauelles des TF UTP des croisements bear
+//  - Ajout du signal de sortie BB UTC
+//A faire : 
+
+strategy('ATDMF_strat long BTCUSDC_05S-MEXC_V6', overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, precision = 4, commission_type = strategy.commission.percent, commission_value = 0) //,max_bars_back = 5000
+
+import ohalloui/Librairie_indicateurs_preT1/80 as BBT1
+///////----------Parametres à coller--------///////////
+//prix_ref=close
+activ_cross_UTM_type_A_bear = true
+activ_cross_UTM_type_A_bull = false
+activ_cross_UTM_type_B_bear = false
+activ_cross_UTM_type_B_bull = false
+Activ_Regline = false
+//activ_SMA_tendance_LT = false
+Activ_Sto_UTM_Overbought = false
+Activ_Sto_UTP_Overbought = false
+Bars_Back_regline = 1
+Bars_entre_BB = 5
+Bars_left_pivot = 2
+Bars_right_pivot = 2
+Bars_sous_BBW = 4
+cf_mediane = 0.89
+Coeff_mediane_BBW = 1.2
+cross_UTM = 3
+cross_UTM_bear = 0
+cross_UTP = 3
+Depass_RoC = 0.01
+DureeTAC = 3
+End_volat_down = 14
+exit_MACD = false
+exit_regline = false
+exit_SAR = true
+exit_SMA_7_23 = false
+Exit_SMA_UTC_Lg = close
+exit_SMA_UTC = false
+exit_BB_UTC = false
+exit_SMA = true
+exit_STO = false
+exit_TAC = false
+exit_volat_down_default = false
+Fen_BB_lowest = 80
+filtre_UTP_type_A = true
+filtre_UTP_type_B = true
+Histo_BB_UTC = 8
+Histo_BB_retourn = 9
+Histo_MACD_End = 8
+Histo_MACD_Start = 2
+Histo_SMA_UTC = 8
+Histo_STO_End = 5
+Histo_STO_Start = 1
+Lg_SMA_UTC = 9
+Lg_BB_UTC = 20
+StDev_BB_UTC = 2
+Lg1_SMA_UTP_courte = 7
+Lg2_SMA_UTP_longue = 18
+long_mediane = 100
+longueurBB_UTM = 12
+Mult_entries = false
+Nb_bars_above_BB = 1
+Periode_Reglin = 15
+QTY_exit_MACD = 25
+QTY_exit_SAR = 50
+QTY_exit_SMA_UTC_ = 50
+QTY_exit_BB_UTC_ = 50
+QTY_exit_SMA = 100
+QTY_exit_STO = 50
+QTY_exit_TAC = 100
+QTY_exit_volat_down_default = 25
+QTY_regline = 100
+QTY_Retour_BB = 50
+QTY_SMA_7_23 = 50
+Ref_exit_SMA_Lg = low
+Retour_BB = false
+RoC_Max = 100
+Seuil_lowest_BBW = 3.5
+seuil_overbough_BB = 0.85
+SMA_selection = 14 //longueurBB_UTM
+SMA_UTP_duo = true
+SMA23 = 15
+SMA7 = 5
+Start_volat_down = 2
+StDev = 1.3
+Tx_TAC = 2.7
+
+///////////////////////---------VARIABLES INPUTS----------------------///////////////
+Groupe_Signaux_Pre_T1 = 'Groupe Signaux Pre T1'
+longueurBB = input.int(defval = longueurBB_UTM, title = 'longueurBB', group = Groupe_Signaux_Pre_T1, inline = '09')
+//SMA_tendance_LT = input.bool(defval = activ_SMA_tendance_LT, title = "SMA_tendance_LT", group = Groupe_Signaux_Pre_T1, inline = "01")
+//Longueur_SMA_tendance_LT = input(defval = 20, title = "long_SMA_LT", group = Groupe_Signaux_Pre_T1, inline = "01")
+stdev_UTM = input.float(defval = StDev, title = 'stdev_UTM', step = 0.1, group = Groupe_Signaux_Pre_T1, inline = '09')
+activ_type_BB = input.bool(defval = false, title = 'Méthode BB', group = Groupe_Signaux_Pre_T1, inline = '09')
+type_BB = input.string(title = 'Method BB', defval = 'SMA', options = ['SMA', 'EMA', 'SMMA (RMA)', 'WMA', 'VWMA'], group = Groupe_Signaux_Pre_T1, inline = '09')
+
+///////////////////////////////////////______________________________________
+Lgueur_SMA_UTP1 = input(defval = Lg1_SMA_UTP_courte, title = 'Lg1 SMA UTP', group = Groupe_Signaux_Pre_T1, inline = '10')
+double_SMA_UTP = input(defval = SMA_UTP_duo, title = 'SMA_UTP_duo', group = Groupe_Signaux_Pre_T1, inline = '10')
+Lgueur_SMA_UTP2 = input(defval = Lg2_SMA_UTP_longue, title = 'Lg2 SMA UTP', group = Groupe_Signaux_Pre_T1, inline = '10')
+seuil_lowest = input.float(defval = Seuil_lowest_BBW, title = 'Seuil lowest BBW', step = 0.1, group = Groupe_Signaux_Pre_T1, inline = '11')
+fenetre_lowest = input(defval = Fen_BB_lowest, title = 'Fen BB lowest', group = Groupe_Signaux_Pre_T1, inline = '11')
+coeff_medianeBBW = input.float(defval = Coeff_mediane_BBW, title = 'Coeff mediane BBW', step = 0.1, group = Groupe_Signaux_Pre_T1, inline = '11')
+NB_bars_under_BBW_mini = input(defval = Bars_sous_BBW, title = 'Bars_sous_BBW', group = Groupe_Signaux_Pre_T1, inline = '12')
+Critere_BB_Ecart = input.bool(defval = true, title = '+critère BB%', group = Groupe_Signaux_Pre_T1, inline = '12')
+BB_Ecart_unique = input.bool(defval = false, title = 'Ecart BB% seul', group = Groupe_Signaux_Pre_T1, inline = '12')
+length7 = input(defval = SMA7, title = 'SMA 7', group = Groupe_Signaux_Pre_T1, inline = '13')
+length23 = input(defval = SMA23, title = 'SMA 23', group = Groupe_Signaux_Pre_T1, inline = '13')
+Prix = input.source(defval = close, title = 'prix réf', group = Groupe_Signaux_Pre_T1, inline = '19')
+Pyramiding = input.bool(defval = false, title = 'Mult_entries', group = Groupe_Signaux_Pre_T1, inline = '19')
+Nb_bars_entre_BB = input.int(defval = Bars_entre_BB, title = 'Bars entre BB', group = Groupe_Signaux_Pre_T1, inline = '15')
+Nombre_periodes_reglin = input.int(title = 'Periode Reglin', defval = Periode_Reglin, minval = 5, group = Groupe_Signaux_Pre_T1, inline = '16')
+iBarsBack = input(defval = Bars_Back_regline, title = 'Bars Back regline', group = Groupe_Signaux_Pre_T1, inline = '16')
+Depassement_sma_RoC = input.float(defval = Depass_RoC, title = 'Depass SMA20 RoC', step = 0.1, group = Groupe_Signaux_Pre_T1, inline = '17')
+RoC_Max_T1 = input.float(defval = RoC_Max, title = 'RoC_max', step = 0.2, group = Groupe_Signaux_Pre_T1, inline = '17')
+reference_T1_bull = Prix //input(defval = close, title = "Ref T1 Bull", group = Groupe_Signaux_Pre_T1, inline = "19")
+longueur_mediane = input.int(defval = long_mediane, title = 'Long Mediane BB%', group = Groupe_Signaux_Pre_T1, inline = '12')
+coef_mediane = input.float(defval = cf_mediane, title = 'Coeff Med BB%', step = 0.01, group = Groupe_Signaux_Pre_T1, inline = '12')
+Nb_bars_above = input.int(defval = Nb_bars_above_BB, title = 'NB bars above BB%', group = Groupe_Signaux_Pre_T1, inline = '12')
+
+Groupe_Signaux_sortie = 'Groupe Signaux sortie'
+SMA_reference_cross_Long = input.source(defval = close, title = 'Ref exit SMA Lg', group = Groupe_Signaux_sortie, inline = '20')
+SMA_UTC_reference_cross_Long = input.source(defval = close, title = 'Sortie SMA UTC Lg', group = Groupe_Signaux_sortie, inline = '20')
+
+Nb_bars_left_pivot = input(defval = Bars_left_pivot, title = 'Bars left pivot', group = Groupe_Signaux_sortie, inline = '23')
+Nb_bars_right_pivot = input(defval = Bars_right_pivot, title = 'Bars right pivot', group = Groupe_Signaux_sortie, inline = '23')
+
+Groupe_Filtres = 'Groupe Filtres'
+histo_croisements_UTM_bull = input.int(title = 'cross_UTM bull', defval = cross_UTM, group = Groupe_Filtres, inline = '25')
+histo_croisements_UTM_bear = input.int(title = 'cross_UTM bear', defval = cross_UTM_bear, group = Groupe_Filtres, inline = '25')
+histo_croisements_UTP = input.int(title = 'cross_UTP', defval = cross_UTP, group = Groupe_Filtres, inline = '25')
+activation_croisements_type_A_bull = input(title = 'Cross_UTM_type_A_bull', defval = activ_cross_UTM_type_A_bull, group = Groupe_Filtres, inline = '26')
+activation_croisements_type_B_bull = input(title = 'Cross_UTM_type_B_bull', defval = activ_cross_UTM_type_B_bull, group = Groupe_Filtres, inline = '26')
+activation_croisements_type_A_bear = input(title = 'Cross_UTM_type_A_bear', defval = activ_cross_UTM_type_A_bear, group = Groupe_Filtres, inline = '26')
+activation_croisements_type_B_bear = input(title = 'Cross_UTM_type_B_bear', defval = activ_cross_UTM_type_B_bear, group = Groupe_Filtres, inline = '26')
+Filtre_croisements_UTP_type_A = input(title = 'filtre_UTP_type_A', defval = filtre_UTP_type_A, group = Groupe_Filtres, inline = '27')
+Filtre_croisements_UTP_type_B = input(title = 'filtre_UTP_type_B', defval = filtre_UTP_type_B, group = Groupe_Filtres, inline = '27')
+Activation_Regline = input(title = 'Activ_Regline', defval = Activ_Regline, group = Groupe_Filtres, inline = '28')
+Activation_Sto_UTM_Overbought = input(title = 'Activ Sto UTM Overb', defval = Activ_Sto_UTM_Overbought, group = Groupe_Filtres, inline = '28')
+Activation_Sto_UTP_Overbought = input(title = 'Activ Sto UTP Overb', defval = Activ_Sto_UTP_Overbought, group = Groupe_Filtres, inline = '28')
+
+Groupe_Exit = 'Groupe Exit'
+exit_BB_UTC_activation = input(title = 'Exit BB UTC', defval = exit_BB_UTC, group = Groupe_Exit, inline = '29')
+exit_BB_UTC_QTY = input(title = 'QTY BB UTC', defval = QTY_exit_BB_UTC_, group = Groupe_Exit, inline = '29')
+histo_bb_UTC = input(defval = Histo_BB_UTC, title = 'Histo BB UTC', group = Groupe_Exit, inline = '29')
+Lgueur_BB_UTC = input(defval = Lg_BB_UTC, title = 'Lg BB UTC', group = Groupe_Exit, inline = '29')
+Stdev_BB_UTC = input.float(defval = StDev_BB_UTC, title = 'St Dev BB UTC', step = 0.1, group = Groupe_Exit, inline = '29')
+
+exit_SMA_UTC_activation = input(title = 'Sortie SMA UTC', defval = exit_SMA_UTC, group = Groupe_Exit, inline = '30')
+exit_SMA_UTC_QTY = input(title = 'QTY SMA UTC', defval = QTY_exit_SMA_UTC_, group = Groupe_Exit, inline = '30')
+histo_sma_UTC = input(defval = Histo_SMA_UTC, title = 'Histo SMA UTC', group = Groupe_Exit, inline = '30')
+Lgueur_sma_UTC = input(defval = Lg_SMA_UTC, title = 'Lg SMA UTC', group = Groupe_Exit, inline = '30')
+
+exit_SMA_activation = input(title = 'Sortie SMA', defval = exit_SMA, group = Groupe_Exit, inline = '31')
+Lg_SMA_UTM = input(defval = SMA_selection, title = 'long SMA exit', group = Groupe_Exit, inline = '31')
+typeMA = input.string(title = 'Method', defval = 'SMA', options = ['SMA', 'EMA', 'SMMA (RMA)', 'WMA', 'VWMA'], group = Groupe_Exit, inline = '31')
+exit_SMA_QTY = input(title = 'QTY SMA', defval = QTY_exit_SMA, group = Groupe_Exit, inline = '31')
+
+exit_TAC_activation = input(title = 'Sortie TAC', defval = exit_TAC, group = Groupe_Exit, inline = '32')
+exit_TAC_QTY = input(title = 'QTY TAC', defval = QTY_exit_TAC, group = Groupe_Exit, inline = '32')
+tx_TAC = input.float(title = 'Tx TAC', defval = Tx_TAC, step = 0.1, group = Groupe_Exit, inline = '32')
+Duree_TAC = input(title = 'Duree TAC', defval = DureeTAC, group = Groupe_Exit, inline = '32')
+
+exit_SAR_activation = input(title = 'Sortie SAR', defval = exit_SAR, group = Groupe_Exit, inline = '33')
+exit_SAR_QTY = input(title = 'QTY SAR', defval = QTY_exit_SAR, group = Groupe_Exit, inline = '33')
+SAR_start = input.float(0.02, 'start', step = 0.01, group = Groupe_Exit, inline = '33')
+SAR_increment = input.float(0.02, 'Increment', step = 0.01, group = Groupe_Exit, inline = '33')
+SAR_maximum = input.float(0.2, 'Max Value', step = 0.1, group = Groupe_Exit, inline = '33')
+
+exit_STO_UTM_activation = input(title = 'Sortie STO', defval = exit_STO, group = Groupe_Exit, inline = '34')
+exit_STO_UTM_QTY = input(title = 'QTY STO', defval = QTY_exit_STO, group = Groupe_Exit, inline = '34')
+exit_Histo_STO_Start = input(defval = Histo_STO_Start, title = 'Exit STO Start', group = Groupe_Exit, inline = '34')
+exit_Histo_STO_End = input(defval = Histo_STO_End, title = 'Exit STO End', group = Groupe_Exit, inline = '34')
+
+exit_MACD_activation = input(title = 'Sortie MACD', defval = exit_MACD, group = Groupe_Exit, inline = '35')
+exit_MACD_QTY = input(title = 'QTY MACD', defval = QTY_exit_MACD, group = Groupe_Exit, inline = '35')
+exit_Histo_MACD_Start = input(defval = Histo_MACD_Start, title = 'Exit MACD Start', group = Groupe_Exit, inline = '35')
+exit_Histo_MACD_End = input(defval = Histo_MACD_End, title = 'Exit MACD End', group = Groupe_Exit, inline = '35')
+
+exit_SMA_7_23_activation = input(title = 'Sortie SMA 7/23', defval = exit_SMA_7_23, group = Groupe_Exit, inline = '36')
+exit_SMA_7_23_QTY = input(title = 'QTY SMA 7/23', defval = QTY_SMA_7_23, group = Groupe_Exit, inline = '36')
+
+retour_BB_activation = input(title = 'Retour BB', defval = Retour_BB, group = Groupe_Exit, inline = '37')
+retour_BB_QTY = input(title = 'QTY Retour BB', defval = QTY_Retour_BB, group = Groupe_Exit, inline = '37')
+histo_BB_retourn = input(defval = Histo_BB_retourn, title = 'Histo BB', group = Groupe_Exit, inline = '37')
+
+Regline_exit_activation = input(title = 'Sortie Regline', defval = exit_regline, group = Groupe_Exit, inline = '38')
+Regline_exit_QTY = input(title = 'QTY Regline', defval = QTY_regline, group = Groupe_Exit, inline = '38')
+
+exit_volat_down_activation = input(title = 'Baisse %BB', defval = exit_volat_down_default, group = Groupe_Exit, inline = '39')
+exit_volat_down_QTY = input(title = 'QTY Baisse %BB', defval = QTY_exit_volat_down_default, group = Groupe_Exit, inline = '39')
+
+exit_start_volat = input(defval = Start_volat_down, title = 'Start volat down', group = Groupe_Exit, inline = '40')
+exit_end_volat = input(defval = End_volat_down, title = 'End volat down', group = Groupe_Exit, inline = '40')
+
+seuil_overbough_BB_exit = input.float(defval = seuil_overbough_BB, title = 'Seuil Overbought BB', step = 0.01, group = Groupe_Exit, inline = '41')
+[middle, upper, lower] = ta.bb(reference_T1_bull, longueurBB, stdev_UTM)
+
+BB(source, length, type) =>
+    switch type
+        'SMA' => ta.sma(source, length)
+        'EMA' => ta.ema(source, length)
+        'SMMA (RMA)' => ta.rma(source, length)
+        'WMA' => ta.wma(source, length)
+        'VWMA' => ta.vwma(source, length)
+if activ_type_BB == true
+    middle := BB(reference_T1_bull, longueurBB, type_BB)
+    dev = stdev_UTM * ta.stdev(reference_T1_bull, longueurBB)
+    upper := middle + dev
+    lower := middle - dev
+    lower
+    // else
+    //     [middle, upper, lower] = ta.bb(reference_T1_bull, longueurBB, stdev_UTM)
+
+
+plot(middle, title = 'Middle', color = color.black)
+plot(upper, title = 'Upper', color = color.black)
+plot(lower, title = 'Lower', color = color.black)
+
+///////////////////////---------CONDITIONS PRE-T1----------------------///////////////
+UT_majeur = timeframe.period
+TF_UTP = input.timeframe('30S', 'UTP Timeframe')
+TF_UTP_Sto_overbought = input.timeframe('1', 'UTP Sto Overbought')
+TF_UTP_STO_bear = input.timeframe('1', 'UTP Sto Bear')
+TF_UTP_SMA7_23_bear = input.timeframe('1', 'UTP SMA7_23 Bear')
+TF_UTP_MACD_bear = input.timeframe('1', 'UTP MACD Bear')
+UTC = input.timeframe('1S', 'UTC Timeframe')
+
+int NB_bars_under_BBW = 0
+int NB_bars_under_BBW_signal = 0
+int BBandcrossBarssince_signal = na
+[BBW, MMBBW, medianeBBW, seuilBBW, seuilMMBBW, bollingerHorizontal] = BBT1.bollingerHorizontalV3(coeff_medianeBBW = coeff_medianeBBW)
+var pente_regline_bull = 0
+var pente_regline_bear = 0
+int croisementSto_type_A_bull = na
+int croisementSto_type_A_bear = na
+int croisementSto_type_B_bull = na
+int croisementSto_type_B_bear = na
+int croisement_sma7_sma23_anticip_bear_type_A = na
+int croisement_sma7_sma23_anticip_bull_type_A = na
+int croisement_sma7_sma23_anticip_bear_type_B = na
+int croisement_sma7_sma23_anticip_bull_type_B = na
+int exit_sma7_sma23_anticip_bear_type_A = na
+int exit_sma7_sma23_anticip_bull_type_A = na
+int exit_sma7_sma23_anticip_bear_type_B = na
+int exit_sma7_sma23_anticip_bull_type_B = na
+bool MACD_Exit_Long = false
+bool MACD_Exit_Sht = false
+int MACD_croisement_type_A_bull = na
+int MACD_croisement_type_A_bear = na
+int MACD_croisement_type_B_bull = na
+int MACD_croisement_type_B_bear = na
+int STO_bear_UTP_type_A = na
+int STO_bear_UTP_type_B = na
+int SMA7_23_bear_UTP_type_A = na
+int SMA7_23_bear_UTP_type_B = na
+int MACD_bear_UTP_Type_A = na
+int MACD_bear_UTP_Type_B = na
+var float divergence_BB = 0
+var Position_close_Long = 0
+var depassement_RoC_Long = 0
+var BB_retournement_lower_BB = 0
+var SAR_pente_Long = 0
+int croisements_UTM_bear_type_A = 0
+int croisements_UTM_bull_type_A = 0
+int croisements_UTM_bear_type_B = 0
+int croisements_UTM_bull_type_B = 0
+int croisements_UTP_bear_type_A = 0
+int croisements_UTP_bear_type_B = 0
+var float calcul_Cumul_Exit_retournement_BB_Long = 0
+var float calcul_Cumul_Exit_SMA_7_23_Long = 0
+var float calcul_Cumul_Exit_STO_Long = 0
+var float calcul_Cumul_Exit_SAR_Long = 0
+var float calcul_Cumul_Exit_SMA_Long = 0
+var float calcul_Cumul_Exit_SMA_UTC_Long = 0
+var float calcul_Cumul_Exit_TAC_Long = 0
+int sto_Overbought_UTM = 0
+int sto_Overbought_UTP = 0
+
+//----------SIGNAUX PRE T1------------//
+// orientation SMA 20 sur la timeframe principale
+sma1_UTP = request.security(syminfo.tickerid, TF_UTP, ta.sma(Prix, Lgueur_SMA_UTP1))
+sma2_UTP = request.security(syminfo.tickerid, TF_UTP, ta.sma(Prix, Lgueur_SMA_UTP2))
+
+//smaLT = request.security(syminfo.tickerid, "W", ta.sma(close, Longueur_SMA_tendance_LT))
+//SMA_tendance_LT_Bullish = smaLT>=smaLT[1]?1:0
+
+UT_principale_SMA_Bullish = sma1_UTP >= sma1_UTP[1] or sma2_UTP >= sma2_UTP[1] ? 1 : 0
+bullish_UTP_courte = sma1_UTP >= sma1_UTP[1] ? 1 : 0
+sto_Overbought_UTP := request.security(syminfo.tickerid, TF_UTP_Sto_overbought, BBT1.Sto_overbought())
+STO_bear_UTP_type_A := ta.barssince(request.security(syminfo.tickerid, TF_UTP_STO_bear, BBT1.Croisement_stochastique_type_A_bear() == 1)) <= histo_croisements_UTP ? 1 : 0
+SMA7_23_bear_UTP_type_A := ta.barssince(request.security(syminfo.tickerid, TF_UTP_SMA7_23_bear, BBT1.croisement_sma7_sma23_anticip_bear_type_A() == 1)) <= histo_croisements_UTP ? 1 : 0
+MACD_bear_UTP_Type_A := ta.barssince(request.security(syminfo.tickerid, TF_UTP_MACD_bear, BBT1.MACD_croisement_type_A_bear())) <= histo_croisements_UTP ? 1 : 0
+STO_bear_UTP_type_B := ta.barssince(request.security(syminfo.tickerid, TF_UTP_STO_bear, BBT1.Croisement_stochastique_type_B_bear() == 1)) <= histo_croisements_UTP ? 1 : 0
+SMA7_23_bear_UTP_type_B := ta.barssince(request.security(syminfo.tickerid, TF_UTP_SMA7_23_bear, BBT1.croisement_sma7_sma23_anticip_bear_type_B() == 1)) <= histo_croisements_UTP ? 1 : 0
+MACD_bear_UTP_Type_B := ta.barssince(request.security(syminfo.tickerid, TF_UTP_MACD_bear, BBT1.MACD_croisement_type_B_bear() == true)) <= histo_croisements_UTP ? 1 : 0
+exit_sma7_sma23_anticip_bear_type_A := request.security(syminfo.tickerid, UTC, BBT1.croisement_sma7_sma23_anticip_bear_type_A(length7 = length7, length23 = length23))
+exit_sma7_sma23_anticip_bear_type_B := request.security(syminfo.tickerid, UTC, BBT1.croisement_sma7_sma23_anticip_bear_type_B(length7 = length7, length23 = length23))
+reglin = ta.linreg(source = reference_T1_bull, length = Nombre_periodes_reglin, offset = iBarsBack)
+signal_T0_valide = 0
+
+// if  barstate.isconfirmed  
+if double_SMA_UTP == false
+    UT_principale_SMA_Bullish := bullish_UTP_courte
+    UT_principale_SMA_Bullish
+
+[ecart_borne1, moyenne_ecart, mediane, Nb_bars_above_signal] = BBT1.Ecart_Bollinger_borne(Prix = Prix, longueurBB = longueurBB, StDev = stdev_UTM, longueur_mediane = longueur_mediane, coef_mediane = coef_mediane, Nb_bars_above = Nb_bars_above)
+
+[LargeurBB, bbw_lowest, cross_bbw_low_signal] = BBT1.cross_bbw_low_signal(Prix = Prix, longueurBB = longueurBB, fenetre_lowest = fenetre_lowest, seuil_lowest = seuil_lowest)
+// signaux Pre-T1 librairie
+for i = 1 to NB_bars_under_BBW_mini by 1
+    if cross_bbw_low_signal == 1 and cross_bbw_low_signal[i] == 1
+        NB_bars_under_BBW := NB_bars_under_BBW + 1
+        NB_bars_under_BBW
+NB_bars_under_BBW_signal := NB_bars_under_BBW >= NB_bars_under_BBW_mini ? 1 : 0
+
+sto_Overbought_UTM := BBT1.Sto_overbought() == 1 ? 1 : 0
+BBandcrossBarssince_signal := BBT1.BBandcrossBarssince_signal(Prix = Prix, StDev = stdev_UTM, longueurBB = longueurBB, Nb_bars_entre_BB = Nb_bars_entre_BB) == 1 ? 1 : 0
+pente_regline_bull := BBT1.pente_regline_bull(Prix = Prix, Nombre_periodes = Nombre_periodes_reglin, offset = iBarsBack, iBarsBack = iBarsBack) == 1 ? 1 : 0
+Position_close_Long := BBT1.Position_close_long() == 1 ? 1 : 0
+depassement_RoC_Long := BBT1.depassement_RoC_long(Depassement_sma_RoC = Depassement_sma_RoC, RoC_Max_T1 = RoC_Max_T1) == 1 ? 1 : 0
+SAR_pente_Long := BBT1.SAR_pente_long() == 1 ? 1 : 0
+divergence_BB := BBT1.Divergence_BB(upper, lower) == true ? 1 : 0
+
+if activation_croisements_type_A_bull == true
+    croisementSto_type_A_bull := ta.barssince(BBT1.Croisement_stochastique_type_A_bull() == 1) <= histo_croisements_UTM_bull ? 1 : 0
+    MACD_croisement_type_A_bull := ta.barssince(BBT1.MACD_croisement_type_A_bull() == true) <= histo_croisements_UTM_bull ? 1 : 0
+    croisement_sma7_sma23_anticip_bull_type_A := ta.barssince(BBT1.croisement_sma7_sma23_anticip_bull_type_A() == 1) <= histo_croisements_UTM_bull ? 1 : 0
+    croisement_sma7_sma23_anticip_bull_type_A
+
+if activation_croisements_type_B_bull == true
+    croisementSto_type_B_bull := ta.barssince(BBT1.Croisement_stochastique_type_B_bull() == 1) <= histo_croisements_UTM_bull ? 1 : 0
+    MACD_croisement_type_B_bull := ta.barssince(BBT1.MACD_croisement_type_B_bull() == true) <= histo_croisements_UTM_bull ? 1 : 0
+    croisement_sma7_sma23_anticip_bull_type_B := ta.barssince(BBT1.croisement_sma7_sma23_anticip_bull_type_B() == 1) <= histo_croisements_UTM_bull ? 1 : 0
+    croisement_sma7_sma23_anticip_bull_type_B
+
+if activation_croisements_type_A_bear == true
+    croisementSto_type_A_bear := ta.barssince(BBT1.Croisement_stochastique_type_A_bear() == 1) <= histo_croisements_UTM_bear ? 1 : 0
+    MACD_croisement_type_A_bear := ta.barssince(BBT1.MACD_croisement_type_A_bear() == true) <= histo_croisements_UTM_bear ? 1 : 0
+    croisement_sma7_sma23_anticip_bear_type_A := ta.barssince(BBT1.croisement_sma7_sma23_anticip_bear_type_A() == 1) <= histo_croisements_UTM_bear ? 1 : 0
+    croisement_sma7_sma23_anticip_bear_type_A
+else
+    croisementSto_type_A_bear := 0
+    MACD_croisement_type_A_bear := 0
+    croisement_sma7_sma23_anticip_bear_type_A := 0
+    croisement_sma7_sma23_anticip_bear_type_A
+
+if activation_croisements_type_B_bear == true
+    croisementSto_type_B_bear := ta.barssince(BBT1.Croisement_stochastique_type_B_bear() == 1) <= histo_croisements_UTM_bear ? 1 : 0
+    croisement_sma7_sma23_anticip_bear_type_B := ta.barssince(BBT1.croisement_sma7_sma23_anticip_bear_type_B() == 1) <= histo_croisements_UTM_bear ? 1 : 0
+    MACD_croisement_type_B_bear := ta.barssince(BBT1.MACD_croisement_type_B_bear() == true) <= histo_croisements_UTM_bear ? 1 : 0
+    croisementSto_type_A_bear := ta.barssince(BBT1.Croisement_stochastique_type_A_bear() == 1) <= histo_croisements_UTM_bear ? 1 : 0
+    MACD_croisement_type_A_bear := ta.barssince(BBT1.MACD_croisement_type_A_bear() == true) <= histo_croisements_UTM_bear ? 1 : 0
+    croisement_sma7_sma23_anticip_bear_type_A := ta.barssince(BBT1.croisement_sma7_sma23_anticip_bear_type_A() == 1) <= histo_croisements_UTM_bear ? 1 : 0
+    croisement_sma7_sma23_anticip_bear_type_A
+else
+    croisementSto_type_B_bear := 0
+    MACD_croisement_type_B_bear := 0
+    croisement_sma7_sma23_anticip_bear_type_B := 0
+    croisement_sma7_sma23_anticip_bear_type_B
+
+if Activation_Sto_UTM_Overbought == true
+    sto_Overbought_UTM == 1 ? 1 : 0
+else
+    sto_Overbought_UTM := 0
+    sto_Overbought_UTM
+
+if Activation_Sto_UTP_Overbought == true
+    sto_Overbought_UTP == 1 ? 1 : 0
+else
+    sto_Overbought_UTP := 0
+    sto_Overbought_UTP
+    /////////////////----------------- filtre de période de trading----------------//////////
+useDateFilter = input.bool(false, title = 'Activer le filtre de période de trading', group = 'Backtest Time Period', inline = '37')
+startHour = input.int(9, title = 'Heure de début de trading', minval = 0, maxval = 23)
+endHour = input.int(16, title = 'Heure de fin de trading', minval = 0, maxval = 23)
+day_to_trade = dayofweek != 6 and dayofweek != 7
+inTimeWindow = hour >= startHour and hour <= endHour
+inTradeWindow = not useDateFilter or day_to_trade and inTimeWindow
+///////////////////////---------SIGNAL T0----------------------//////////////
+if Pyramiding == true
+    signal_T0_valide := Nb_bars_above_signal == 1 and cross_bbw_low_signal == 1 and NB_bars_under_BBW_signal == 1 and BBandcrossBarssince_signal == 1 and bollingerHorizontal == 1 and inTradeWindow == true ? 1 : 0 // and strategy.position_size == 0
+    signal_T0_valide
+else
+    signal_T0_valide := Nb_bars_above_signal == 1 and cross_bbw_low_signal == 1 and NB_bars_under_BBW_signal == 1 and BBandcrossBarssince_signal == 1 and bollingerHorizontal == 1 and inTradeWindow == true ? 1 : 0 // and strategy.position_size == 0
+    signal_T0_valide
+
+if Critere_BB_Ecart == true
+    signal_T0_valide := Nb_bars_above_signal == 1 and cross_bbw_low_signal == 1 and NB_bars_under_BBW_signal == 1 and BBandcrossBarssince_signal == 1 and bollingerHorizontal == 1 and inTradeWindow == true ? 1 : 0 // and strategy.position_size == 0
+    signal_T0_valide
+else
+    signal_T0_valide := cross_bbw_low_signal == 1 and NB_bars_under_BBW_signal == 1 and BBandcrossBarssince_signal == 1 and bollingerHorizontal == 1 and inTradeWindow == true ? 1 : 0 // and strategy.position_size == 0
+    signal_T0_valide
+
+if BB_Ecart_unique == true
+    signal_T0_valide := Nb_bars_above_signal == 1 and BBandcrossBarssince_signal == 1 and bollingerHorizontal == 1 and inTradeWindow == true ? 1 : 0 // and strategy.position_size == 0
+    signal_T0_valide
+
+///////////////////////---------SIGNAL T1----------------------//////////////
+var signal_T1_bull = false
+cross_over_BB = ta.crossover(reference_T1_bull, upper)
+if activation_croisements_type_A_bull == true
+    // croisements_UTM_bear_type_A := croisement_sma7_sma23_anticip_bear_type_A or MACD_croisement_type_A_bear or croisementSto_type_A_bear ? 1 : 0
+    //croisements_UTM_bull_type_A  := croisement_sma7_sma23_anticip_bull_type_A==1  or MACD_croisement_type_A_bull==1  or croisementSto_type_A_bull==1  ? 1 : 0
+    croisements_UTM_bull_type_A := croisementSto_type_A_bull == 1 ? 1 : 0
+    croisements_UTM_bull_type_A
+
+else // croisements_UTM_bear_type_A := 0
+    croisements_UTM_bull_type_A := 1
+    croisements_UTM_bull_type_A
+
+if activation_croisements_type_B_bull == true
+    //croisements_UTM_bull_type_B := croisement_sma7_sma23_anticip_bull_type_B==1  or MACD_croisement_type_B_bull==1  or croisementSto_type_B_bull==1  ? 1 : 0
+    croisements_UTM_bull_type_B := croisementSto_type_B_bull == 1 ? 1 : 0
+    croisements_UTM_bull_type_B
+
+else // croisements_UTM_bear_type_B := 0
+    croisements_UTM_bull_type_B := 1
+    croisements_UTM_bull_type_B
+
+if activation_croisements_type_A_bear == true
+    // croisements_UTM_bear_type_A := croisement_sma7_sma23_anticip_bear_type_A or MACD_croisement_type_A_bear or croisementSto_type_A_bear ? 1 : 0
+    //croisements_UTM_bear_type_A  := croisement_sma7_sma23_anticip_bear_type_A==1 or MACD_croisement_type_A_bear==1  or croisementSto_type_A_bear==1  ? 1 : 0
+    croisements_UTM_bear_type_A := croisementSto_type_A_bear == 1 ? 1 : 0
+    croisements_UTM_bear_type_A
+
+else // croisements_UTM_bear_type_A := 0
+    croisements_UTM_bear_type_A := 0
+    croisements_UTM_bear_type_A
+
+if activation_croisements_type_B_bear == true
+    // croisements_UTM_bear_type_A := croisement_sma7_sma23_anticip_bear_type_A or MACD_croisement_type_A_bear or croisementSto_type_A_bear ? 1 : 0
+    //croisements_UTM_bear_type_B  := croisement_sma7_sma23_anticip_bear_type_B==1  or MACD_croisement_type_B_bear==1  or croisementSto_type_B_bear==1  or croisement_sma7_sma23_anticip_bear_type_A==1  or MACD_croisement_type_A_bear==1  or croisementSto_type_A_bear==1  ? 1 : 0
+    croisements_UTM_bear_type_B := croisementSto_type_B_bear == 1 or croisementSto_type_A_bear == 1 ? 1 : 0
+    croisements_UTM_bear_type_B
+
+else // croisements_UTM_bear_type_A := 0
+    croisements_UTM_bear_type_B := 0
+    croisements_UTM_bear_type_B
+
+//------Filtre croisement UTP------//
+if Filtre_croisements_UTP_type_A == true
+    //croisements_UTP_bear_type_A := STO_bear_UTP_type_A==1  or SMA7_23_bear_UTP_type_A==1  or MACD_bear_UTP_Type_A==1  ? 1 : 0
+    croisements_UTP_bear_type_A := STO_bear_UTP_type_A == 1 ? 1 : 0
+    croisements_UTP_bear_type_A
+
+if Filtre_croisements_UTP_type_B == true
+    //croisements_UTP_bear_type_B  := STO_bear_UTP_type_B==1  or SMA7_23_bear_UTP_type_B==1  or MACD_bear_UTP_Type_B==1  ? 1 : 0
+    croisements_UTP_bear_type_B := STO_bear_UTP_type_B == 1 ? 1 : 0
+    croisements_UTP_bear_type_B
+
+///////////////////////---------SIGNAL T1----------------------///////////////
+if Activation_Regline == true
+    // signal_T1_bull := (signal_T0_valide == 1 or signal_T0_valide[1] == 1) and cross_over_BB == true and UT_principale_SMA_Bullish == 1 and pente_regline_bull == 1 and depassement_RoC_Long == 1 and croisements_UTM_bull_type_A == 1 and croisements_UTM_bull_type_B == 1 and croisements_UTM_bear_type_A == 0 and croisements_UTM_bear_type_B == 0 and croisements_UTP_bear_type_A == 0 and croisements_UTP_bear_type_B == 0 and sto_Overbought_UTM == 0 and sto_Overbought_UTP == 0 ? true : false //and middle> middle[1] 
+    //and Position_close_Long 
+    signal_T1_bull := (signal_T0_valide == 1 or signal_T0_valide[1] == 1) and cross_over_BB == true and UT_principale_SMA_Bullish == 1 and pente_regline_bull == 1 and depassement_RoC_Long == 1 and croisements_UTM_bull_type_A == 1 and croisements_UTM_bull_type_B == 1 and not bool(croisements_UTM_bear_type_A) and not bool(croisements_UTM_bear_type_B) and not bool(croisements_UTP_bear_type_A) and not bool(croisements_UTP_bear_type_B) and not bool(sto_Overbought_UTM) and not bool(sto_Overbought_UTP) ?  true : false
+
+
+
+else
+    signal_T1_bull := (signal_T0_valide == 1 or signal_T0_valide[1] == 1) and cross_over_BB == true and UT_principale_SMA_Bullish == 1 and depassement_RoC_Long == 1 and croisements_UTM_bull_type_A == 1 and croisements_UTM_bull_type_B == 1 and croisements_UTM_bear_type_A == 0 and croisements_UTM_bear_type_B == 0 and croisements_UTP_bear_type_A == 0 and croisements_UTP_bear_type_B == 0 and sto_Overbought_UTM == 0 and sto_Overbought_UTP == 0 ? true : false//and middle> middle[1] 
+    signal_T1_bull
+    //and Position_close_Long 
+
+// if SMA_tendance_LT == true and SMA_tendance_LT_Bullish == false
+//     signal_T1_bull := na
+
+///////////////////////---------SIGNAL T2----------------------///////////////
+signal_T2_bull = math.round_to_mintick(high) > math.round_to_mintick(high[1]) and signal_T1_bull[1] == true and (divergence_BB == 1 or divergence_BB[1] == 1) ? true : false//and (SAR_pente_Long or SAR_pente_Long[1])
+
+//Tables nombre de signaux
+barsince_last_T1_bull = ta.barssince(signal_T1_bull[1])
+
+///////////////////////---------SIGNAUX DE SORTIE DE POSITION----------------------///////////////
+croisementSto_type_A_bear := BBT1.Croisement_stochastique_type_A_bear() ///!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!   Attention sortie sur le croisement type A seul
+croisementSto_type_A_bull := BBT1.Croisement_stochastique_type_A_bull()
+croisement_sma7_sma23_anticip_bear_type_B := BBT1.croisement_sma7_sma23_anticip_bear_type_B(length7 = length7, length23 = length23) == 1 ? 1 : 0
+croisement_sma7_sma23_anticip_bull_type_B := BBT1.croisement_sma7_sma23_anticip_bull_type_B(length7 = length7, length23 = length23) == 1 ? 1 : 0
+MACD_Exit_Long := BBT1.MACD_croisement_type_A_bear() == true or BBT1.MACD_croisement_type_B_bear() == true
+MACD_Exit_Sht := BBT1.MACD_croisement_type_A_bull() == true or BBT1.MACD_croisement_type_B_bull() == true
+
+///////////////////////---------HIGH POST T2 BULL----------------------///////////////
+cross = signal_T2_bull == true ? high[1] : 0
+var T1High = float(cross)
+Barsince_cross_T2_Bull = ta.barssince(bool(cross))
+
+///////////////////////---------LABEL PRx T1 (High)----------------------///////////////
+if cross > 0
+    label T1High_label = label.new(x = bar_index, y = cross, yloc = yloc.price, textcolor = color.black, color = color.green, style = label.style_arrowup)
+    label.set_text(id = T1High_label, text = 'T1High:' + str.tostring(cross))
+
+///////////////////////---------LABEL PRx EXiT SMA UTM----------------------///////////////
+ma(source, length, type) =>
+    switch type
+        'SMA' => ta.sma(source, length)
+        'EMA' => ta.ema(source, length)
+        'SMMA (RMA)' => ta.rma(source, length)
+        'WMA' => ta.wma(source, length)
+        'VWMA' => ta.vwma(source, length)
+
+
+SMA_UTM = ma(Prix, Lg_SMA_UTM, typeMA)
+SMA_UTM_exit_cross_Long = ta.crossunder(SMA_reference_cross_Long, SMA_UTM)
+SMA_UTM_exit_cross_Long_signal = SMA_UTM_exit_cross_Long and strategy.position_size > 0 // and Barsince_cross_T2_Bull >= 0  and ta.barssince(SMA_UTM_exit_cross_Long)[1] > Barsince_cross_T2_Bull
+Prx_cross_high = high[Barsince_cross_T2_Bull + 1]
+
+if exit_SMA_activation == true
+    if SMA_UTM_exit_cross_Long_signal
+        if SMA_reference_cross_Long == close
+            SMA_UTM := math.round(close, 2)
+            SMA_UTM
+
+        SMA_UTM_exit_Long_Pct = math.round((SMA_UTM - Prx_cross_high) / Prx_cross_high * 100, precision = 3)
+        SMA_UTM_exit_Long_Pct
+        //Label
+        // label Lab_SMA_UTM_exit_Long = label.new(x=bar_index, y=SMA_UTM, yloc = yloc.price, textcolor=color.black, color=color.gray, style = label.style_arrowdown)
+        // label.set_text(id=Lab_SMA_UTM_exit_Long, text="Prx SMA UTM:"  + str.tostring(SMA_UTM) + " \n Pct SMA UTM:" + str.tostring(SMA_UTM_exit_Long_Pct))
+
+///////////////////////---------LABEL PRx EXiT TA change (TAC)----------------------///////////////
+float TAC_exit_long_price = na
+bool TAC_exit_long_signal = false
+if exit_TAC_activation == true
+    TAC_exit_long_signal := strategy.position_size > 0 and Barsince_cross_T2_Bull < Duree_TAC and high > upper and math.abs(high - high[Barsince_cross_T2_Bull]) >= tx_TAC * math.abs(high[Barsince_cross_T2_Bull] - low[Barsince_cross_T2_Bull])
+
+    var array_exit_TAC_Long = array.new_float(1, na)
+    var matrice_exit_TAC_Long = matrix.new<float>(1, 1, na)
+
+    if TAC_exit_long_signal
+        TAC_exit_long_price := high[Barsince_cross_T2_Bull + 1] + tx_TAC * math.abs(high[Barsince_cross_T2_Bull] - low[Barsince_cross_T2_Bull])
+        TAC_exit_long_price
+
+// if exit_SAR_activation == true
+//     var array_exit_SAR_Long = array.new_float(1, na)
+//     var matrice_exit_SAR_Long = matrix.new<float>(1, 1, na)
+
+//     if SAR_UTM_exit_Long_signal
+//         SAR_UTM_exit_Long_Pct =  math.round((SAR_persistent - Prx_cross_high)/Prx_cross_high*100, precision = 3)
+//Label
+// label Lab_SAR_UTM_exit_Long_Pct = label.new(x=bar_index, y=SAR_persistent, yloc = yloc.price, textcolor=color.black, color=color.maroon, style = label.style_arrowdown)
+// label.set_text(id=Lab_SAR_UTM_exit_Long_Pct, text="SAR UTM Prx:"  + str.tostring(SAR_persistent) + " \n SAR UTM Pct:" + str.tostring(SAR_UTM_exit_Long_Pct))
+
+///////////////////////---------LABEL PRx EXiT STO UTM----------------------///////////////
+croisementSto_bear_signal = strategy.position_size > 0 and (croisementSto_type_A_bear == 1 or croisementSto_type_B_bear == 1) and Barsince_cross_T2_Bull >= exit_Histo_STO_Start and Barsince_cross_T2_Bull <= exit_Histo_STO_End //and ta.barssince(croisementSto_type_A_bear)[1] > Barsince_cross_T2_Bull and ta.barssince(croisementSto_type_B_bear)[1] > Barsince_cross_T2_Bull //and Barsince_cross_T2_Bull <= 20  and ta.barssince(SMA_UTM_exit_cross_Long)[1] > Barsince_cross_T2_Bull
+if exit_STO_UTM_activation == true
+    var array_exit_STO_Long = array.new_float(1, na)
+    var matrice_exit_STO_Long = matrix.new<float>(1, 1, na)
+    if croisementSto_bear_signal
+        croisementSto_type_A_bear_Pct = math.round((Prix - Prx_cross_high) / Prx_cross_high * 100, precision = 3)
+        croisementSto_type_A_bear_Pct
+        //Label
+        // label Lab_croisementSto_type_A_bear_Pct = label.new(x=bar_index, y=close, yloc = yloc.price, textcolor= color.black, color=color.maroon, style = label.style_arrowdown)
+        // label.set_text(id=Lab_croisementSto_type_A_bear_Pct, text="STO UTM Prx:"  + str.tostring(close) + " \n STO UTM Pct:" + str.tostring(croisementSto_type_A_bear_Pct))
+
+///////////////////////---------LABEL PRx EXiT MACD----------------------///////////////
+croisementMACD_bear_signal = strategy.position_size > 0 and MACD_Exit_Long and Barsince_cross_T2_Bull >= exit_Histo_MACD_Start and Barsince_cross_T2_Bull <= exit_Histo_MACD_End //and ta.barssince(MACD_Exit_Long)[1] > Barsince_cross_T2_Bull //and Barsince_cross_T2_Bull <= 20  and ta.barssince(SMA_UTM_exit_cross_Long)[1] > Barsince_cross_T2_Bull
+if exit_MACD_activation == true
+    var array_exit_MACD_Long = array.new_float(1, na)
+    var matrice_exit_MACD_Long = matrix.new<float>(1, 1, na)
+    if croisementMACD_bear_signal
+        croisementMACD_bear_Pct = math.round((Prix - Prx_cross_high) / Prx_cross_high * 100, precision = 3)
+        croisementMACD_bear_Pct
+        //Label
+        // label Lab_croisementMACD_bear_Pct = label.new(x=bar_index, y=close, yloc = yloc.price, textcolor= color.black, color=color.black, style = label.style_arrowdown)
+        // label.set_text(id=Lab_croisementMACD_bear_Pct, text="MACD Prx:"  + str.tostring(close) + " \n MACD Pct:" + str.tostring(croisementMACD_bear_Pct))
+
+///////////////////////---------LABEL PRx EXiT SMA_7_23 UTM----------------------///////////////
+bool SMA_7_23_UTM_exit_Long = false
+bool SMA_7_23_UTM_exit_Long_signal = false
+
+if exit_SMA_7_23_activation == true
+    var array_exit_SMA_7_23_Long = array.new_float(1, na)
+    SMA_7_23_UTM_exit_Long := exit_sma7_sma23_anticip_bear_type_B == 1 or exit_sma7_sma23_anticip_bear_type_A == 1
+    SMA_7_23_UTM_exit_Long_signal := strategy.position_size > 0 and SMA_7_23_UTM_exit_Long //and ta.barssince(SMA_7_23_UTM_exit_Long)[1] > Barsince_cross_T2_Bull //and ta.barssince(SMA_UTM_exit_cross_Long)[1] > Barsince_cross_T2_Bull // and exit_SMA_activation == true? ta.barssince(SMA_UTM_exit_cross_Long)[1] > Barsince_cross_T2_Bull : na
+
+    if SMA_7_23_UTM_exit_Long_signal
+        SMA_7_23_UTM_exit_Long_Pct = math.round((Prix - Prx_cross_high) / Prx_cross_high * 100, precision = 3)
+        SMA_7_23_UTM_exit_Long_Pct
+        // label Lab_SMA_7_23_UTM_exit_Long_Pct = label.new(x=bar_index, y=close, yloc = yloc.price, textcolor=color.black, color=color.lime, style = label.style_arrowdown)
+        // label.set_text(id=Lab_SMA_7_23_UTM_exit_Long_Pct, text="SMA_7_23 UTM Prx:"  + str.tostring(close) + " \n SMA_7_23 UTM Pct:" + str.tostring(SMA_7_23_UTM_exit_Long_Pct))
+
+///////////////////////---------LABEL PRx EXiT Retournement BB UTM----------------------///////////////
+BB_retournement_lower_BB := BBT1.BB_retournement_lower_BB(longueurBB = longueurBB, StDev = stdev_UTM, Nb_bars_left_pivot = Nb_bars_left_pivot, Nb_bars_right_pivot = Nb_bars_right_pivot) == 1 ? 1 : 0
+retournement_BB_UTM_exit_Long = BB_retournement_lower_BB
+retournement_BB_UTM_exit_Long_signal = strategy.position_size > 0 and retournement_BB_UTM_exit_Long == 1 and ta.barssince(bool(retournement_BB_UTM_exit_Long))[1] > Barsince_cross_T2_Bull and Barsince_cross_T2_Bull <= histo_BB_retourn //and Barsince_cross_T2_Bull > 1  and ta.barssince(SMA_UTM_exit_cross_Long)[1] > Barsince_cross_T2_Bull
+if retour_BB_activation == true
+    var array_exit_retournement_BB_Long = array.new_float(1, na)
+
+    if retournement_BB_UTM_exit_Long_signal
+        retournement_BB_UTM_exit_Long_Pct = math.round((Prix - Prx_cross_high) / Prx_cross_high * 100, precision = 3)
+        retournement_BB_UTM_exit_Long_Pct
+        // label Lab_retournement_BB_UTM_exit_Long_Pct = label.new(x=bar_index, y=close, yloc = yloc.price, textcolor=color.black, color=color.lime, style = label.style_arrowdown)
+        // label.set_text(id=Lab_retournement_BB_UTM_exit_Long_Pct, text="retour_BB UTM Prx:"  + str.tostring(close) + " \n retournement_BB UTM Pct:" + str.tostring(retournement_BB_UTM_exit_Long_Pct))
+
+///////////////////////---------TABLEAU POST T2 Sht----------------------///////////////
+var table matrice_Nb_Trades = table.new(position = position.bottom_right, columns = 3, rows = 1, border_width = 1)
+var array1_bull = array.new_float()
+if signal_T2_bull == false
+    array.push(array1_bull, signal_T2_bull ? 1 : 0)
+    // array.push(array1_bull, signal_T2_bull)
+    total_bull = 'total Trades bull\n' + str.tostring(array.size(array1_bull))
+    table.cell(matrice_Nb_Trades, 0, 0, text = total_bull, bgcolor = color.blue, text_color = color.white, text_size = size.small)
+total_by_index = str.tostring(math.round(bar_index / array.size(array1_bull)))
+table.cell(matrice_Nb_Trades, 2, 0, text = total_by_index, bgcolor = color.gray, text_color = color.white, text_size = size.small)
+
+////////////////---------STRATEGIE-------------/////////////////
+
+
+//alertMessage = '{ "symbol": "{{ticker}}", "time": "{{time}}", "strategy": { "order_id": "{{strategy.order.id}}", "order_action": "{{strategy.order.action}}", "order_contracts": "{{strategy.order.contracts}}", "order_price": "{{strategy.order.price}}", "strategy_action": "{{strategy.order.comment}}", "use_limit_tp_sl": "false" } }'
+alertMessage = '{ "symbol": "{{ticker}}", "time": "{{time}}", "strategy": { "order_id": "{{strategy.order.id}}", "order_action": "{{strategy.order.action}}", "order_contracts": "{{strategy.order.contracts}}", "order_price": "{{strategy.order.price}}", "strategy_action": "{{strategy.order.comment}}", "use_limit_tp_sl": "false" } }'
+
+if barsince_last_T1_bull >= 2
+    strategy.cancel(id = 'Buy long')
+    strategy.cancel(id = 'Buy long2')
+
+condition_buy = signal_T1_bull == true and strategy.position_size == 0 and inTradeWindow ? 1 : 0
+if condition_buy == 1 //and (divergence_BB or divergence_BB[1]) //  and
+    strategy.entry(id = 'Buy long', direction = strategy.long, stop = high + syminfo.mintick, limit = high + 1000 * syminfo.mintick, comment = 'entry', alert_message = alertMessage)
+    // strategy.entry(id ="Buy long2", direction = strategy.long, stop = high + syminfo.mintick, limit =high-((high - low)/3), comment = "entry2", alert_message = alertMessage )
+    //strategy.order(id = "Buy long2", direction = strategy.long, stop = high + syminfo.mintick, limit =high-((high - low)/3), comment = "order 2", alert_message = alertMessage) 
+if ta.barssince(signal_T1_bull == true) > 1 and strategy.position_size == 0 //and not (divergence_BB or divergence_BB[1]) //inTradeWindow and 
+    //strategy.close(id = "Buy long", comment = "annulation", alert_message = alertMessage, immediately = true )
+    strategy.cancel('Buy long')
+    // strategy.close(id = "Buy long2", comment = "annulation", alert_message = alertMessage, immediately = true )
+    // strategy.cancel( "Buy long2")
+
+// Handle strategy exit
+[_, bb_lower, _] = ta.bb(Prix, Lgueur_BB_UTC, Stdev_BB_UTC)
+bb_lower_exit = request.security(syminfo.tickerid, UTC, bb_lower)
+
+if exit_BB_UTC_activation == true
+    //cross_BB_UTC_signal = ta.crossover(close, bb_lower_exit)
+    cross_bb_UTC_sell = ta.crossunder(Prix, bb_lower_exit) ? 1 : 0
+    cross_bb_UTC_sell_signal = strategy.position_size > 0 and cross_bb_UTC_sell == 1 and Barsince_cross_T2_Bull <= histo_bb_UTC and ta.barssince(cross_bb_UTC_sell[1] == 1) >= Barsince_cross_T2_Bull ? true : false
+
+    if strategy.position_size > 0 and cross_bb_UTC_sell_signal == true
+        strategy.exit(id = 'Sortie BB UTC', from_entry = 'Buy long', qty_percent = exit_BB_UTC_QTY, limit = close, comment = 'Sortie BB UTC', alert_message = alertMessage)
+
+if exit_STO_UTM_activation == true
+    if strategy.position_size > 0 and croisementSto_bear_signal == true
+        strategy.exit(id = 'Sortie STO', from_entry = 'Buy long', qty_percent = exit_STO_UTM_QTY, limit = close, comment = 'Sortie STO', alert_message = alertMessage)
+        // strategy.exit(id = "Sortie STO", from_entry = "Buy long2", qty_percent = exit_STO_UTM_QTY, limit = close, comment = "sortie2", alert_message = alertMessage)
+
+if exit_MACD_activation == true
+    if strategy.position_size > 0 and croisementMACD_bear_signal == true
+        strategy.exit(id = 'Sortie MACD', from_entry = 'Buy long', qty_percent = exit_MACD_QTY, limit = close, comment = 'Sortie annulation', alert_message = alertMessage)
+        // strategy.exit(id = "Sortie MACD", from_entry = "Buy long2", qty_percent = exit_MACD_QTY, limit = close, comment = "sortie2", alert_message = alertMessage)
+
+if exit_TAC_activation == true
+    if strategy.position_size > 0 and TAC_exit_long_signal == true
+        strategy.exit(id = 'Sortie TAC', from_entry = 'Buy long', qty_percent = exit_TAC_QTY, stop = TAC_exit_long_price, limit = TAC_exit_long_price + syminfo.mintick, comment = 'Sortie TAC', alert_message = alertMessage)
+        // strategy.exit(id = "Sortie TAC", from_entry = "Buy long2", qty_percent = exit_TAC_QTY, stop = TAC_exit_long_price, limit = TAC_exit_long_price + syminfo.mintick, comment  = "Sortie2", alert_message = alertMessage)
+
+if retour_BB_activation == true
+    if strategy.position_size > 0 and retournement_BB_UTM_exit_Long_signal == true and Prix >= T1High
+        strategy.exit(id = 'Sortie retour BB', from_entry = 'Buy long', qty_percent = retour_BB_QTY, limit = close, comment = 'Sortie Retour BB', alert_message = alertMessage)
+        // strategy.exit(id = "Sortie retour BB", from_entry = "Buy long2", qty_percent = retour_BB_QTY, limit = close, comment = "sortie2", alert_message = alertMessage)
+
+
+if exit_SMA_7_23_activation == true
+    if strategy.position_size > 0 and SMA_7_23_UTM_exit_Long_signal == true
+        strategy.exit(id = 'Exit SMA_7_23', from_entry = 'Buy long', qty_percent = exit_SMA_7_23_QTY, limit = close, comment = 'Sortie SMA7/23', alert_message = alertMessage)
+        // strategy.exit(id = "Exit SMA_7_23", from_entry = "Buy long2", qty_percent = exit_SMA_7_23_QTY, limit=close, comment = "sortie2 SMA_7_23", alert_message = alertMessage)
+
+if exit_SMA_activation == true
+    if strategy.position_size > 0 and SMA_UTM_exit_cross_Long_signal == true and SMA_reference_cross_Long != close
+        strategy.cancel('Sortie SMA')
+        strategy.exit(id = 'Sortie SMA', from_entry = 'Buy long', qty_percent = exit_SMA_QTY, stop = SMA_UTM, comment = 'Sortie SMA Prix', alert_message = alertMessage)
+        // strategy.exit(id = "Sortie SMA", from_entry = "Buy long2", qty_percent = exit_SMA_QTY, stop = SMA_UTM, comment = "sortie2 SMA", alert_message = alertMessage)
+
+    if strategy.position_size > 0 and SMA_UTM_exit_cross_Long_signal == true and SMA_reference_cross_Long == close
+        strategy.close(id = 'Buy long', qty_percent = exit_SMA_QTY, immediately = false, comment = 'Sortie SMA Close', alert_message = alertMessage)
+        // strategy.close(id = "Buy long2",  qty_percent  = exit_SMA_QTY, immediately = true, comment = "strategie close2 SMA", alert_message = alertMessage)
+
+Regline_exit_Long_signal = ta.crossunder(source1 = reference_T1_bull, source2 = reglin)
+volat_down_exit_long_signal = BBT1.BB_baisse_volat_signal_exit(Prix = Prix, longueurBB = longueurBB_UTM, StDev = stdev_UTM, overbought = seuil_overbough_BB_exit)
+
+if Regline_exit_activation == true
+    if strategy.position_size > 0 and Regline_exit_Long_signal
+        strategy.exit(id = 'Exit Regline', from_entry = 'Buy long', qty_percent = Regline_exit_QTY, limit = close, comment = 'Sortie Regline', alert_message = alertMessage)
+
+if exit_volat_down_activation == true
+    if strategy.position_size > 0 and volat_down_exit_long_signal == 1 and Barsince_cross_T2_Bull >= exit_start_volat and Barsince_cross_T2_Bull <= exit_end_volat
+        strategy.exit(id = 'Exit volat_down', from_entry = 'Buy long', qty_percent = QTY_exit_volat_down_default, limit = close, comment = 'Sortie Volat Down', alert_message = alertMessage)
+
+///////////////////////---------LABEL PRx EXiT SAR UTM----------------------///////////////
+//---Parabolic SAR
+SAR_UTM = ta.sar(SAR_start, SAR_increment, SAR_maximum)
+val_change_SAR_UTM = SAR_UTM[1] - SAR_UTM[2]
+SAR_persistent = math.round(SAR_UTM[1] + val_change_SAR_UTM, precision = 3)
+SAR_UTM_exit_Long = ta.crossunder(low, SAR_persistent) and SAR_UTM[1] > SMA_UTM
+bool SAR_UTM_exit_Long_signal = strategy.position_size > 0 and SAR_UTM_exit_Long and ta.barssince(SAR_UTM_exit_Long)[1] > Barsince_cross_T2_Bull //and Barsince_cross_T2_Bull <= 20 and ta.barssince(SMA_UTM_exit_cross_Long)[1] > Barsince_cross_T2_Bull
+plot(SAR_UTM, 'ParabolicSAR', style = plot.style_cross, color = color.purple)
+
+if exit_SAR_activation == true
+    if strategy.position_size > 0 and SAR_UTM_exit_Long_signal == true
+        strategy.exit(id = 'Sortie SAR', from_entry = 'Buy long', qty_percent = exit_SAR_QTY, stop = SAR_persistent, limit = SAR_UTM, comment = 'Sortie SAR', alert_message = alertMessage)
+        // strategy.exit(id = "Sortie SAR", from_entry = "Buy long2", qty_percent = exit_SAR_QTY, stop = SAR_persistent, comment = "sortie2 SAR", alert_message = alertMessage)
+
+///////////////////////---------SMA UTC----------------------///////////////
+sma_UTC = ta.sma(Prix, Lgueur_sma_UTC)
+array_sma_UTC = request.security_lower_tf(syminfo.tickerid, UTC, sma_UTC)
+float ValSmaUTC = na
+if array.size(array_sma_UTC) > 0
+    ValSmaUTC := math.round(array.get(array_sma_UTC, array.size(array_sma_UTC) - 1), precision = 2)
+    ValSmaUTC
+
+///////////////////////---------LABEL PRx EXiT SMA UTC----------------------///////////////
+if Barsince_cross_T2_Bull >= 1000
+    Barsince_cross_T2_Bull := na
+    Barsince_cross_T2_Bull
+var array_exit_Long = array.new_float(6, na)
+cross_sma_UTC_sell = ta.crossunder(SMA_UTC_reference_cross_Long, ValSmaUTC) ? 1 : 0
+cross_sma_UTC_sell_signal = strategy.position_size > 0 and cross_sma_UTC_sell == 1 and Barsince_cross_T2_Bull <= histo_sma_UTC and ta.barssince(cross_sma_UTC_sell[1] == 1) >= Barsince_cross_T2_Bull ? 1 : 0
+
+// Prx_cross_high = high[Barsince_cross_T2_Bull+1]
+if exit_SMA_UTC_activation == true
+    var array_exit_SMA_UTC_Long = array.new_float(1, na)
+    var matrice_exit_SMA_UTC_Long = matrix.new<float>(1, 1, na)
+    if cross_sma_UTC_sell_signal == 1
+        if SMA_UTC_reference_cross_Long == close
+            ValSmaUTC := close
+            ValSmaUTC
+        SMA_UTC_exit_Long_Pct = math.round((ValSmaUTC - Prx_cross_high) / Prx_cross_high * 100, precision = 3)
+        //Label
+        label Label_SMA_UTC_exit_Long_Pct = label.new(x = bar_index, y = ValSmaUTC, yloc = yloc.price, textcolor = color.black, color = color.red, style = label.style_arrowdown)
+        label.set_text(id = Label_SMA_UTC_exit_Long_Pct, text = 'SMA UTC Prx:' + str.tostring(ValSmaUTC) + ' \n SMA UTC Pct:' + str.tostring(SMA_UTC_exit_Long_Pct))
+
+if exit_SMA_UTC_activation == true
+    if strategy.position_size > 0 and cross_sma_UTC_sell_signal == 1
+        alertMessage = '{ "symbol": "{{ticker}}", "time": "{{time}}", "strategy": { "order_id": "{{strategy.order.id}}", "order_action": "{{strategy.order.action}}", "order_contracts": "{{strategy.order.contracts}}", "order_price": "{{strategy.order.price}}", "strategy_action": "{{strategy.order.comment}}", "use_limit_tp_sl": "false" } }'
+        strategy.exit(id = 'Sortie SMA UTC', from_entry = 'Buy long', qty_percent = exit_SMA_UTC_QTY, limit = sma_UTC, comment = 'Sortie SMA UTC', alert_message = alertMessage)
+
+
+plotshape(signal_T0_valide, title = 'signal_T0_valide', size = size.auto)
+bgcolor(signal_T0_valide == 1 ? color.rgb(0, 255, 0, 80) : na)
+plotshape(signal_T2_bull, title = 'Signal T2 Bull', location = location.belowbar, style = shape.triangleup, size = size.small, color = color.green)
+plotshape(signal_T1_bull, title = 'Signal T1 Bull', location = location.belowbar, style = shape.triangleup, size = size.small, color = color.orange)
+
+//plotshape(croisements_UTP_bear_type_A, color = color.black,title = "STO_bear_UTP_type_A")
+//plotshape(croisements_UTP_bear_type_B, color = color.maroon,title = "STO_bear_UTP_type_B")
+
+// Création de la table
+var table strat_metrics = table.new(position.top_right, 6, 2, border_width = 1)
+
+// Fonction pour mettre à jour les valeurs de la table
+f_update_table() =>
+    table.cell(strat_metrics, 0, 0, 'Metric', text_color = color.white, bgcolor = color.blue)
+    table.cell(strat_metrics, 0, 1, 'Value', text_color = color.white, bgcolor = color.blue)
+    table.cell(strat_metrics, 1, 0, 'Avg trade %')
+    table.cell(strat_metrics, 1, 1, str.tostring(strategy.avg_trade_percent, format.percent))
+    table.cell(strat_metrics, 2, 0, 'Max Drawdown %')
+    table.cell(strat_metrics, 2, 1, str.tostring(strategy.max_drawdown_percent, format.percent))
+    table.cell(strat_metrics, 3, 0, 'Net Profit %')
+    table.cell(strat_metrics, 3, 1, str.tostring(strategy.netprofit_percent, format.percent))
+    table.cell(strat_metrics, 4, 0, 'Total Trades')
+    table.cell(strat_metrics, 4, 1, str.tostring(strategy.closedtrades))
+    table.cell(strat_metrics, 5, 0, 'Win rate %')
+    table.cell(strat_metrics, 5, 1, str.tostring(strategy.wintrades / strategy.closedtrades, format.percent))
+
+// Mise à jour de la table à chaque nouvelle barre
+f_update_table()
+

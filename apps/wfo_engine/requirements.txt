@@ -1,0 +1,14 @@
+# Core application dependencies
+streamlit
+pandas
+numpy
+plotly
+vectorbtpro
+tqdm
+optuna
+numba
+matplotlib
+seaborn
+Pillow
+scikit-optimize
+requests

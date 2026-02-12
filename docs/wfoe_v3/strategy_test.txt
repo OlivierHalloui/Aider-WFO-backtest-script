@@ -1,0 +1,97 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ohalloui
+
+//@version=6
+strategy('ATDMF_strategy_BB_SMA_only long', overlay = true, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, precision = 4, commission_type = strategy.commission.percent, commission_value = 0, max_bars_back = 5000)
+import ohalloui/Librairie_indicateurs_preT1/84 as BBT1
+///////----------Parametres à coller--------///////////
+Bars_entre_BB = 1
+Bars_sous_BBW = 1
+cf_mediane = 1
+Coeff_mediane_BBW = 1.1
+exit_SMA = true
+long_mediane = 100
+longueurBB_UTM = 20
+Nb_bars_above_BB = 1
+Ref_exit_SMA_Lg = close
+Seuil_lowest_BBW = 3.5
+SMA_selection = 20 //longueurBB_UTM
+StDev = 2
+Fen_BB_lowest = 30
+QTY_exit_SMA = 100
+
+///////////////////////---------VARIABLES INPUTS----------------------///////////////
+Groupe_Signaux_Pre_T1 = 'Groupe Signaux Pre T1'
+longueurBB = input.int(defval = longueurBB_UTM, title = 'longueurBB', group = Groupe_Signaux_Pre_T1, inline = '09')
+stdev_UTM = input.float(defval = StDev, title = 'stdev_UTM', step = 0.1, group = Groupe_Signaux_Pre_T1, inline = '09')
+seuil_lowest = input.float(defval = Seuil_lowest_BBW, title = 'Seuil lowest BBW', step = 0.1, group = Groupe_Signaux_Pre_T1, inline = '11')
+fenetre_lowest = input(defval = Fen_BB_lowest, title = 'Fen BB lowest', group = Groupe_Signaux_Pre_T1, inline = '11')
+coeff_medianeBBW = input.float(defval = Coeff_mediane_BBW, title = 'Coeff mediane BBW', step = 0.1, group = Groupe_Signaux_Pre_T1, inline = '11')
+NB_bars_under_BBW_mini = input(defval = Bars_sous_BBW, title = 'Bars_sous_BBW', group = Groupe_Signaux_Pre_T1, inline = '12')
+Critere_BB_Ecart = input.bool(defval = true, title = '+critère BB%', group = Groupe_Signaux_Pre_T1, inline = '12')
+BB_Ecart_unique = input.bool(defval = false, title = 'Ecart BB% seul', group = Groupe_Signaux_Pre_T1, inline = '12')
+Prix = input.source(defval = close, title = 'prix réf', group = Groupe_Signaux_Pre_T1, inline = '19')
+Nb_bars_entre_BB = input.int(defval = Bars_entre_BB, title = 'Bars entre BB', group = Groupe_Signaux_Pre_T1, inline = '15')
+reference_T1_bull = Prix
+longueur_mediane = input.int(defval = long_mediane, title = 'Long Mediane BB%', group = Groupe_Signaux_Pre_T1, inline = '12')
+coef_mediane = input.float(defval = cf_mediane, title = 'Coeff Med BB%', step = 0.01, group = Groupe_Signaux_Pre_T1, inline = '12')
+Nb_bars_above = input.int(defval = Nb_bars_above_BB, title = 'NB bars above BB%', group = Groupe_Signaux_Pre_T1, inline = '12')
+
+Groupe_Signaux_sortie = 'Groupe Signaux sortie'
+SMA_reference_cross_Long = input(defval = close, title = 'Ref exit SMA Lg', group = Groupe_Signaux_sortie, inline = '20')
+SMA_reference_cross_short = input(defval = close, title = 'Ref exit SMA short', group = Groupe_Signaux_sortie, inline = '20')
+
+Groupe_Exit = 'Groupe Exit'
+exit_SMA_activation = input(title = 'Sortie SMA', defval = exit_SMA, group = Groupe_Exit, inline = '30')
+Lg_SMA_UTM = input(defval = SMA_selection, title = 'long SMA exit', group = Groupe_Exit, inline = '30')
+Sh_SMA_UTM = input(defval = SMA_selection, title = 'short SMA exit', group = Groupe_Exit, inline = '30')
+
+exit_SMA_QTY = input(title = 'QTY SMA', defval = QTY_exit_SMA, group = Groupe_Exit, inline = '30')
+[middle, upper, lower] = ta.bb(reference_T1_bull, longueurBB, stdev_UTM)
+plot(upper)
+plot(lower)
+plot(middle)
+//////////---------CONDITIONS PRE-T1----------------------///////////////
+int NB_bars_under_BBW = 0
+int NB_bars_under_BBW_signal = 0
+
+//----------SIGNAUX PRE T1------------//
+[BBW, MMBBW, medianeBBW, seuilBBW, seuilMMBBW, bollingerHorizontal] = BBT1.bollingerHorizontalV3(Prix = Prix, longueurBB = longueurBB, StDev = StDev, coeff_medianeBBW = coeff_medianeBBW)
+[ecart_borne1, moyenne_ecart, mediane, Nb_bars_above_signal] = BBT1.Ecart_Bollinger_borne(Prix = Prix, longueurBB = longueurBB, upper_band = upper, lower_band = lower, longueur_mediane = longueur_mediane, coef_mediane = coef_mediane, Nb_bars_above = Nb_bars_above)
+[LargeurBB, bbw_lowest, cross_bbw_low_signal] = BBT1.cross_bbw_low_signal(Prix = close, longueurBB = longueurBB,  StDev = StDev, fenetre_lowest = fenetre_lowest, seuil_lowest = seuil_lowest)
+BBandcrossBarssince_signal = BBT1.BBandcrossBarssince_signal(Prix = close, longueurBB = longueurBB, StDev = StDev, Nb_bars_entre_BB = Nb_bars_entre_BB)==1?1:0
+
+signal_T0_valide = cross_bbw_low_signal == 1 ? true : false
+
+cross_over_BB = ta.crossover(reference_T1_bull, upper)
+signal_T1_bull = signal_T0_valide == true and cross_over_BB == true ? 1 : 0
+
+barsince_last_T1_bull = ta.barssince(bool(signal_T1_bull[1]))
+typeMA = input.string(title = 'Method', defval = 'SMA', options = ['SMA', 'EMA', 'SMMA (RMA)', 'WMA', 'VWMA'], group = 'Smoothing')
+
+ma(source, length, type) =>
+    switch type
+        'SMA' => ta.sma(source, length)
+        'EMA' => ta.ema(source, length)
+        'SMMA (RMA)' => ta.rma(source, length)
+        'WMA' => ta.wma(source, length)
+        'VWMA' => ta.vwma(source, length)
+
+SMA_UTM = ma(close, Lg_SMA_UTM, typeMA)
+
+SMA_UTM_exit_cross_Long = ta.crossunder(SMA_reference_cross_Long, SMA_UTM)
+SMA_UTM_exit_cross_Long_signal = SMA_UTM_exit_cross_Long and strategy.position_size > 0 // and Barsince_cross_T2_Bull >= 0  and ta.barssince(SMA_UTM_exit_cross_Long)[1] > Barsince_cross_T2_Bull
+
+////////////////---------STRATEGIE-------------/////////////////
+alertMessage = '{ "symbol": "{{ticker}}", "time": "{{time}}", "strategy": { "order_id": "{{strategy.order.id}}", "order_action": "{{strategy.order.action}}", "order_contracts": "{{strategy.order.contracts}}", "order_price": "{{strategy.order.price}}", "strategy_action": "{{strategy.order.comment}}", "use_limit_tp_sl": "false" } }'
+
+if barsince_last_T1_bull >= 2
+    strategy.cancel(id = 'Buy long')
+
+condition_buy = signal_T1_bull == 1 //and strategy.position_size == 0 //and inTradeWindow?1:0
+if condition_buy == true //and (divergence_BB or divergence_BB[1]) //  and
+    // strategy.entry(id ="Buy long", direction = strategy.long, stop = high + syminfo.mintick, limit = high + (1000*syminfo.mintick),  comment = "entry", alert_message = alertMessage )
+    strategy.entry(id = 'Buy long', direction = strategy.long, comment = 'entry', alert_message = alertMessage)
+
+if exit_SMA_activation == true and strategy.position_size > 0 and SMA_UTM_exit_cross_Long_signal == true and SMA_reference_cross_Long == close
+    strategy.close(id = 'Buy long', qty_percent = exit_SMA_QTY, comment = 'Sortie SMA Close', alert_message = alertMessage)
