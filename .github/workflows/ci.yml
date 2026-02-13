@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "chore/repo-cleanup-no-ci"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  tests-and-parity:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: apps/wfo_engine
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install lightweight test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest numpy pandas
+
+      - name: Run Pine V3 test suite
+        run: |
+          pytest -q apps/wfo_engine/tests/test_pine_v3_*.py apps/wfo_engine/tests/test_pine_strategy_test_adapter.py
+
+      - name: Run parity CI campaign (P2.3)
+        run: |
+          python apps/wfo_engine/tests/run_pine_parity_ci.py --output reports/ci/pine_parity_ci_report.json
+
+      - name: Upload parity CI report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pine-parity-ci-report
+          path: reports/ci/pine_parity_ci_report.json
+          if-no-files-found: warn
+
+      - name: Syntax check
+        run: |
+          python -m py_compile apps/wfo_engine/app.py apps/wfo_engine/main.py apps/wfo_engine/wfo.py apps/wfo_engine/adaptive_optimization.py apps/wfo_engine/strategy.py apps/wfo_engine/indicators.py apps/wfo_engine/data_loading.py apps/wfo_engine/config.py
+
