@@ -34,11 +34,12 @@ Critère attendu:
 - `pine_parity_reference_validation.json`
 - `pine_mtf_parity_proof_report.json`
 - `pine_execution_gate_report.json`
+- `pine_order_semantics_report.json`
 - `pine_llm_migration_report.json` (si assistant utilisé)
 
 ## Limitations beta connues
 
 - `request.security_lower_tf` reste hors périmètre stable (bloquant strict/gate beta).
 - Les imports Pine externes nécessitent mapping explicite vers modules Python locaux.
+- Les ordres pending Pine (`limit/stop/trail_*`) restent bloquants en mode strict (`pine_order_semantics`).
 - La campagne CI inclut des scénarios runtime MTF uniquement si `vectorbtpro` est disponible.
-
