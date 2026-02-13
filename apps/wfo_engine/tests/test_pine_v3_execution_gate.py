@@ -97,3 +97,39 @@ def test_gate_can_ignore_parity_when_disabled() -> None:
     assert report["status"] == "pass"
     assert report["can_run"] is True
 
+
+def test_gate_blocks_when_order_semantics_fail_in_strict() -> None:
+    report = build_execution_gate_report(
+        strategy_mode="pine_imported",
+        beta_readiness_report={"beta_ready": True},
+        order_semantics_report={"status": "failed", "passed": False},
+        enforce_order_semantics=True,
+    )
+    assert report["status"] == "blocked"
+    assert report["can_run"] is False
+    codes = {b.get("code") for b in report.get("blockers", [])}
+    assert "order_semantics_not_passed" in codes
+
+
+def test_gate_passes_when_order_semantics_pass_in_strict() -> None:
+    report = build_execution_gate_report(
+        strategy_mode="pine_imported",
+        beta_readiness_report={"beta_ready": True},
+        order_semantics_report={"status": "passed", "passed": True},
+        enforce_order_semantics=True,
+    )
+    assert report["status"] == "pass"
+    assert report["can_run"] is True
+
+
+def test_gate_warns_when_order_semantics_fail_but_disabled() -> None:
+    report = build_execution_gate_report(
+        strategy_mode="pine_imported",
+        beta_readiness_report={"beta_ready": True},
+        order_semantics_report={"status": "failed", "passed": False},
+        enforce_order_semantics=False,
+    )
+    assert report["status"] == "pass"
+    assert report["can_run"] is True
+    warnings = report.get("warnings", []) or []
+    assert any("order semantics" in str(w).lower() for w in warnings)

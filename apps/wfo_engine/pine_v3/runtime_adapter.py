@@ -392,6 +392,180 @@ def _raise_external_contract_error(contract_report: dict[str, Any]) -> None:
     )
 
 
+def _extract_named_args_from_call_text(call_text: str) -> dict[str, str]:
+    text = str(call_text or "")
+    out: dict[str, str] = {}
+    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^,)\n]+)", text):
+        key = str(match.group(1) or "").strip().lower()
+        value = str(match.group(2) or "").strip()
+        if key:
+            out[key] = value
+    return out
+
+
+def _collect_order_rule_args(rule: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
+    args_positional = rule.get("args_positional")
+    args_named = rule.get("args_named")
+    pos = [str(x) for x in args_positional] if isinstance(args_positional, list) else []
+    named = (
+        {str(k).strip().lower(): str(v) for k, v in args_named.items()}
+        if isinstance(args_named, dict)
+        else {}
+    )
+    if not named:
+        named = _extract_named_args_from_call_text(str(rule.get("call") or ""))
+    return pos, named
+
+
+def build_order_semantics_report(
+    strategy_spec: dict[str, Any] | None,
+    runtime_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Validate order semantics compatibility for transpiled runtime.
+
+    Current runtime supports market-like signals and does not reproduce
+    pending order controls (`limit`, `stop`, trailing variants).
+    """
+    spec = _safe_dict(strategy_spec)
+    _cfg = _safe_dict(runtime_config)
+    logic = _safe_dict(spec.get("logic"))
+    order_rules = _safe_list(logic.get("order_rules"))
+
+    unsupported_price_keys = {
+        "limit",
+        "stop",
+        "trail_price",
+        "trail_offset",
+        "trail_points",
+        "oca_name",
+        "oca_type",
+    }
+    qty_keys = {"qty", "qty_percent"}
+
+    rows: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    rules_with_price_controls = 0
+    rules_with_qty_controls = 0
+    entry_qty_modes: set[str] = set()
+
+    for rule in order_rules:
+        if not isinstance(rule, dict):
+            continue
+        action = str(rule.get("action") or "").strip().lower()
+        line_no = int(rule.get("line", 0) or 0)
+        direction = str(rule.get("direction") or "").strip()
+        order_id = str(rule.get("id") or "").strip()
+        pos_args, named_args = _collect_order_rule_args(rule)
+        named_keys = set(named_args.keys())
+        found_price_keys = sorted(k for k in named_keys if k in unsupported_price_keys)
+        found_qty_keys = sorted(k for k in named_keys if k in qty_keys)
+        if action in {"entry", "order"} and len(pos_args) >= 3:
+            # Positional qty is allowed in Pine and currently not mapped precisely.
+            found_qty_keys.append("positional_qty")
+
+        if "qty_percent" in found_qty_keys:
+            entry_qty_modes.add("percent")
+        if "qty" in found_qty_keys or "positional_qty" in found_qty_keys:
+            entry_qty_modes.add("amount")
+
+        if action in {"entry", "order"} and ("qty_percent" in found_qty_keys and ("qty" in found_qty_keys or "positional_qty" in found_qty_keys)):
+            blockers.append(
+                {
+                    "code": "mixed_qty_same_rule",
+                    "line": line_no,
+                    "action": action,
+                    "id": order_id or None,
+                    "detail": "La règle combine `qty_percent` et `qty` (ou qty positionnel), non supporté en beta.",
+                }
+            )
+        if found_price_keys:
+            rules_with_price_controls += 1
+            blockers.append(
+                {
+                    "code": "unsupported_order_price_controls",
+                    "line": line_no,
+                    "action": action,
+                    "id": order_id or None,
+                    "detail": f"Arguments non supportés par runtime: {', '.join(found_price_keys)}",
+                }
+            )
+        if found_qty_keys:
+            rules_with_qty_controls += 1
+            if action in {"exit", "close"}:
+                warnings.append(
+                    f"Règle ligne {line_no}: qty/qty_percent sur exit/close détecté ({', '.join(found_qty_keys)}), "
+                    "sorties partielles non reproduites fidèlement en beta."
+                )
+            warnings.append(
+                f"Règle ligne {line_no}: qty/qty_percent détecté ({', '.join(found_qty_keys)}), "
+                "interprétation partielle possible en mode beta."
+            )
+
+        rows.append(
+            {
+                "line": line_no,
+                "action": action,
+                "id": order_id or None,
+                "direction": direction or None,
+                "args_named_keys": sorted(named_keys),
+                "args_positional_count": len(pos_args),
+                "uses_price_controls": bool(found_price_keys),
+                "uses_qty_controls": bool(found_qty_keys),
+            }
+        )
+
+    if len(entry_qty_modes) > 1:
+        blockers.append(
+            {
+                "code": "mixed_qty_modes",
+                "line": 0,
+                "action": "entry/order",
+                "id": None,
+                "detail": "Mix `qty_percent` et `qty` détecté sur les règles d'entrée: choisir un mode unique.",
+            }
+        )
+
+    return {
+        "schema_version": "pine_order_semantics.v1",
+        "status": "passed" if len(blockers) == 0 else "failed",
+        "passed": len(blockers) == 0,
+        "order_rule_count": len(rows),
+        "rules_with_price_controls": int(rules_with_price_controls),
+        "rules_with_qty_controls": int(rules_with_qty_controls),
+        "entry_qty_modes": sorted(entry_qty_modes),
+        "rows": rows,
+        "blockers": blockers,
+        "warnings": warnings,
+    }
+
+
+def _should_enforce_order_semantics(runtime_config: dict[str, Any] | None) -> bool:
+    cfg = _safe_dict(runtime_config)
+    compat_mode = str(cfg.get("pine_compat_mode", "strict") or "strict").strip().lower()
+    if "pine_enforce_order_semantics" in cfg:
+        return bool(cfg.get("pine_enforce_order_semantics"))
+    return compat_mode == "strict"
+
+
+def _raise_order_semantics_error(report: dict[str, Any]) -> None:
+    blockers = _safe_list(report.get("blockers"))
+    formatted: list[str] = []
+    for row in blockers[:6]:
+        if not isinstance(row, dict):
+            continue
+        formatted.append(
+            f"[{row.get('code', 'unknown')}] line {row.get('line', '?')} "
+            f"action={row.get('action', '?')} id={row.get('id', '?')}: {row.get('detail', '')}"
+        )
+    suffix = "; ".join(formatted) if formatted else "order semantics contract failed"
+    raise NotImplementedError(
+        "Pine runtime order semantics contract failed in strict mode. " + suffix
+    )
+
+
 def _safe_series_like(value: Any, index: pd.Index):
     """
     Convert values returned by mapped external functions to a bool series aligned on index.
@@ -1027,6 +1201,14 @@ def _bool_series(value: Any, index: pd.Index):
         return series.fillna(False).astype(bool)
     except Exception:
         return pd.Series(False, index=index)
+
+
+def _float_series(value: Any, index: pd.Index, default: float = np.nan):
+    series = _series_like(value, index=index, default=default)
+    try:
+        return pd.to_numeric(series, errors="coerce")
+    except Exception:
+        return pd.Series(default, index=index, dtype=float)
 
 
 def _coerce_length(length: Any, default: int = 20) -> int:
@@ -1675,6 +1857,35 @@ def _eval_assignments(
             env[str(target)] = value
 
 
+def _extract_entry_qty_controls(rule: dict[str, Any]) -> tuple[str | None, str | None]:
+    """
+    Return qty mode and expression for entry/order rule.
+
+    Modes:
+    - "percent": expression is qty_percent raw value (e.g. 25 -> 25%)
+    - "amount": expression is qty raw value
+    """
+    if not isinstance(rule, dict):
+        return None, None
+    action = str(rule.get("action") or "").strip().lower()
+    if action not in {"entry", "order"}:
+        return None, None
+
+    pos_args, named_args = _collect_order_rule_args(rule)
+    qty_percent_expr = str(named_args.get("qty_percent") or "").strip()
+    qty_expr = str(named_args.get("qty") or "").strip()
+    if not qty_expr and len(pos_args) >= 3:
+        qty_expr = str(pos_args[2] or "").strip()
+
+    if qty_percent_expr and (qty_expr):
+        return "mixed", None
+    if qty_percent_expr:
+        return "percent", qty_percent_expr
+    if qty_expr:
+        return "amount", qty_expr
+    return None, None
+
+
 def _build_transpiled_signals(
     df: pd.DataFrame,
     params: dict[str, Any],
@@ -1707,6 +1918,11 @@ def _build_transpiled_signals(
 
     entry_signal = pd.Series(False, index=df.index)
     exit_signal = pd.Series(False, index=df.index)
+    short_entry_signal = pd.Series(False, index=df.index)
+    short_exit_signal = pd.Series(False, index=df.index)
+    long_entry_size_override = pd.Series(np.nan, index=df.index, dtype=float)
+    short_entry_size_override = pd.Series(np.nan, index=df.index, dtype=float)
+    size_mode_candidates: set[str] = set()
 
     for rule in order_rules:
         if not isinstance(rule, dict):
@@ -1714,26 +1930,70 @@ def _build_transpiled_signals(
         action = str(rule.get("action") or "").strip().lower()
         cond_raw = str(rule.get("condition_expr") or "true").strip()
         cond_py = _pine_expr_to_python(cond_raw)
-        if action == "entry":
+        if action in {"entry", "order"}:
             direction = str(rule.get("direction") or "").strip().lower()
-            if direction and "short" in direction:
-                warnings.append("strategy.entry short détecté: ignoré (long-only runtime).")
-                continue
             cond_val = _safe_eval_expr(cond_py, entry_env, index=df.index)
-            entry_signal = entry_signal | _bool_series(cond_val, index=df.index)
+            cond_bool = _bool_series(cond_val, index=df.index)
+            qty_mode, qty_expr = _extract_entry_qty_controls(rule)
+            if qty_mode == "mixed":
+                warnings.append(
+                    f"Règle ligne {rule.get('line', '?')}: mélange qty/qty_percent non supporté en transpilation beta."
+                )
+            qty_series = None
+            if qty_mode in {"percent", "amount"} and isinstance(qty_expr, str) and qty_expr.strip():
+                qty_val = _safe_eval_expr(_pine_expr_to_python(qty_expr), entry_env, index=df.index)
+                qty_series = _float_series(qty_val, index=df.index, default=np.nan)
+                qty_series = qty_series.where(qty_series >= 0.0, np.nan)
+                if qty_mode == "percent":
+                    qty_series = qty_series / 100.0
+                size_mode_candidates.add(qty_mode)
+            if "short" in direction:
+                short_entry_signal = short_entry_signal | cond_bool
+                if isinstance(qty_series, pd.Series):
+                    candidate = qty_series.where(cond_bool, np.nan)
+                    short_entry_size_override = pd.concat(
+                        [short_entry_size_override, candidate], axis=1
+                    ).max(axis=1, skipna=True)
+                continue
+            if not direction:
+                warnings.append(
+                    f"Règle strategy.{action} sans direction explicite (ligne {rule.get('line', '?')}): long par défaut."
+                )
+            entry_signal = entry_signal | cond_bool
+            if isinstance(qty_series, pd.Series):
+                candidate = qty_series.where(cond_bool, np.nan)
+                long_entry_size_override = pd.concat(
+                    [long_entry_size_override, candidate], axis=1
+                ).max(axis=1, skipna=True)
         elif action in {"exit", "close"}:
             cond_val = _safe_eval_expr(cond_py, exit_env, index=df.index)
-            exit_signal = exit_signal | _bool_series(cond_val, index=df.index)
+            cond_bool = _bool_series(cond_val, index=df.index)
+            exit_signal = exit_signal | cond_bool
+            short_exit_signal = short_exit_signal | cond_bool
         elif action == "cancel":
             # No pending-order model in from_signals.
             continue
 
     if len(order_rules) == 0:
-        warnings.append("Aucune règle strategy.entry/exit détectée dans le spec.")
+        warnings.append("Aucune règle strategy.entry/order/exit détectée dans le spec.")
+    if len(size_mode_candidates) > 1:
+        warnings.append(
+            "Mix qty_percent/qty détecté sur les entrées: comportement sizing non déterministe, "
+            "appliquer un seul mode."
+        )
+
+    size_mode_hint = next(iter(size_mode_candidates)) if len(size_mode_candidates) == 1 else None
+    has_size_overrides = bool(long_entry_size_override.notna().any() or short_entry_size_override.notna().any())
 
     return {
         "entry_signal": entry_signal.fillna(False).astype(bool),
         "exit_signal": exit_signal.fillna(False).astype(bool),
+        "short_entry_signal": short_entry_signal.fillna(False).astype(bool),
+        "short_exit_signal": short_exit_signal.fillna(False).astype(bool),
+        "entry_size_long_override": long_entry_size_override,
+        "entry_size_short_override": short_entry_size_override,
+        "entry_size_mode_hint": size_mode_hint,
+        "entry_size_has_overrides": has_size_overrides,
         "transpile_warnings": warnings,
         "order_rule_count": len(order_rules),
         "assignment_count": len(assignments),
@@ -1928,6 +2188,11 @@ def run_transpiled_pine_backtest(
     )
     entries = signals["entry_signal"]
     exits = signals["exit_signal"]
+    short_entries = signals.get("short_entry_signal")
+    short_exits = signals.get("short_exit_signal")
+    size_mode_hint = str(signals.get("entry_size_mode_hint") or "").strip().lower()
+    entry_size_long_override = signals.get("entry_size_long_override")
+    entry_size_short_override = signals.get("entry_size_short_override")
 
     order_sizing_mode = str(_safe_scalar(params.get("order_sizing_mode", "percent_equity"), "percent_equity"))
     order_fixed_cash = float(_safe_scalar(params.get("order_fixed_cash", 10000.0), 10000.0))
@@ -1941,16 +2206,35 @@ def run_transpiled_pine_backtest(
         size = 1.0
         size_type = "percent"
 
-    portfolio = vbt.Portfolio.from_signals(
-        close=df["Close"],
-        entries=entries,
-        exits=exits,
-        size=size,
-        size_type=size_type,
-        init_cash=10000,
-        fees=fees,
-        freq=timeframe,
-    )
+    if size_mode_hint in {"percent", "amount"}:
+        size_type = "percent" if size_mode_hint == "percent" else "amount"
+        if size_mode_hint == "percent":
+            default_size = 1.0
+        else:
+            default_size = order_fixed_cash if order_sizing_mode == "fixed_cash" else 1.0
+        size_series = pd.Series(float(default_size), index=df.index, dtype=float)
+        if isinstance(entry_size_long_override, pd.Series):
+            long_candidate = entry_size_long_override.where(entries, np.nan)
+            size_series = long_candidate.combine_first(size_series)
+        if isinstance(short_entries, pd.Series) and isinstance(entry_size_short_override, pd.Series):
+            short_candidate = entry_size_short_override.where(short_entries, np.nan)
+            size_series = short_candidate.combine_first(size_series)
+        size = size_series
+
+    pf_kwargs = {
+        "close": df["Close"],
+        "entries": entries,
+        "exits": exits,
+        "size": size,
+        "size_type": size_type,
+        "init_cash": 10000,
+        "fees": fees,
+        "freq": timeframe,
+    }
+    if isinstance(short_entries, pd.Series) and isinstance(short_exits, pd.Series):
+        pf_kwargs["short_entries"] = short_entries
+        pf_kwargs["short_exits"] = short_exits
+    portfolio = vbt.Portfolio.from_signals(**pf_kwargs)
     if return_portfolio:
         return portfolio
     return _score_portfolio(portfolio, params)
@@ -1990,6 +2274,12 @@ class GeneratedPineRuntimeAdapter:
             external_bindings=(bindings if isinstance(bindings, dict) else self._external_bindings()),
         )
 
+    def _order_semantics(self) -> dict[str, Any]:
+        return build_order_semantics_report(
+            strategy_spec=self._spec(),
+            runtime_config=self.runtime_config,
+        )
+
     def get_param_space(self) -> dict[str, Any]:
         spec = self._spec()
         space = _build_param_space_from_spec(spec)
@@ -1999,8 +2289,11 @@ class GeneratedPineRuntimeAdapter:
         spec = self._spec()
         bindings = self._external_bindings()
         contract = self._external_contract(bindings)
+        order_semantics = self._order_semantics()
         if _should_enforce_external_contract(self.runtime_config) and not bool(contract.get("passed", False)):
             _raise_external_contract_error(contract)
+        if _should_enforce_order_semantics(self.runtime_config) and not bool(order_semantics.get("passed", False)):
+            _raise_order_semantics_error(order_semantics)
         signals = _build_transpiled_signals(
             df=df,
             params=params,
@@ -2009,14 +2302,18 @@ class GeneratedPineRuntimeAdapter:
         )
         if isinstance(signals, dict):
             signals["external_call_contract"] = contract
+            signals["order_semantics"] = order_semantics
         return signals
 
     def run_backtest(self, df, params: dict[str, Any], timeframe: str = "5s", return_portfolio: bool = True):
         spec = self._spec()
         bindings = self._external_bindings()
         contract = self._external_contract(bindings)
+        order_semantics = self._order_semantics()
         if _should_enforce_external_contract(self.runtime_config) and not bool(contract.get("passed", False)):
             _raise_external_contract_error(contract)
+        if _should_enforce_order_semantics(self.runtime_config) and not bool(order_semantics.get("passed", False)):
+            _raise_order_semantics_error(order_semantics)
         return run_transpiled_pine_backtest(
             df=df,
             params=params,

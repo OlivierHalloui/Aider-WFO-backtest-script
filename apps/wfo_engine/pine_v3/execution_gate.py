@@ -12,6 +12,8 @@ def build_execution_gate_report(
     parity_reference_validation: dict | None = None,
     parity_report: dict | None = None,
     enforce_parity_when_reference: bool = True,
+    order_semantics_report: dict | None = None,
+    enforce_order_semantics: bool = True,
 ) -> dict:
     """Return a deterministic run gate for Pine V3 execution.
 
@@ -29,6 +31,7 @@ def build_execution_gate_report(
         parity_reference_validation if isinstance(parity_reference_validation, dict) else {}
     )
     parity = parity_report if isinstance(parity_report, dict) else {}
+    order_semantics = order_semantics_report if isinstance(order_semantics_report, dict) else {}
 
     checks: list[dict] = []
     blockers: list[dict] = []
@@ -136,6 +139,43 @@ def build_execution_gate_report(
             "Aucune référence Pine fournie: gate de parité ignoré pour ce run."
         )
 
+    has_order_semantics_report = bool(order_semantics)
+    if enforce_order_semantics:
+        order_semantics_pass = (
+            order_semantics.get("passed")
+            if has_order_semantics_report and "passed" in order_semantics
+            else None
+        )
+        checks.append(
+            {
+                "id": "order_semantics_pass",
+                "label": "Sémantique d'ordres compatible runtime",
+                "required": has_order_semantics_report,
+                "passed": order_semantics_pass is True if has_order_semantics_report else None,
+                "detail": (
+                    f"available={has_order_semantics_report}, status={order_semantics.get('status')}"
+                    if has_order_semantics_report
+                    else "available=False"
+                ),
+            }
+        )
+        if not has_order_semantics_report:
+            warnings.append(
+                "Rapport de sémantique d'ordres absent: gate order semantics ignoré pour ce run."
+            )
+        elif order_semantics_pass is not True:
+            blockers.append(
+                {
+                    "code": "order_semantics_not_passed",
+                    "label": "Sémantique d'ordres Pine non validée",
+                    "detail": f"status={order_semantics.get('status')}, passed={order_semantics_pass}",
+                }
+            )
+    elif has_order_semantics_report and order_semantics.get("passed") is not True:
+        warnings.append(
+            "Rapport order semantics en échec mais verrou désactivé (exécution autorisée)."
+        )
+
     can_run = len(blockers) == 0
     return {
         "schema_version": "pine_execution_gate.v1",
@@ -144,9 +184,10 @@ def build_execution_gate_report(
         "status": "pass" if can_run else "blocked",
         "can_run": can_run,
         "enforce_parity_when_reference": bool(enforce_parity_when_reference),
+        "enforce_order_semantics": bool(enforce_order_semantics),
         "parity_reference_present": has_parity_reference,
+        "order_semantics_report_present": has_order_semantics_report,
         "checks": checks,
         "blockers": blockers,
         "warnings": warnings,
     }
-

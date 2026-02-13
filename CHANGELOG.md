@@ -4,6 +4,27 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 
 ## 2026-02-12
 
+- Runtime transpilation Pine V3 enrichi pour les ordres `short`:
+  - `strategy.order(...)` est désormais extrait dans `strategy_spec.v1` (action `order`) avec récupération robuste de `id`/`direction` (nommés ou positionnels),
+  - support d'exécution `short` côté runtime transpilé via `short_entry_signal` / `short_exit_signal`,
+  - `run_transpiled_pine_backtest` branche ces signaux sur `vectorbtpro.Portfolio.from_signals` (`short_entries`/`short_exits`),
+  - contrat `capabilities` étendu avec `uses_strategy_order`,
+  - tests ajoutés:
+    - `apps/wfo_engine/tests/test_pine_v3_spec.py::test_spec_extracts_strategy_order_short_direction`,
+    - `apps/wfo_engine/tests/test_pine_v3_runtime_mtf_transpile.py::test_generated_runtime_supports_short_order_signals`.
+- Hardening supplémentaire sur la sémantique des ordres Pine:
+  - `strategy_spec.v1` enrichi avec `logic.order_rules[*].args_positional` et `args_named`,
+  - nouveau rapport runtime `pine_order_semantics.v1` dans `apps/wfo_engine/pine_v3/runtime_adapter.py`,
+  - en mode strict, blocage explicite si `limit/stop/trail_*` sont détectés (`pine_enforce_order_semantics`),
+  - support contrôlé du sizing d'entrée `qty_percent` / `qty` dans le runtime transpilé (avec `entry_size_mode_hint` et séries d'override),
+  - blocage strict si mix `qty_percent` + `qty` sur un même run (modes mixtes non déterministes),
+  - UI compatibilité enrichie: détection `uses_order_price_controls` (bloquant strict) et `uses_order_qty_controls` (partiel),
+  - nouveau verrou UI `Enforcer sémantique des ordres (strict)`,
+  - intégration end-to-end du rapport `pine_order_semantics_report`:
+    - gate d'exécution Pine V3 (blocker `order_semantics_not_passed` en mode strict),
+    - export/replay ZIP (`pine_order_semantics_report.json` + `results.json`),
+    - manifeste d'artefacts V3 et contexte Expert (`pine_v3_artifacts`),
+  - tests ajoutés/étendus: `apps/wfo_engine/tests/test_pine_v3_order_semantics.py`.
 - V3 bêta renforcée sur les librairies Pine externes (lot suivant):
   - nouveau contrat runtime `pine_external_call_contract.v1` dans `apps/wfo_engine/pine_v3/runtime_adapter.py`,
   - vérification stricte des appels `Alias.fonction(...)` détectés dans `strategy_spec.v1` (alias résolu + fonction callable),

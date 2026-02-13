@@ -23,8 +23,10 @@ Le scope V3 initial est un **subset Pine v6 certifie**, testable et tracable.
 | TA avancee | fonctions exotiques non mappees | S1 | Fallback via "unsupported report" |
 | MTF | `request.security` | S1 | Support restreint: resolution discrete, lookahead off |
 | MTF bas TF | `request.security_lower_tf` | S0/S1 | Priorite basse (complexe/perf) |
-| Ordres | `strategy.entry/exit/close/cancel` | S2 | Mappage sur moteur portefeuille actuel |
-| Qty | `qty_percent`, qty fixes | S2 | Cohesion avec `order_sizing_mode` existant |
+| Ordres | `strategy.entry/exit/close/cancel/order` | S1/S2 | `entry/exit/close/cancel` stables; `order` supporte les cas simples (parité recommandée) |
+| Short | `strategy.short` (entry/order) | S1 | Signaux short supportés en beta, validation parité requise avant production |
+| Ordres pending | `limit/stop/trail_*` | S0 | Non reproduits fidèlement en runtime beta, bloquants en mode strict |
+| Qty | `qty_percent`, qty fixes | S1/S2 | Support beta sur les entrées (mode unique requis), parité recommandée |
 | Conditions | bool complexes + ternaires | S2 | Parsing AST requis |
 | Fonctions user | fonctions locales Pine | S2 | Limite recursion/non standard |
 | Librairies externes | `import user/lib/version` | S0 initial | Ex: `BBT1` devra etre re-implantee localement |
@@ -44,7 +46,7 @@ Le script fourni utilise:
 Conclusion:
 
 - Faisable en V3, **a condition** de traiter `BBT1` comme un module Python local cible (pas un import Pine dynamique).
-- Le vrai risque n'est pas le Pine de base mais la parite de la librairie externe.
+- Le vrai risque n'est pas le Pine de base mais la parite de la librairie externe et des cas d'ordres avances.
 
 ## Regles de compatibilite en UI (a implementer lot 1)
 

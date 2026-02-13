@@ -93,6 +93,38 @@ if ta.crossunder(close, ta.sma(close, 20))
     assert "exit" in actions
 
 
+def test_spec_extracts_strategy_order_short_direction() -> None:
+    pine_text = """
+//@version=6
+strategy("Demo Order")
+short_signal = close < ta.sma(close, 20)
+if short_signal
+    strategy.order("S", strategy.short)
+if ta.crossover(close, ta.sma(close, 20))
+    strategy.close("S")
+"""
+    spec = build_strategy_spec_v1_from_pine_text(
+        pine_text=pine_text,
+        source_name="demo_order.txt",
+        strategy_id="pine_demo_order",
+        compatibility_report={},
+    )
+    validation = validate_strategy_spec_v1(spec)
+    assert validation["valid"] is True, validation
+    logic = spec.get("logic") or {}
+    rules = logic.get("order_rules") or []
+    assert len(rules) >= 2
+    first = rules[0]
+    assert first.get("action") == "order"
+    assert str(first.get("id")) == "S"
+    assert str(first.get("direction")) == "strategy.short"
+    assert isinstance(first.get("args_positional"), list)
+    assert first.get("args_positional")[:2] == ["\"S\"", "strategy.short"]
+    assert isinstance(first.get("args_named"), dict)
+    caps = spec.get("capabilities") or {}
+    assert bool(caps.get("uses_strategy_order")) is True
+
+
 def test_spec_extracts_multiline_request_security_calls() -> None:
     pine_text = """
 //@version=6

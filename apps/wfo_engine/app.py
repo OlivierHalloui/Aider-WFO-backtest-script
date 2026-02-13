@@ -100,6 +100,7 @@ from pine_v3.mtf_parity import (
 )
 from pine_v3.runtime_adapter import (
     build_request_security_diagnostics as _build_request_security_diagnostics,
+    build_order_semantics_report as _build_pine_order_semantics_report,
 )
 from pine_v3.llm_migration import (
     run_llm_spec_migration as _run_llm_spec_migration,
@@ -586,6 +587,7 @@ def _build_results_payload():
         "pine_artifacts_manifest": st.session_state.get("pine_artifacts_manifest"),
         "pine_beta_readiness_report": st.session_state.get("pine_beta_readiness_report"),
         "pine_execution_gate_report": st.session_state.get("pine_execution_gate_report"),
+        "pine_order_semantics_report": st.session_state.get("pine_order_semantics_report"),
         "pine_parity_report": st.session_state.get("pine_parity_report"),
         "pine_request_security_diagnostics": st.session_state.get("pine_request_security_diagnostics"),
         "pine_mtf_parity_proof_report": st.session_state.get("pine_mtf_parity_proof_report"),
@@ -724,6 +726,7 @@ def _build_pine_artifacts_summary_for_expert():
     codegen = st.session_state.get("pine_codegen_report")
     beta_readiness = st.session_state.get("pine_beta_readiness_report")
     execution_gate = st.session_state.get("pine_execution_gate_report")
+    order_semantics = st.session_state.get("pine_order_semantics_report")
     parity_report = st.session_state.get("pine_parity_report")
     request_security_diagnostics = st.session_state.get("pine_request_security_diagnostics")
     mtf_parity_proof = st.session_state.get("pine_mtf_parity_proof_report")
@@ -743,6 +746,7 @@ def _build_pine_artifacts_summary_for_expert():
         not any(isinstance(x, dict) and x for x in (precheck, compat, spec, spec_validation, trace))
         and not isinstance(beta_readiness, dict)
         and not isinstance(execution_gate, dict)
+        and not isinstance(order_semantics, dict)
         and not isinstance(parity_report, dict)
         and not isinstance(request_security_diagnostics, dict)
         and not isinstance(mtf_parity_proof, dict)
@@ -825,6 +829,27 @@ def _build_pine_artifacts_summary_for_expert():
             "execution_gate_blockers_count": len((execution_gate.get("blockers") or []))
             if isinstance(execution_gate, dict)
             else 0,
+            "order_semantics_status": (
+                order_semantics.get("status") if isinstance(order_semantics, dict) else None
+            ),
+            "order_semantics_passed": (
+                order_semantics.get("passed")
+                if isinstance(order_semantics, dict) and "passed" in order_semantics
+                else None
+            ),
+            "order_semantics_blockers_count": len((order_semantics.get("blockers") or []))
+            if isinstance(order_semantics, dict)
+            else 0,
+            "order_semantics_price_controls_count": (
+                int(order_semantics.get("rules_with_price_controls", 0))
+                if isinstance(order_semantics, dict)
+                else 0
+            ),
+            "order_semantics_qty_controls_count": (
+                int(order_semantics.get("rules_with_qty_controls", 0))
+                if isinstance(order_semantics, dict)
+                else 0
+            ),
             "parity_status": parity_report.get("status") if isinstance(parity_report, dict) else None,
             "parity_pass": (
                 parity_report.get("parity_pass")
@@ -2113,6 +2138,7 @@ def _build_pine_artifacts_manifest(
     generation_trace: dict | None,
     beta_readiness_report: dict | None = None,
     execution_gate_report: dict | None = None,
+    order_semantics_report: dict | None = None,
     parity_report: dict | None = None,
     request_security_diagnostics: dict | None = None,
     mtf_parity_proof_report: dict | None = None,
@@ -2129,6 +2155,7 @@ def _build_pine_artifacts_manifest(
     trace = generation_trace if isinstance(generation_trace, dict) else {}
     beta = beta_readiness_report if isinstance(beta_readiness_report, dict) else {}
     gate = execution_gate_report if isinstance(execution_gate_report, dict) else {}
+    order_semantics = order_semantics_report if isinstance(order_semantics_report, dict) else {}
     parity = parity_report if isinstance(parity_report, dict) else {}
     mtf_diag = request_security_diagnostics if isinstance(request_security_diagnostics, dict) else {}
     mtf_proof = mtf_parity_proof_report if isinstance(mtf_parity_proof_report, dict) else {}
@@ -2144,9 +2171,10 @@ def _build_pine_artifacts_manifest(
         or bool(compat)
         or bool(spec)
         or bool(spec_val)
-        or bool(trace)
-        or bool(gate)
-        or bool(libs)
+            or bool(trace)
+            or bool(gate)
+            or bool(order_semantics)
+            or bool(libs)
         or bool(mapping)
         or bool(codegen)
         or bool(generated_path)
@@ -2173,6 +2201,7 @@ def _build_pine_artifacts_manifest(
             "has_llm_migration_report": bool((trace.get("llm_used")) if isinstance(trace, dict) else False),
             "has_beta_readiness_report": bool(beta),
             "has_execution_gate_report": bool(gate),
+            "has_order_semantics_report": bool(order_semantics),
             "has_parity_report": bool(parity),
             "has_request_security_diagnostics": bool(mtf_diag),
             "has_mtf_parity_proof_report": bool(mtf_proof),
@@ -2185,6 +2214,8 @@ def _build_pine_artifacts_manifest(
             "beta_ready": bool(beta.get("beta_ready")) if beta else None,
             "execution_gate_status": gate.get("status") if gate else None,
             "execution_gate_can_run": gate.get("can_run") if gate else None,
+            "order_semantics_status": order_semantics.get("status") if order_semantics else None,
+            "order_semantics_passed": order_semantics.get("passed") if order_semantics else None,
             "parity_pass": parity.get("parity_pass") if parity else None,
             "request_security_diagnostics_status": mtf_diag.get("status") if mtf_diag else None,
             "request_security_diagnostics_count": mtf_diag.get("request_security_count") if mtf_diag else None,
@@ -2207,6 +2238,7 @@ def _build_pine_artifacts_manifest(
                 "llm_migration_report": "pine_llm_migration_report.json",
                 "beta_readiness_report": "pine_beta_readiness_report.json",
                 "execution_gate_report": "pine_execution_gate_report.json",
+                "order_semantics_report": "pine_order_semantics_report.json",
                 "parity_report": "pine_parity_report.json",
                 "request_security_diagnostics": "pine_request_security_diagnostics.json",
                 "mtf_parity_proof_report": "pine_mtf_parity_proof_report.json",
@@ -2253,6 +2285,11 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
         pine_import_mapping = {}
     pine_codegen_report = st.session_state.get("pine_codegen_report")
     pine_generated_module_path = st.session_state.get("pine_generated_module_path")
+    pine_order_semantics_report = _compute_pine_order_semantics_report(
+        strategy_spec=pine_strategy_spec,
+        compat_mode=st.session_state.get("pine_compat_mode", "strict"),
+        enforce_order_semantics=bool(st.session_state.get("pine_enforce_order_semantics", True)),
+    )
     pine_parity_report = st.session_state.get("pine_parity_report")
     pine_request_security_diagnostics = st.session_state.get("pine_request_security_diagnostics")
     pine_mtf_parity_proof_report = st.session_state.get("pine_mtf_parity_proof_report")
@@ -2274,6 +2311,8 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
         parity_reference_validation=pine_parity_reference_validation,
         parity_report=pine_parity_report,
         enforce_parity_when_reference=bool(st.session_state.get("pine_enforce_parity_gate", True)),
+        order_semantics_report=pine_order_semantics_report,
+        enforce_order_semantics=bool(st.session_state.get("pine_enforce_order_semantics", True)),
     )
     pine_source_artifact = _resolve_pine_source_for_artifacts()
     pine_library_artifacts = _resolve_pine_libraries_for_artifacts()
@@ -2301,6 +2340,7 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
         generation_trace=pine_generation_trace,
         beta_readiness_report=pine_beta_readiness_report,
         execution_gate_report=pine_execution_gate_report,
+        order_semantics_report=pine_order_semantics_report,
         parity_report=pine_parity_report,
         request_security_diagnostics=pine_request_security_diagnostics,
         mtf_parity_proof_report=pine_mtf_parity_proof_report,
@@ -2350,6 +2390,10 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
         st.session_state["pine_execution_gate_report"] = pine_execution_gate_report
     else:
         st.session_state.pop("pine_execution_gate_report", None)
+    if isinstance(pine_order_semantics_report, dict) and pine_order_semantics_report:
+        st.session_state["pine_order_semantics_report"] = pine_order_semantics_report
+    else:
+        st.session_state.pop("pine_order_semantics_report", None)
     if isinstance(pine_parity_report, dict) and pine_parity_report:
         st.session_state["pine_parity_report"] = pine_parity_report
     else:
@@ -2422,6 +2466,11 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
             zf.writestr(
                 "pine_execution_gate_report.json",
                 json.dumps(pine_execution_gate_report, indent=2, ensure_ascii=False),
+            )
+        if isinstance(pine_order_semantics_report, dict) and pine_order_semantics_report:
+            zf.writestr(
+                "pine_order_semantics_report.json",
+                json.dumps(pine_order_semantics_report, indent=2, ensure_ascii=False),
             )
         if isinstance(pine_parity_report, dict) and pine_parity_report:
             zf.writestr(
@@ -3494,6 +3543,7 @@ def _load_results_zip(zip_file):
         st.session_state.pop("pine_artifacts_manifest", None)
         st.session_state.pop("pine_beta_readiness_report", None)
         st.session_state.pop("pine_execution_gate_report", None)
+        st.session_state.pop("pine_order_semantics_report", None)
         st.session_state.pop("pine_parity_report", None)
         st.session_state.pop("pine_request_security_diagnostics", None)
         st.session_state.pop("pine_mtf_parity_proof_report", None)
@@ -3574,6 +3624,9 @@ def _load_results_zip(zip_file):
                 pine_gate = payload.get("pine_execution_gate_report")
                 if isinstance(pine_gate, dict):
                     st.session_state["pine_execution_gate_report"] = pine_gate
+                pine_order_semantics = payload.get("pine_order_semantics_report")
+                if isinstance(pine_order_semantics, dict):
+                    st.session_state["pine_order_semantics_report"] = pine_order_semantics
                 pine_parity = payload.get("pine_parity_report")
                 if isinstance(pine_parity, dict):
                     st.session_state["pine_parity_report"] = pine_parity
@@ -3719,6 +3772,13 @@ def _load_results_zip(zip_file):
             )
             if isinstance(pine_gate, dict):
                 st.session_state["pine_execution_gate_report"] = pine_gate
+
+            pine_order_semantics, _ = _read_json_from_candidates(
+                ["pine_order_semantics_report.json"],
+                "pine_order_semantics",
+            )
+            if isinstance(pine_order_semantics, dict):
+                st.session_state["pine_order_semantics_report"] = pine_order_semantics
 
             pine_parity, _ = _read_json_from_candidates(
                 ["pine_parity_report.json"],
@@ -4489,7 +4549,21 @@ def _precheck_pine_script_text(
         "uses_strategy_order": bool(re.search(r"\bstrategy\.order\s*\(", text, flags=re.IGNORECASE)),
         "uses_short_entry": bool(
             re.search(
-                r"\bstrategy\.entry\s*\([^)]*direction\s*=\s*strategy\.short",
+                r"\bstrategy\.(?:entry|order)\s*\([^)]*strategy\.short",
+                text,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        ),
+        "uses_order_price_controls": bool(
+            re.search(
+                r"\bstrategy\.(?:entry|order|exit)\s*\([^)]*\b(?:limit|stop|trail_price|trail_offset|trail_points)\s*=",
+                text,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        ),
+        "uses_order_qty_controls": bool(
+            re.search(
+                r"\bstrategy\.(?:entry|order|exit)\s*\([^)]*\b(?:qty|qty_percent)\s*=",
                 text,
                 flags=re.IGNORECASE | re.DOTALL,
             )
@@ -4604,6 +4678,8 @@ def _build_pine_compatibility_report(precheck_report: dict, compat_mode: str = "
     uses_lower_tf = bool(detected.get("uses_request_security_lower_tf", False))
     uses_strategy_order = bool(detected.get("uses_strategy_order", False))
     uses_short_entry = bool(detected.get("uses_short_entry", False))
+    uses_order_price_controls = bool(detected.get("uses_order_price_controls", False))
+    uses_order_qty_controls = bool(detected.get("uses_order_qty_controls", False))
     uses_pyramiding = bool(detected.get("uses_pyramiding", False))
     uses_loops = bool(detected.get("uses_loops", False))
     uses_switch = bool(detected.get("uses_switch", False))
@@ -4728,11 +4804,14 @@ def _build_pine_compatibility_report(precheck_report: dict, compat_mode: str = "
         _add_item(
             "strategy_order",
             "strategy.order",
-            "S0",
-            "blocked",
+            "S1",
+            "partial",
             True,
-            detail="`strategy.order` n'est pas encore couvert par le runtime V3 beta.",
-            blocking=True,
+            detail=(
+                "Support runtime partiel: les directions long/short sont interprétées comme signaux "
+                "d'entrée; les nuances avancées d'ordres Pine restent à valider via parité."
+            ),
+            blocking=False,
         )
     else:
         _add_item("strategy_order", "strategy.order", "S0", "not_applicable", False)
@@ -4741,14 +4820,46 @@ def _build_pine_compatibility_report(precheck_report: dict, compat_mode: str = "
         _add_item(
             "short_entries",
             "Entrées short",
-            "S0",
-            "blocked",
+            "S1",
+            "partial",
             True,
-            detail="Le runtime V3 beta est long-only (entries short non supportées).",
-            blocking=True,
+            detail="Support short ajouté (signaux short_entries/short_exits), parité recommandée avant production.",
+            blocking=False,
         )
     else:
         _add_item("short_entries", "Entrées short", "S0", "not_applicable", False)
+
+    if uses_order_price_controls:
+        _add_item(
+            "order_price_controls",
+            "Ordres limit/stop/trailing",
+            "S0",
+            "blocked",
+            True,
+            detail=(
+                "Les paramètres d'ordres pending (`limit/stop/trail_*`) ne sont pas reproduits "
+                "fidèlement par le runtime beta."
+            ),
+            blocking=True,
+        )
+    else:
+        _add_item("order_price_controls", "Ordres limit/stop/trailing", "S0", "not_applicable", False)
+
+    if uses_order_qty_controls:
+        _add_item(
+            "order_qty_controls",
+            "qty / qty_percent",
+            "S1",
+            "partial",
+            True,
+            detail=(
+                "Détection de sizing Pine explicite: support beta partiel, "
+                "validation parité recommandée."
+            ),
+            blocking=False,
+        )
+    else:
+        _add_item("order_qty_controls", "qty / qty_percent", "S1", "not_applicable", False)
 
     if uses_pyramiding:
         _add_item(
@@ -4845,11 +4956,19 @@ def _build_pine_compatibility_report(precheck_report: dict, compat_mode: str = "
         )
     if uses_strategy_order:
         recommendations.append(
-            "Remplacer `strategy.order` par des blocs `strategy.entry/exit/close` pour la V3 beta."
+            "Valider parité Pine/Python sur les règles `strategy.order` (cas simples supportés, cas avancés à vérifier)."
         )
     if uses_short_entry:
         recommendations.append(
-            "Retirer les entrées short ou attendre le support short/pyramiding d'une version ultérieure."
+            "Contrôler la parité des signaux short (entry/close) sur un échantillon de référence avant run long."
+        )
+    if uses_order_price_controls:
+        recommendations.append(
+            "Retirer `limit/stop/trail_*` des ordres Pine ou fournir une version stratégie 'market-only' pour la V3 beta."
+        )
+    if uses_order_qty_controls:
+        recommendations.append(
+            "Comparer la taille de position/trades Pine vs Python pour valider l'impact de `qty/qty_percent`."
         )
     if uses_pyramiding:
         recommendations.append(
@@ -5006,6 +5125,34 @@ def _build_pine_beta_readiness_report(
             "compatibility_score": compat.get("compatibility_score"),
         }
     )
+
+
+def _compute_pine_order_semantics_report(
+    strategy_spec: dict | None = None,
+    compat_mode: str | None = None,
+    enforce_order_semantics: bool | None = None,
+) -> dict:
+    """Compute and sanitize runtime order-semantics diagnostics for Pine V3."""
+    spec = strategy_spec if isinstance(strategy_spec, dict) else {}
+    if not spec:
+        return {}
+    runtime_cfg = {
+        "pine_compat_mode": str(
+            compat_mode
+            if isinstance(compat_mode, str) and compat_mode.strip()
+            else st.session_state.get("pine_compat_mode", "strict")
+        ),
+        "pine_enforce_order_semantics": bool(
+            st.session_state.get("pine_enforce_order_semantics", True)
+            if enforce_order_semantics is None
+            else enforce_order_semantics
+        ),
+    }
+    report = _build_pine_order_semantics_report(
+        strategy_spec=spec,
+        runtime_config=runtime_cfg,
+    )
+    return _sanitize_for_json(report if isinstance(report, dict) else {})
 
 
 def _get_pine_parity_thresholds_from_state() -> dict:
@@ -5729,6 +5876,7 @@ with st.sidebar:
                     'strategy_mode': 'strategy_mode', 'strategy_id': 'strategy_id',
                     'pine_file_path': 'pine_file_path', 'pine_compat_mode': 'pine_compat_mode',
                     'pine_enforce_external_call_contract': 'pine_enforce_external_call_contract',
+                    'pine_enforce_order_semantics': 'pine_enforce_order_semantics',
                     'pine_spec_parser_backend': 'pine_spec_parser_backend',
                     'pine_llm_provider': 'pine_llm_provider',
                     'pine_llm_model': 'pine_llm_model',
@@ -6116,6 +6264,16 @@ with st.sidebar:
                     "quand un appel `Alias.fonction(...)` n'est pas résolu/callable dans le mapping Python."
                 ),
             )
+            if "pine_enforce_order_semantics" not in st.session_state:
+                st.session_state["pine_enforce_order_semantics"] = True
+            st.checkbox(
+                "Enforcer sémantique des ordres (strict)",
+                key="pine_enforce_order_semantics",
+                help=(
+                    "Si activé (recommandé), les runs Pine en mode strict sont bloqués "
+                    "quand des ordres limit/stop/trailing sont détectés dans la logique Pine."
+                ),
+            )
             st.selectbox(
                 "Pine Spec Parser Backend",
                 options=["auto", "regex", "pynescript"],
@@ -6379,6 +6537,7 @@ with st.sidebar:
                 st.session_state.pop("pine_artifacts_manifest", None)
                 st.session_state.pop("pine_beta_readiness_report", None)
                 st.session_state.pop("pine_execution_gate_report", None)
+                st.session_state.pop("pine_order_semantics_report", None)
                 st.session_state.pop("pine_parity_report", None)
                 st.session_state.pop("pine_request_security_diagnostics", None)
                 st.session_state.pop("pine_mtf_parity_proof_report", None)
@@ -6564,6 +6723,7 @@ with st.sidebar:
                         st.session_state.pop("pine_codegen_report", None)
                         st.session_state.pop("pine_generated_module_path", None)
                         st.session_state.pop("pine_execution_gate_report", None)
+                        st.session_state.pop("pine_order_semantics_report", None)
                         st.session_state.pop("pine_parity_report", None)
                         st.session_state.pop("pine_request_security_diagnostics", None)
                         st.session_state.pop("pine_mtf_parity_proof_report", None)
@@ -6580,6 +6740,7 @@ with st.sidebar:
                     st.session_state.pop("pine_codegen_report", None)
                     st.session_state.pop("pine_generated_module_path", None)
                     st.session_state.pop("pine_execution_gate_report", None)
+                    st.session_state.pop("pine_order_semantics_report", None)
                     st.session_state.pop("pine_parity_report", None)
                     st.session_state.pop("pine_request_security_diagnostics", None)
                     st.session_state.pop("pine_mtf_parity_proof_report", None)
@@ -6632,6 +6793,38 @@ with st.sidebar:
                             st.json(strategy_spec)
                         st.markdown("**Validation**")
                         st.json(spec_validation)
+
+                order_semantics_report = _compute_pine_order_semantics_report(
+                    strategy_spec=strategy_spec if isinstance(strategy_spec, dict) else {},
+                    compat_mode=st.session_state.get("pine_compat_mode", "strict"),
+                    enforce_order_semantics=bool(st.session_state.get("pine_enforce_order_semantics", True)),
+                )
+                if isinstance(order_semantics_report, dict) and order_semantics_report:
+                    st.session_state["pine_order_semantics_report"] = order_semantics_report
+                    c_ord_1, c_ord_2, c_ord_3 = st.columns(3)
+                    c_ord_1.metric("Order Semantics", str(order_semantics_report.get("status", "n/a")))
+                    c_ord_2.metric(
+                        "Price Controls",
+                        str(int(order_semantics_report.get("rules_with_price_controls", 0) or 0)),
+                    )
+                    c_ord_3.metric(
+                        "Qty Controls",
+                        str(int(order_semantics_report.get("rules_with_qty_controls", 0) or 0)),
+                    )
+                    if bool(st.session_state.get("pine_enforce_order_semantics", True)):
+                        if bool(order_semantics_report.get("passed", False)):
+                            st.success("Sémantique d'ordres compatible runtime (strict).")
+                        else:
+                            st.error("Sémantique d'ordres non compatible runtime: exécution strict bloquée.")
+                    else:
+                        if bool(order_semantics_report.get("passed", False)):
+                            st.caption("Sémantique d'ordres validée (verrou strict désactivé).")
+                        else:
+                            st.warning("Sémantique d'ordres en échec, mais verrou strict désactivé.")
+                    with st.expander("Rapport sémantique d'ordres Pine", expanded=False):
+                        st.json(order_semantics_report)
+                else:
+                    st.session_state.pop("pine_order_semantics_report", None)
 
                 with st.expander("Assistant LLM migration Pine -> spec (P2.1)", expanded=False):
                     if "pine_llm_provider" not in st.session_state:
@@ -6837,6 +7030,7 @@ with st.sidebar:
                 else:
                     st.session_state.pop("pine_beta_readiness_report", None)
                     st.session_state.pop("pine_execution_gate_report", None)
+                    st.session_state.pop("pine_order_semantics_report", None)
 
                 if "pine_enforce_parity_gate" not in st.session_state:
                     st.session_state["pine_enforce_parity_gate"] = True
@@ -7305,6 +7499,15 @@ with st.sidebar:
                     st.session_state.pop("pine_request_security_diagnostics", None)
                     st.session_state.pop("pine_mtf_parity_proof_report", None)
 
+                order_semantics_for_gate = _compute_pine_order_semantics_report(
+                    strategy_spec=st.session_state.get("pine_strategy_spec"),
+                    compat_mode=st.session_state.get("pine_compat_mode", "strict"),
+                    enforce_order_semantics=bool(st.session_state.get("pine_enforce_order_semantics", True)),
+                )
+                if isinstance(order_semantics_for_gate, dict) and order_semantics_for_gate:
+                    st.session_state["pine_order_semantics_report"] = order_semantics_for_gate
+                else:
+                    st.session_state.pop("pine_order_semantics_report", None)
                 execution_gate_report = _build_pine_execution_gate_report(
                     strategy_mode=st.session_state.get("strategy_mode", DEFAULT_STRATEGY_MODE),
                     beta_readiness_report=st.session_state.get("pine_beta_readiness_report"),
@@ -7312,6 +7515,8 @@ with st.sidebar:
                     parity_reference_validation=st.session_state.get("pine_parity_reference_validation"),
                     parity_report=st.session_state.get("pine_parity_report"),
                     enforce_parity_when_reference=bool(st.session_state.get("pine_enforce_parity_gate", True)),
+                    order_semantics_report=order_semantics_for_gate,
+                    enforce_order_semantics=bool(st.session_state.get("pine_enforce_order_semantics", True)),
                 )
                 st.session_state["pine_execution_gate_report"] = _sanitize_for_json(execution_gate_report)
                 c_gate_1, c_gate_2, c_gate_3 = st.columns(3)
@@ -7882,6 +8087,8 @@ def get_current_config():
     pine_mtf_proof = pine_mtf_proof if isinstance(pine_mtf_proof, dict) else {}
     pine_execution_gate = st.session_state.get("pine_execution_gate_report")
     pine_execution_gate = pine_execution_gate if isinstance(pine_execution_gate, dict) else {}
+    pine_order_semantics = st.session_state.get("pine_order_semantics_report")
+    pine_order_semantics = pine_order_semantics if isinstance(pine_order_semantics, dict) else {}
     pine_parity_reference_payload = st.session_state.get("pine_parity_reference_payload")
     pine_parity_reference_payload = (
         pine_parity_reference_payload if isinstance(pine_parity_reference_payload, dict) else {}
@@ -7900,6 +8107,9 @@ def get_current_config():
         'pine_compat_mode': st.session_state.get("pine_compat_mode", "strict"),
         'pine_enforce_external_call_contract': bool(
             st.session_state.get("pine_enforce_external_call_contract", True)
+        ),
+        'pine_enforce_order_semantics': bool(
+            st.session_state.get("pine_enforce_order_semantics", True)
         ),
         'pine_spec_parser_backend': st.session_state.get("pine_spec_parser_backend", "auto"),
         'pine_llm_provider': st.session_state.get("pine_llm_provider", "openai"),
@@ -7941,6 +8151,11 @@ def get_current_config():
         'pine_execution_gate_status': pine_execution_gate.get("status"),
         'pine_execution_gate_can_run': pine_execution_gate.get("can_run"),
         'pine_execution_gate_blockers_count': len(pine_execution_gate.get("blockers", []) or []),
+        'pine_order_semantics_status': pine_order_semantics.get("status"),
+        'pine_order_semantics_passed': pine_order_semantics.get("passed"),
+        'pine_order_semantics_blockers_count': len(pine_order_semantics.get("blockers", []) or []),
+        'pine_order_semantics_price_controls_count': int(pine_order_semantics.get("rules_with_price_controls", 0) or 0),
+        'pine_order_semantics_qty_controls_count': int(pine_order_semantics.get("rules_with_qty_controls", 0) or 0),
         'pine_parity_status': pine_parity.get("status"),
         'pine_parity_pass': pine_parity.get("parity_pass"),
         'pine_request_security_diagnostics_status': pine_mtf_diag.get("status"),
@@ -8356,6 +8571,15 @@ col_run, col_save = st.sidebar.columns([1, 1])
 
 with col_run:
     strategy_mode_current = str(current_conf.get("strategy_mode", DEFAULT_STRATEGY_MODE)).lower()
+    order_semantics_for_launch = _compute_pine_order_semantics_report(
+        strategy_spec=st.session_state.get("pine_strategy_spec"),
+        compat_mode=st.session_state.get("pine_compat_mode", "strict"),
+        enforce_order_semantics=bool(st.session_state.get("pine_enforce_order_semantics", True)),
+    )
+    if isinstance(order_semantics_for_launch, dict) and order_semantics_for_launch:
+        st.session_state["pine_order_semantics_report"] = order_semantics_for_launch
+    else:
+        st.session_state.pop("pine_order_semantics_report", None)
     pine_gate_for_launch = _build_pine_execution_gate_report(
         strategy_mode=current_conf.get("strategy_mode", DEFAULT_STRATEGY_MODE),
         beta_readiness_report=st.session_state.get("pine_beta_readiness_report"),
@@ -8363,6 +8587,8 @@ with col_run:
         parity_reference_validation=st.session_state.get("pine_parity_reference_validation"),
         parity_report=st.session_state.get("pine_parity_report"),
         enforce_parity_when_reference=bool(st.session_state.get("pine_enforce_parity_gate", True)),
+        order_semantics_report=order_semantics_for_launch,
+        enforce_order_semantics=bool(st.session_state.get("pine_enforce_order_semantics", True)),
     )
     st.session_state["pine_execution_gate_report"] = _sanitize_for_json(pine_gate_for_launch)
     gate_blocks_launch = (

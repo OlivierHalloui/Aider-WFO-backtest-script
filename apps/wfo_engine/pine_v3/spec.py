@@ -273,26 +273,50 @@ def _strip_inline_comment(line: str) -> str:
     return "".join(out).rstrip()
 
 
-def _extract_named_string_arg(call_text: str, arg_name: str) -> str:
-    """
-    Extract string argument value from call text.
+def _extract_call_args(call_text: str) -> dict[str, Any]:
+    """Extract positional/named args from a function call text."""
+    text = str(call_text or "").strip()
+    start = text.find("(")
+    end = text.rfind(")")
+    if start < 0 or end <= start:
+        return {"positional": [], "named": {}}
+    args_text = text[start + 1 : end]
+    parts = _split_top_level_csv(args_text)
+    positional: list[str] = []
+    named: dict[str, str] = {}
+    for part in parts:
+        token = str(part or "").strip()
+        if not token:
+            continue
+        if "=" in token:
+            key, value = token.split("=", 1)
+            key_norm = str(key or "").strip().lower()
+            if key_norm:
+                named[key_norm] = str(value or "").strip()
+            continue
+        positional.append(token)
+    return {"positional": positional, "named": named}
 
-    Examples:
-    - id='Buy long'
-    - id = "Buy long"
-    """
-    pattern = re.compile(
-        rf"""\b{re.escape(arg_name)}\s*=\s*(['"])(.*?)\1""",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    match = pattern.search(call_text or "")
-    if match:
-        return str(match.group(2) or "").strip()
-    return ""
+
+def _strip_wrapping_quotes(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        return text[1:-1]
+    return text
+
+
+def _extract_named_or_positional_arg(call_text: str, arg_name: str, positional_index: int | None = None) -> str:
+    args = _extract_call_args(call_text)
+    named = args.get("named") if isinstance(args.get("named"), dict) else {}
+    positional = args.get("positional") if isinstance(args.get("positional"), list) else []
+    value = str(named.get(str(arg_name or "").strip().lower(), "")).strip()
+    if not value and isinstance(positional_index, int) and positional_index >= 0 and positional_index < len(positional):
+        value = str(positional[positional_index] or "").strip()
+    return _strip_wrapping_quotes(value)
 
 
 def _extract_call_action(line: str) -> str:
-    for action in ("entry", "exit", "close", "cancel"):
+    for action in ("entry", "order", "exit", "close", "cancel"):
         if re.search(rf"""\bstrategy\.{action}\s*\(""", line, flags=re.IGNORECASE):
             return action
     return ""
@@ -542,10 +566,15 @@ def _extract_logic_artifacts(text: str) -> dict[str, Any]:
 
         action = _extract_call_action(stripped)
         if action:
+            call_args = _extract_call_args(stripped)
+            args_named = call_args.get("named") if isinstance(call_args.get("named"), dict) else {}
+            args_named = {str(k): str(v) for k, v in args_named.items()}
+            args_positional = call_args.get("positional") if isinstance(call_args.get("positional"), list) else []
+            args_positional = [str(x) for x in args_positional]
             current_conditions = [expr for _, expr in if_stack]
             condition_expr = " and ".join(current_conditions) if current_conditions else "true"
-            order_id = _extract_named_string_arg(stripped, "id")
-            direction = _extract_named_string_arg(stripped, "direction")
+            order_id = _extract_named_or_positional_arg(stripped, "id", positional_index=0)
+            direction = _extract_named_or_positional_arg(stripped, "direction", positional_index=1)
             if not order_id:
                 # Fallback: first string literal often carries id for close/cancel.
                 first_string = re.search(r"""(['"])(.*?)\1""", stripped, flags=re.DOTALL)
@@ -559,6 +588,8 @@ def _extract_logic_artifacts(text: str) -> dict[str, Any]:
                     "direction": direction or None,
                     "condition_expr": condition_expr,
                     "call": stripped,
+                    "args_positional": args_positional,
+                    "args_named": args_named,
                 }
             )
 
@@ -619,6 +650,11 @@ def build_strategy_spec_v1_from_pine_text(
             detected_precheck.get("uses_strategy_entry")
             if isinstance(detected_precheck, dict) and "uses_strategy_entry" in detected_precheck
             else re.search(r"\bstrategy\.entry\s*\(", text, flags=re.IGNORECASE)
+        ),
+        "uses_strategy_order": bool(
+            detected_precheck.get("uses_strategy_order")
+            if isinstance(detected_precheck, dict) and "uses_strategy_order" in detected_precheck
+            else re.search(r"\bstrategy\.order\s*\(", text, flags=re.IGNORECASE)
         ),
         "uses_strategy_exit": bool(
             detected_precheck.get("uses_strategy_exit")
@@ -819,6 +855,23 @@ def validate_strategy_spec_v1(spec: dict[str, Any]) -> dict[str, Any]:
                             errors.append(
                                 f"logic.order_rules[{idx}].condition_expr must be a string."
                             )
+                        args_positional = row.get("args_positional")
+                        if args_positional is not None:
+                            if not isinstance(args_positional, list) or any(
+                                not isinstance(x, str) for x in args_positional
+                            ):
+                                errors.append(
+                                    f"logic.order_rules[{idx}].args_positional must be an array of strings."
+                                )
+                        args_named = row.get("args_named")
+                        if args_named is not None:
+                            if not isinstance(args_named, dict) or any(
+                                (not isinstance(k, str)) or (not isinstance(v, str))
+                                for k, v in args_named.items()
+                            ):
+                                errors.append(
+                                    f"logic.order_rules[{idx}].args_named must be an object of string->string."
+                                )
             request_security_calls = logic.get("request_security_calls")
             if request_security_calls is not None:
                 if not isinstance(request_security_calls, list):
@@ -867,6 +920,7 @@ def validate_strategy_spec_v1(spec: dict[str, Any]) -> dict[str, Any]:
         "uses_request_security",
         "uses_request_security_lower_tf",
         "uses_strategy_entry",
+        "uses_strategy_order",
         "uses_strategy_exit",
         "uses_strategy_close",
         "uses_strategy_cancel",

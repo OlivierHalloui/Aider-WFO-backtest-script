@@ -38,6 +38,7 @@ from .parity_ci import (
 )
 from .runtime_adapter import (
     build_external_call_contract_report,
+    build_order_semantics_report,
 )
 
 __all__ = [
@@ -64,4 +65,5 @@ __all__ = [
     "run_parity_ci_campaign",
     "write_parity_ci_report",
     "build_external_call_contract_report",
+    "build_order_semantics_report",
 ]
