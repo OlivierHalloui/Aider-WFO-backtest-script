@@ -8,6 +8,7 @@ Ce dossier contient les livrables de cadrage pour la V3 de WFO Engine (WFOE), av
 - `architecture_cible_v3.md`: architecture cible, interfaces, flux d'execution.
 - `backlog_v3_p0_p1_p2.md`: backlog priorise par lots (P0/P1/P2) avec criteres d'acceptation.
 - `risques_et_garde_fous.md`: risques techniques et garde-fous de qualite.
+- `v3_beta_completion.md`: état de complétion, commandes de validation et limites beta.
 
 ## Portee Lot 0
 

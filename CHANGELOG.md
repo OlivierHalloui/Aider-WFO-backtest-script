@@ -9,7 +9,7 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
   - nouveau runner CLI `apps/wfo_engine/tests/run_pine_parity_ci.py` (sortie JSON + code retour bloquant),
   - nouveau rapport standard `pine_parity_ci_report.v1` avec synthèse `passed/failed/blockers`,
   - tests ajoutés: `apps/wfo_engine/tests/test_pine_v3_parity_ci.py`,
-  - workflow GitHub CI ajouté/mis à jour (`.github/workflows/ci.yml`) avec exécution de la campagne et upload de l’artefact `pine-parity-ci-report`.
+  - documentation de clôture ajoutée: `docs/wfoe_v3/v3_beta_completion.md` (checklist et commandes de validation).
 - P1.2 implémenté: support MTF `request.security` dans la transpilation runtime V3:
   - extraction `strategy_spec.v1` enrichie avec `logic.request_security_calls` (y compris affectations multi-lignes),
   - runtime transpilé: évaluation dédiée de `request.security(...)` (timeframe, gaps, lookahead) via les helpers MTF `request_security_series`,
