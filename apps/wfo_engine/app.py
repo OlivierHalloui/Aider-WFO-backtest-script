@@ -5728,6 +5728,7 @@ with st.sidebar:
                     'start_date': 'start_date', 'end_date': 'end_date', 'timeframe': 'timeframe',
                     'strategy_mode': 'strategy_mode', 'strategy_id': 'strategy_id',
                     'pine_file_path': 'pine_file_path', 'pine_compat_mode': 'pine_compat_mode',
+                    'pine_enforce_external_call_contract': 'pine_enforce_external_call_contract',
                     'pine_spec_parser_backend': 'pine_spec_parser_backend',
                     'pine_llm_provider': 'pine_llm_provider',
                     'pine_llm_model': 'pine_llm_model',
@@ -6103,6 +6104,16 @@ with st.sidebar:
                     "`strict`: bloque si features incompatibles (S0). "
                     "`assist`: n'empêche pas l'analyse mais signale les risques. "
                     "`manual`: mode exploratoire sans blocage automatique."
+                ),
+            )
+            if "pine_enforce_external_call_contract" not in st.session_state:
+                st.session_state["pine_enforce_external_call_contract"] = True
+            st.checkbox(
+                "Enforcer contrat des appels externes (strict)",
+                key="pine_enforce_external_call_contract",
+                help=(
+                    "Si activé (recommandé), les runs Pine en mode strict sont bloqués "
+                    "quand un appel `Alias.fonction(...)` n'est pas résolu/callable dans le mapping Python."
                 ),
             )
             st.selectbox(
@@ -7887,6 +7898,9 @@ def get_current_config():
         'strategy_id': strategy_id,
         'pine_file_path': st.session_state.get("pine_file_path", ""),
         'pine_compat_mode': st.session_state.get("pine_compat_mode", "strict"),
+        'pine_enforce_external_call_contract': bool(
+            st.session_state.get("pine_enforce_external_call_contract", True)
+        ),
         'pine_spec_parser_backend': st.session_state.get("pine_spec_parser_backend", "auto"),
         'pine_llm_provider': st.session_state.get("pine_llm_provider", "openai"),
         'pine_llm_model': st.session_state.get("pine_llm_model", "gpt-5-mini"),

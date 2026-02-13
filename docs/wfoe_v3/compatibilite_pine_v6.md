@@ -59,6 +59,7 @@ Conclusion:
    - afficher le statut de resolution import par import (resolu/non resolu)
    - verifier aussi la couverture fonctionnelle: appels `X.foo(...)` detectes dans la strategie vs fonctions presentes dans la librairie importee
    - au runtime V3, consommer les modules mappes (phase assistee) avec fallback explicite si contrat fonctionnel incomplet
+   - en mode strict, appliquer un contrat runtime `Alias.fonction(...)` resolu + callable avant execution backtest
 
 ## Decision Lot 0
 

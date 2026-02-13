@@ -4,6 +4,13 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 
 ## 2026-02-12
 
+- V3 bêta renforcée sur les librairies Pine externes (lot suivant):
+  - nouveau contrat runtime `pine_external_call_contract.v1` dans `apps/wfo_engine/pine_v3/runtime_adapter.py`,
+  - vérification stricte des appels `Alias.fonction(...)` détectés dans `strategy_spec.v1` (alias résolu + fonction callable),
+  - blocage explicite en mode strict si mapping/fonction externe invalide (`NotImplementedError` actionnable),
+  - `GeneratedPineRuntimeAdapter` enrichi: le diagnostic `external_call_contract` est attaché aux signaux générés,
+  - UI enrichie avec le verrou `pine_enforce_external_call_contract` (persisté dans config).
+  - tests ajoutés: `apps/wfo_engine/tests/test_pine_v3_external_contract.py`.
 - P2.3 implémenté: campagne de parité CI multi-scénarios avec rapport diff publiable:
   - nouveau module `apps/wfo_engine/pine_v3/parity_ci.py` (campagne déterministe + scénarios runtime MTF si `vectorbtpro` disponible),
   - nouveau runner CLI `apps/wfo_engine/tests/run_pine_parity_ci.py` (sortie JSON + code retour bloquant),

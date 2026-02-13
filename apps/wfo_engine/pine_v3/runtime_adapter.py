@@ -119,6 +119,279 @@ def _resolve_external_library_bindings(config: dict[str, Any] | None) -> tuple[d
     return bindings, warnings
 
 
+def _safe_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _safe_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _normalize_alias_token(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _extract_alias_function_calls_from_text(expr: str, aliases: set[str]) -> list[tuple[str, str]]:
+    """
+    Extract `Alias.function(` calls from expression text, constrained to known aliases.
+    """
+    text = str(expr or "")
+    if not text.strip() or not aliases:
+        return []
+    pattern = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+    out: list[tuple[str, str]] = []
+    for match in pattern.finditer(text):
+        alias = _normalize_alias_token(match.group(1))
+        func = _normalize_alias_token(match.group(2))
+        if alias in aliases and func:
+            out.append((alias, func))
+    return out
+
+
+def _collect_declared_import_aliases(strategy_spec: dict[str, Any], runtime_config: dict[str, Any] | None) -> set[str]:
+    aliases: set[str] = set()
+    spec = _safe_dict(strategy_spec)
+    cfg = _safe_dict(runtime_config)
+
+    imports_detail = _safe_list(spec.get("imports_detail"))
+    for row in imports_detail:
+        if not isinstance(row, dict):
+            continue
+        alias = _normalize_alias_token(row.get("alias"))
+        if alias:
+            aliases.add(alias)
+
+    spec_import_resolution = _safe_list(spec.get("import_resolution"))
+    for row in spec_import_resolution:
+        if not isinstance(row, dict):
+            continue
+        alias = _normalize_alias_token(row.get("alias"))
+        if alias:
+            aliases.add(alias)
+
+    pre = _safe_dict(cfg.get("pine_precheck_report"))
+    pre_import_resolution = _safe_list(pre.get("import_resolution"))
+    for row in pre_import_resolution:
+        if not isinstance(row, dict):
+            continue
+        alias = _normalize_alias_token(row.get("alias"))
+        if alias:
+            aliases.add(alias)
+
+    mapping = _safe_dict(cfg.get("pine_import_mapping"))
+    for alias in mapping.keys():
+        alias_norm = _normalize_alias_token(alias)
+        if alias_norm:
+            aliases.add(alias_norm)
+
+    return aliases
+
+
+def _collect_external_calls_from_spec(strategy_spec: dict[str, Any], aliases: set[str]) -> list[dict[str, Any]]:
+    """
+    Collect external alias calls from `logic.assignments` and `logic.order_rules`.
+    """
+    spec = _safe_dict(strategy_spec)
+    logic = _safe_dict(spec.get("logic"))
+    assignments = _safe_list(logic.get("assignments"))
+    order_rules = _safe_list(logic.get("order_rules"))
+
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int, str]] = set()
+
+    for row in assignments:
+        if not isinstance(row, dict):
+            continue
+        expr = str(row.get("expr") or "")
+        line_no = int(row.get("line", 0) or 0)
+        for alias, func in _extract_alias_function_calls_from_text(expr, aliases):
+            key = (alias, func, line_no, "assignment")
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "alias": alias,
+                    "function": func,
+                    "line": line_no,
+                    "source": "assignment",
+                    "expr": expr,
+                }
+            )
+
+    for row in order_rules:
+        if not isinstance(row, dict):
+            continue
+        line_no = int(row.get("line", 0) or 0)
+        cond = str(row.get("condition_expr") or "")
+        call = str(row.get("call") or "")
+        action = str(row.get("action") or "")
+        for source_name, expr in (("order_condition", cond), ("order_call", call)):
+            for alias, func in _extract_alias_function_calls_from_text(expr, aliases):
+                key = (alias, func, line_no, source_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(
+                    {
+                        "alias": alias,
+                        "function": func,
+                        "line": line_no,
+                        "source": source_name,
+                        "action": action,
+                        "expr": expr,
+                    }
+                )
+    return rows
+
+
+def build_external_call_contract_report(
+    strategy_spec: dict[str, Any] | None,
+    runtime_config: dict[str, Any] | None,
+    external_bindings: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Validate that external alias calls detected in spec can be resolved at runtime.
+
+    This is a runtime-level safety check complementary to precheck compatibility.
+    """
+    spec = _safe_dict(strategy_spec)
+    cfg = _safe_dict(runtime_config)
+    bindings = _safe_dict(external_bindings)
+
+    aliases = _collect_declared_import_aliases(spec, cfg)
+    aliases.update({str(k).strip() for k in bindings.keys() if str(k).strip()})
+    calls = _collect_external_calls_from_spec(spec, aliases)
+
+    blockers: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    call_rows: list[dict[str, Any]] = []
+
+    pre = _safe_dict(cfg.get("pine_precheck_report"))
+    pre_resolution = _safe_list(pre.get("import_resolution"))
+    for row in pre_resolution:
+        if not isinstance(row, dict):
+            continue
+        alias = _normalize_alias_token(row.get("alias"))
+        if not alias:
+            continue
+        if row.get("python_mapping_target") and not bool(row.get("python_mapping_valid", False)):
+            blockers.append(
+                {
+                    "code": "python_mapping_invalid",
+                    "alias": alias,
+                    "detail": str(row.get("python_mapping_detail") or "mapping python invalide"),
+                }
+            )
+        if int(row.get("missing_functions_count", 0) or 0) > 0:
+            missing = row.get("missing_functions")
+            missing = missing if isinstance(missing, list) else []
+            blockers.append(
+                {
+                    "code": "missing_external_functions",
+                    "alias": alias,
+                    "detail": f"Fonctions externes manquantes: {', '.join(str(x) for x in missing[:8])}",
+                }
+            )
+
+    for call in calls:
+        alias = str(call.get("alias") or "")
+        function_name = str(call.get("function") or "")
+        binding = bindings.get(alias)
+        alias_resolved = binding is not None
+        callable_found = False
+        if alias_resolved:
+            attr = getattr(binding, function_name, None)
+            callable_found = callable(attr)
+        row = dict(call)
+        row["alias_resolved"] = bool(alias_resolved)
+        row["callable_found"] = bool(callable_found)
+        call_rows.append(row)
+
+        if not alias_resolved:
+            blockers.append(
+                {
+                    "code": "alias_unresolved",
+                    "alias": alias,
+                    "function": function_name,
+                    "line": call.get("line"),
+                    "detail": f"Alias '{alias}' non résolu côté runtime.",
+                }
+            )
+            continue
+        if not callable_found:
+            blockers.append(
+                {
+                    "code": "function_not_callable",
+                    "alias": alias,
+                    "function": function_name,
+                    "line": call.get("line"),
+                    "detail": f"Fonction '{alias}.{function_name}' absente/non callable dans le module mappé.",
+                }
+            )
+
+    # Deduplicate blockers by stable signature.
+    seen_blockers: set[tuple[str, str, str, int]] = set()
+    unique_blockers: list[dict[str, Any]] = []
+    for row in blockers:
+        if not isinstance(row, dict):
+            continue
+        key = (
+            str(row.get("code") or ""),
+            str(row.get("alias") or ""),
+            str(row.get("function") or ""),
+            int(row.get("line", 0) or 0),
+        )
+        if key in seen_blockers:
+            continue
+        seen_blockers.add(key)
+        unique_blockers.append(row)
+
+    if not call_rows and aliases:
+        warnings.append(
+            "Aucun appel Alias.fonction détecté dans les expressions order/assignments; "
+            "la couverture externe dépend uniquement du précheck."
+        )
+
+    return {
+        "schema_version": "pine_external_call_contract.v1",
+        "status": "passed" if len(unique_blockers) == 0 else "failed",
+        "passed": len(unique_blockers) == 0,
+        "aliases_declared": sorted(aliases),
+        "calls": call_rows,
+        "calls_count": len(call_rows),
+        "resolved_calls_count": int(
+            len([x for x in call_rows if bool(x.get("alias_resolved")) and bool(x.get("callable_found"))])
+        ),
+        "blockers": unique_blockers,
+        "warnings": warnings,
+    }
+
+
+def _should_enforce_external_contract(runtime_config: dict[str, Any] | None) -> bool:
+    cfg = _safe_dict(runtime_config)
+    compat_mode = str(cfg.get("pine_compat_mode", "strict") or "strict").strip().lower()
+    if "pine_enforce_external_call_contract" in cfg:
+        return bool(cfg.get("pine_enforce_external_call_contract"))
+    # Default policy: strict enforces, assist/manual are permissive by default.
+    return compat_mode == "strict"
+
+
+def _raise_external_contract_error(contract_report: dict[str, Any]) -> None:
+    blockers = _safe_list(contract_report.get("blockers"))
+    formatted = []
+    for row in blockers[:6]:
+        if not isinstance(row, dict):
+            continue
+        formatted.append(
+            f"[{row.get('code', 'unknown')}] {row.get('alias', '')}.{row.get('function', '')}: {row.get('detail', '')}"
+        )
+    suffix = "; ".join(formatted) if formatted else "external call contract failed"
+    raise NotImplementedError(
+        "Pine runtime external call contract failed in strict mode. " + suffix
+    )
+
+
 def _safe_series_like(value: Any, index: pd.Index):
     """
     Convert values returned by mapped external functions to a bool series aligned on index.
@@ -1710,6 +1983,13 @@ class GeneratedPineRuntimeAdapter:
         bindings, _ = _resolve_external_library_bindings(self.runtime_config)
         return bindings
 
+    def _external_contract(self, bindings: dict[str, Any] | None = None) -> dict[str, Any]:
+        return build_external_call_contract_report(
+            strategy_spec=self._spec(),
+            runtime_config=self.runtime_config,
+            external_bindings=(bindings if isinstance(bindings, dict) else self._external_bindings()),
+        )
+
     def get_param_space(self) -> dict[str, Any]:
         spec = self._spec()
         space = _build_param_space_from_spec(spec)
@@ -1717,20 +1997,31 @@ class GeneratedPineRuntimeAdapter:
 
     def generate_signals(self, df, params: dict[str, Any]) -> Any:
         spec = self._spec()
-        return _build_transpiled_signals(
+        bindings = self._external_bindings()
+        contract = self._external_contract(bindings)
+        if _should_enforce_external_contract(self.runtime_config) and not bool(contract.get("passed", False)):
+            _raise_external_contract_error(contract)
+        signals = _build_transpiled_signals(
             df=df,
             params=params,
             strategy_spec=spec,
-            external_bindings=self._external_bindings(),
+            external_bindings=bindings,
         )
+        if isinstance(signals, dict):
+            signals["external_call_contract"] = contract
+        return signals
 
     def run_backtest(self, df, params: dict[str, Any], timeframe: str = "5s", return_portfolio: bool = True):
         spec = self._spec()
+        bindings = self._external_bindings()
+        contract = self._external_contract(bindings)
+        if _should_enforce_external_contract(self.runtime_config) and not bool(contract.get("passed", False)):
+            _raise_external_contract_error(contract)
         return run_transpiled_pine_backtest(
             df=df,
             params=params,
             strategy_spec=spec,
             timeframe=timeframe,
             return_portfolio=return_portfolio,
-            external_bindings=self._external_bindings(),
+            external_bindings=bindings,
         )

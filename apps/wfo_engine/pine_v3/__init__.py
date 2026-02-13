@@ -36,6 +36,9 @@ from .parity_ci import (
     run_parity_ci_campaign,
     write_parity_ci_report,
 )
+from .runtime_adapter import (
+    build_external_call_contract_report,
+)
 
 __all__ = [
     "build_strategy_spec_v1_from_pine_text",
@@ -60,4 +63,5 @@ __all__ = [
     "build_mtf_parity_proof_report",
     "run_parity_ci_campaign",
     "write_parity_ci_report",
+    "build_external_call_contract_report",
 ]
