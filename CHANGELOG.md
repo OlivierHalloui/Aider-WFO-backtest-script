@@ -20,6 +20,12 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
   - UI enrichie avec section "Assistant LLM migration Pine -> spec (P2.1)" et option d'application du draft validé,
   - traçabilité ajoutée (`pine_llm_generation_trace.v1`) avec hash prompts/sortie, provider/model et statut d'acceptation,
   - export/reload ZIP enrichi avec `pine_llm_migration_report.json`.
+- P2.2 amorcé: catalogue local de stratégies Pine:
+  - nouveau module `apps/wfo_engine/pine_v3/catalog.py` (registre local versionné par `strategy_id + source_sha1`),
+  - snapshot source stocké dans `reports/pine_catalog/sources/` pour rechargement robuste,
+  - UI Pine enrichie avec section "Catalogue stratégies Pine (P2.2)" (recherche + chargement d'une entrée),
+  - auto-upsert du catalogue après génération d'un `strategy_spec.v1` valide,
+  - traçabilité run enrichie avec le dernier `catalog_entry` et persistance dans `results.json`.
 - Preuve de parité dédiée MTF ajoutée:
   - nouveau rapport déterministe `pine_mtf_parity_proof.v1` (`apps/wfo_engine/pine_v3/mtf_parity.py`),
   - UI enrichie avec section "Preuve de parité MTF request.security (P1.2)" + métriques/checks/blockers,

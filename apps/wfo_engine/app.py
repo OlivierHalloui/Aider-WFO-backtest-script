@@ -104,6 +104,13 @@ from pine_v3.runtime_adapter import (
 from pine_v3.llm_migration import (
     run_llm_spec_migration as _run_llm_spec_migration,
 )
+from pine_v3.catalog import (
+    upsert_catalog_entry as _upsert_pine_catalog_entry,
+    list_catalog_entries as _list_pine_catalog_entries,
+    get_catalog_entry as _get_pine_catalog_entry,
+    mark_catalog_entry_used as _mark_pine_catalog_entry_used,
+    load_catalog_source_text as _load_pine_catalog_source_text,
+)
 
 # Set page config
 st.set_page_config(
@@ -575,6 +582,7 @@ def _build_results_payload():
         "pine_generated_module_path": st.session_state.get("pine_generated_module_path"),
         "pine_generation_trace": st.session_state.get("pine_generation_trace"),
         "pine_llm_migration_report": st.session_state.get("pine_llm_migration_report"),
+        "pine_catalog_last_entry": st.session_state.get("pine_catalog_last_entry"),
         "pine_artifacts_manifest": st.session_state.get("pine_artifacts_manifest"),
         "pine_beta_readiness_report": st.session_state.get("pine_beta_readiness_report"),
         "pine_execution_gate_report": st.session_state.get("pine_execution_gate_report"),
@@ -2003,6 +2011,8 @@ def _build_pine_generation_trace(
     llm_report = st.session_state.get("pine_llm_migration_report")
     llm_report = llm_report if isinstance(llm_report, dict) else {}
     llm_trace = llm_report.get("trace") if isinstance(llm_report.get("trace"), dict) else {}
+    catalog_entry = st.session_state.get("pine_catalog_last_entry")
+    catalog_entry = catalog_entry if isinstance(catalog_entry, dict) else {}
 
     has_any = (
         bool(src.get("text"))
@@ -2080,6 +2090,11 @@ def _build_pine_generation_trace(
             "accepted_spec_sha256": llm_trace.get("accepted_spec_sha256"),
             "errors": llm_report.get("errors", []),
             "warnings": llm_report.get("warnings", []),
+        },
+        "catalog": {
+            "entry_id": catalog_entry.get("entry_id"),
+            "strategy_id": catalog_entry.get("strategy_id"),
+            "updated_at_utc": catalog_entry.get("updated_at_utc"),
         },
     }
     return _sanitize_for_json(trace)
@@ -2324,6 +2339,7 @@ def _export_results_zip(data_snapshot_mode="manifest_only", df_max_rows=200000, 
     else:
         st.session_state.pop("pine_generation_trace", None)
         st.session_state.pop("pine_llm_migration_report", None)
+        st.session_state.pop("pine_catalog_last_entry", None)
         st.session_state.pop("pine_llm_override_spec", None)
         st.session_state.pop("pine_llm_override_source_sha1", None)
     if isinstance(pine_beta_readiness_report, dict) and pine_beta_readiness_report:
@@ -3472,6 +3488,7 @@ def _load_results_zip(zip_file):
         st.session_state.pop("pine_generated_module_path", None)
         st.session_state.pop("pine_generation_trace", None)
         st.session_state.pop("pine_llm_migration_report", None)
+        st.session_state.pop("pine_catalog_last_entry", None)
         st.session_state.pop("pine_llm_override_spec", None)
         st.session_state.pop("pine_llm_override_source_sha1", None)
         st.session_state.pop("pine_artifacts_manifest", None)
@@ -3545,6 +3562,9 @@ def _load_results_zip(zip_file):
                 pine_llm_report = payload.get("pine_llm_migration_report")
                 if isinstance(pine_llm_report, dict):
                     st.session_state["pine_llm_migration_report"] = pine_llm_report
+                pine_catalog_entry = payload.get("pine_catalog_last_entry")
+                if isinstance(pine_catalog_entry, dict):
+                    st.session_state["pine_catalog_last_entry"] = pine_catalog_entry
                 pine_manifest = payload.get("pine_artifacts_manifest")
                 if isinstance(pine_manifest, dict):
                     st.session_state["pine_artifacts_manifest"] = pine_manifest
@@ -6150,6 +6170,10 @@ with st.sidebar:
                             f"- `{lib.get('source_name')}` | SHA1: `{str(lib.get('source_sha1') or '')[:12]}`"
                         )
 
+        pending_pine_file_path = st.session_state.pop("pending_pine_file_path", None)
+        if isinstance(pending_pine_file_path, str) and pending_pine_file_path.strip():
+            st.session_state["pine_file_path"] = pending_pine_file_path.strip()
+
         pine_file_path = st.text_input(
             "Pine File Path",
             value=st.session_state.get("pine_file_path", ""),
@@ -6160,6 +6184,92 @@ with st.sidebar:
                 "Tu peux aussi importer via le bouton ci-dessus."
             ),
         )
+        if strategy_mode == "pine_imported":
+            with st.expander("Catalogue stratégies Pine (P2.2)", expanded=False):
+                st.caption(
+                    "Catalogue local des stratégies Pine importées (versionnées par SHA1 source). "
+                    "Permet recherche et rechargement rapide."
+                )
+                catalog_query = st.text_input(
+                    "Recherche catalogue",
+                    key="pine_catalog_query",
+                    placeholder="strategy_id, nom, sha1...",
+                )
+                catalog_rows = _list_pine_catalog_entries(query=catalog_query, limit=300)
+                st.caption(f"Entrées trouvées: {len(catalog_rows)}")
+                if catalog_rows:
+                    table = pd.DataFrame(
+                        [
+                            {
+                                "entry_id": row.get("entry_id"),
+                                "strategy_id": row.get("strategy_id"),
+                                "strategy_name": row.get("strategy_name"),
+                                "source_name": row.get("source_name"),
+                                "sha1": str(row.get("source_sha1") or "")[:12],
+                                "spec_valid": row.get("spec_valid"),
+                                "compat_score": row.get("compatibility_score"),
+                                "parser": row.get("parser_backend_used"),
+                                "llm_used": row.get("llm_used"),
+                                "updated_at_utc": row.get("updated_at_utc"),
+                            }
+                            for row in catalog_rows
+                            if isinstance(row, dict)
+                        ]
+                    )
+                    st.dataframe(table, width="stretch")
+
+                    ids = [str(row.get("entry_id")) for row in catalog_rows if isinstance(row, dict)]
+                    selected_id = st.selectbox(
+                        "Entrée catalogue",
+                        options=ids,
+                        key="pine_catalog_selected_entry_id",
+                    )
+                    if st.button(
+                        "Charger la stratégie depuis le catalogue",
+                        key="pine_catalog_load_btn",
+                        width="stretch",
+                    ):
+                        row = _get_pine_catalog_entry(selected_id)
+                        if not isinstance(row, dict):
+                            st.error("Entrée catalogue introuvable.")
+                        else:
+                            loaded_text = _load_pine_catalog_source_text(row)
+                            loaded_path = str(row.get("source_path") or "").strip()
+                            if isinstance(loaded_text, str) and loaded_text.strip():
+                                restored_path = _persist_pine_source_text(
+                                    loaded_text,
+                                    source_name=str(row.get("source_name") or "catalog_strategy.pine.txt"),
+                                )
+                                if isinstance(restored_path, str) and restored_path.strip():
+                                    st.session_state["pending_pine_file_path"] = restored_path
+                                    st.session_state["pine_source_name"] = str(
+                                        row.get("source_name") or os.path.basename(restored_path)
+                                    )
+                                    if str(row.get("strategy_id") or "").strip():
+                                        st.session_state["pending_strategy_id"] = str(
+                                            row.get("strategy_id") or ""
+                                        ).strip()
+                                    _mark_pine_catalog_entry_used(selected_id)
+                                    st.success("Stratégie chargée depuis le catalogue.")
+                                    st.rerun()
+                            elif loaded_path and os.path.exists(loaded_path):
+                                st.session_state["pending_pine_file_path"] = loaded_path
+                                st.session_state["pine_source_name"] = str(
+                                    row.get("source_name") or os.path.basename(loaded_path)
+                                )
+                                if str(row.get("strategy_id") or "").strip():
+                                    st.session_state["pending_strategy_id"] = str(
+                                        row.get("strategy_id") or ""
+                                    ).strip()
+                                _mark_pine_catalog_entry_used(selected_id)
+                                st.success("Chemin source réutilisé depuis le catalogue.")
+                                st.rerun()
+                            else:
+                                st.error(
+                                    "Source introuvable pour cette entrée (ni snapshot ni chemin valide)."
+                                )
+                else:
+                    st.info("Catalogue vide pour l'instant. Lance une pré-analyse valide pour alimenter le registre.")
         pine_precheck_report = None
         if strategy_mode == "pine_imported":
             provided_library_files = st.session_state.get("pine_library_files", [])
@@ -6252,6 +6362,7 @@ with st.sidebar:
                 st.session_state.pop("pine_generated_module_path", None)
                 st.session_state.pop("pine_generation_trace", None)
                 st.session_state.pop("pine_llm_migration_report", None)
+                st.session_state.pop("pine_catalog_last_entry", None)
                 st.session_state.pop("pine_llm_override_spec", None)
                 st.session_state.pop("pine_llm_override_source_sha1", None)
                 st.session_state.pop("pine_artifacts_manifest", None)
@@ -6376,6 +6487,36 @@ with st.sidebar:
                         )
                         st.session_state["pine_source_encoding"] = source_encoding
                         st.session_state["pine_source_text"] = pine_text
+                        if bool(strategy_spec_validation.get("valid", False)):
+                            try:
+                                spec_source = strategy_spec.get("source") if isinstance(strategy_spec, dict) else {}
+                                source_sha1 = (
+                                    str((spec_source or {}).get("source_sha1") or "").strip()
+                                    if isinstance(spec_source, dict)
+                                    else ""
+                                )
+                                last_catalog_key = str(st.session_state.get("pine_catalog_last_upsert_key") or "")
+                                current_catalog_key = (
+                                    f"{str(st.session_state.get('strategy_id') or '')}:{source_sha1}"
+                                    if source_sha1
+                                    else ""
+                                )
+                                if current_catalog_key and current_catalog_key != last_catalog_key:
+                                    catalog_entry = _upsert_pine_catalog_entry(
+                                        strategy_spec=strategy_spec,
+                                        strategy_spec_validation=strategy_spec_validation,
+                                        precheck_report=pine_precheck_report,
+                                        compatibility_report=pine_compatibility_report,
+                                        generation_trace=st.session_state.get("pine_generation_trace"),
+                                        source_text=pine_text,
+                                        source_name=st.session_state.get("pine_source_name", ""),
+                                        source_path=str(pine_file_path or ""),
+                                        library_files=st.session_state.get("pine_library_files", []),
+                                    )
+                                    st.session_state["pine_catalog_last_upsert_key"] = current_catalog_key
+                                    st.session_state["pine_catalog_last_entry"] = _sanitize_for_json(catalog_entry)
+                            except Exception as e:
+                                st.caption(f"Catalogue Pine: mise à jour ignorée ({e})")
                         spec_id = ((strategy_spec.get("strategy") or {}).get("id"))
                         if isinstance(spec_id, str) and spec_id.strip():
                             st.session_state["pending_strategy_id"] = spec_id.strip()
