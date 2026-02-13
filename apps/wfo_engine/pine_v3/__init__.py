@@ -32,6 +32,10 @@ from .execution_gate import (
 from .mtf_parity import (
     build_mtf_parity_proof_report,
 )
+from .parity_ci import (
+    run_parity_ci_campaign,
+    write_parity_ci_report,
+)
 
 __all__ = [
     "build_strategy_spec_v1_from_pine_text",
@@ -54,4 +58,6 @@ __all__ = [
     "PARITY_REFERENCE_VALIDATION_SCHEMA_VERSION",
     "build_execution_gate_report",
     "build_mtf_parity_proof_report",
+    "run_parity_ci_campaign",
+    "write_parity_ci_report",
 ]

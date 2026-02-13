@@ -17,6 +17,18 @@ Lot 0 est un lot de cadrage:
 2. Definir une architecture qui n'implique pas de patch dynamique de `apps/wfo_engine/app.py`.
 3. Produire un backlog actionnable pour lancer le lot 1.
 
+## Campagne de parité CI (P2.3)
+
+Commande locale:
+
+```bash
+PYTHONPATH=apps/wfo_engine python apps/wfo_engine/tests/run_pine_parity_ci.py --output reports/ci/pine_parity_ci_report.json
+```
+
+- Le fichier `reports/ci/pine_parity_ci_report.json` contient le détail des scénarios et des dérives.
+- Le code retour est bloquant (`exit 1`) si la parité échoue ou si des blockers sont détectés.
+- En CI GitHub, le rapport est publié en artefact (`pine-parity-ci-report`).
+
 ## References
 
 - Base code actuelle: `apps/wfo_engine/`

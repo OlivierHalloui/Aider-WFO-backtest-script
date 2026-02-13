@@ -1,5 +1,13 @@
 # Backlog V3 - Priorisation P0 / P1 / P2
 
+## Etat d'avancement (2026-02-13)
+
+- P0.1 -> P0.6: implémentés.
+- P1.1 -> P1.4: implémentés (avec gate d'exécution + parité détaillée + preuve MTF).
+- P2.1: implémenté (assistant LLM avec revalidation déterministe).
+- P2.2: implémenté (catalogue local + recherche/rechargement UI).
+- P2.3: implémenté (campagne CI de parité + artefact JSON publié).
+
 ## P0 - Fondations obligatoires (demarrage)
 
 ### P0.1 - Mode strategie dans la config
