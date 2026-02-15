@@ -43,5 +43,5 @@ jobs:
 
       - name: Syntax check
         run: |
-          python -m py_compile apps/wfo_engine/app.py apps/wfo_engine/main.py apps/wfo_engine/wfo.py apps/wfo_engine/adaptive_optimization.py apps/wfo_engine/strategy.py apps/wfo_engine/indicators.py apps/wfo_engine/data_loading.py apps/wfo_engine/config.py
+          python -m py_compile apps/wfo_engine/app.py apps/wfo_engine/main.py apps/wfo_engine/wfo.py apps/wfo_engine/adaptive_optimization.py apps/wfo_engine/strategy.py apps/wfo_engine/indicators.py apps/wfo_engine/data_loading.py apps/wfo_engine/config.py apps/wfo_engine/metrics.py apps/wfo_engine/neural_search.py
 

@@ -53,9 +53,12 @@ def rolling_mean(arr, window):
 
 @njit(cache=True)
 def rolling_median(arr, window):
+    # Performance note: O(n * w * log w) due to per-window nanmedian.
+    # Restructuring to pre-compute median outside Numba would improve to O(n * log w)
+    # but requires changes to the indicator factory pipeline.
+    #
     # VectorBT Pro doesn't expose a public rolling_median_1d_nb in generic.nb yet.
     # We keep the custom implementation.
-    # Standard naive implementation O(N * W * log W) or O(N * W)
     result = np.full(len(arr), np.nan)
     for i in range(len(arr)):
         if i >= window - 1:

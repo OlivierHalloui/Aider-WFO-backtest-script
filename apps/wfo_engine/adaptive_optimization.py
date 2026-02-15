@@ -4,13 +4,23 @@ This module keeps a rolling memory of parameter-value performance and
 progressively narrows/refreshes the active grid without fixed WFO windows.
 """
 
+import logging
 import time
 from datetime import timedelta
 
 import numpy as np
 import pandas as pd
 
+logger = logging.getLogger(__name__)
+
 from config import WFOSettings
+from metrics import (
+    to_scalar_score as _to_scalar_score,
+    python_scalar as _python_scalar,
+    trade_stat as _trade_stat,
+    calc_avg_pl as _calc_avg_pl,
+    portfolio_metrics as _portfolio_metrics,
+)
 from strategy_adapters import resolve_strategy_adapter
 
 
@@ -22,42 +32,6 @@ def _value_token(value):
     if isinstance(value, (np.floating, float)):
         return ("float", round(float(value), 12))
     return ("str", str(value))
-
-
-def _to_scalar_score(score):
-    if score is None:
-        return np.nan
-    if np.isscalar(score):
-        try:
-            out = float(score)
-            if np.isnan(out) or np.isinf(out):
-                return np.nan
-            return out
-        except Exception:
-            return np.nan
-    try:
-        if hasattr(score, "values"):
-            arr = np.asarray(score.values, dtype=float)
-        else:
-            arr = np.asarray(score, dtype=float)
-        if arr.size == 0:
-            return np.nan
-        arr = arr[np.isfinite(arr)]
-        if arr.size == 0:
-            return np.nan
-        return float(np.mean(arr))
-    except Exception:
-        return np.nan
-
-
-def _python_scalar(value):
-    if isinstance(value, (np.integer,)):
-        return int(value)
-    if isinstance(value, (np.floating,)):
-        return float(value)
-    if isinstance(value, (np.bool_,)):
-        return bool(value)
-    return value
 
 
 def _param_grid_combinations(param_grid):
@@ -97,77 +71,6 @@ def _random_candidates(param_grid, n_candidates, rng):
         unique.add(key)
         candidates.append(candidate)
     return candidates
-
-
-def _trade_stat(trades, attr_name, default=0.0):
-    value = getattr(trades, attr_name, None)
-    if value is not None:
-        return value
-    try:
-        stats = trades.stats()
-    except Exception:
-        return default
-    keys = [
-        attr_name,
-        attr_name.replace("_", " "),
-        attr_name.replace("_", " ").title(),
-        attr_name.replace("_", " ").capitalize(),
-    ]
-    for key in keys:
-        try:
-            value = stats.get(key) if hasattr(stats, "get") else stats[key]
-        except Exception:
-            value = None
-        if value is not None:
-            return value
-    return default
-
-
-def _calc_avg_pl(port):
-    """Return average P/L per trade for scalar or vectorized portfolios."""
-    try:
-        total_ret = port.total_return * 100
-        n_trades = port.trades.count()
-        if n_trades is None:
-            return 0.0
-
-        if hasattr(n_trades, "replace"):
-            safe_trades = n_trades.replace(0, np.nan)
-            avg_pl = total_ret / safe_trades
-            avg_pl = avg_pl.replace([np.inf, -np.inf], 0).fillna(0)
-            return avg_pl
-
-        if float(n_trades) == 0.0:
-            return 0.0
-        avg_pl = total_ret / n_trades
-        if hasattr(avg_pl, "replace"):
-            avg_pl = avg_pl.replace([np.inf, -np.inf], 0).fillna(0)
-        else:
-            if np.isinf(avg_pl) or np.isnan(avg_pl):
-                avg_pl = 0.0
-        return avg_pl
-    except Exception:
-        return 0.0
-
-
-def _portfolio_metrics(portfolio, cycle_id):
-    try:
-        n_trades = len(portfolio.trades)
-    except Exception:
-        n_trades = 0
-    return {
-        "window": cycle_id,
-        "return": float(_to_scalar_score(getattr(portfolio, "total_return", 0.0) * 100)),
-        "sharpe": float(_to_scalar_score(getattr(portfolio, "sharpe_ratio", 0.0))),
-        "max_drawdown": float(_to_scalar_score(getattr(portfolio, "max_drawdown", 0.0) * 100)),
-        "win_rate": float(_to_scalar_score(getattr(getattr(portfolio, "trades", object()), "win_rate", 0.0))),
-        "avg_gain_per_trade": float(_to_scalar_score(_trade_stat(portfolio.trades, "avg_winning_trade"))),
-        "avg_loss_per_trade": float(_to_scalar_score(_trade_stat(portfolio.trades, "avg_losing_trade"))),
-        "avg_pl_per_trade": float(_to_scalar_score(_calc_avg_pl(portfolio))),
-        "calmar_ratio": float(_to_scalar_score(getattr(portfolio, "calmar_ratio", 0.0))),
-        "sortino_ratio": float(_to_scalar_score(getattr(portfolio, "sortino_ratio", 0.0))),
-        "n_trades": int(n_trades),
-    }
 
 
 class AdaptiveValueModel:
@@ -441,7 +344,7 @@ def adaptive_continuous_optimization(
     }
 
     def log(message):
-        print(message)
+        logger.info(message)
         if status_callback:
             status_callback(message)
 
@@ -467,8 +370,8 @@ def adaptive_continuous_optimization(
         train_end = pointer
         oos_end = min(total_rows, pointer + cycle_bars)
 
-        train_df = df.iloc[train_start:train_end].copy()
-        oos_df = df.iloc[pointer:oos_end].copy()
+        train_df = df.iloc[train_start:train_end]
+        oos_df = df.iloc[pointer:oos_end]
         if train_df.empty or oos_df.empty:
             break
 

@@ -1,3 +1,6 @@
+[server]
+maxUploadSize = 2048
+
 [theme]
 base = "dark"
 primaryColor = "#4DA3FF"

@@ -1,5 +1,6 @@
 # Import necessary libraries for main script
 
+import logging
 import pandas as pd
 import numpy as np
 import datetime
@@ -8,6 +9,8 @@ import traceback
 import time
 import sys
 from typing import Optional, Dict, Callable, Any
+
+logger = logging.getLogger(__name__)
 from config import (
     DEFAULT_START_DATE, DEFAULT_END_DATE, DEFAULT_TIMEFRAME, DEFAULT_DATA_FILE,
     DEFAULT_PARAM_GRID, DEFAULT_STRATEGY_MODE, DEFAULT_STRATEGY_ID, WFOSettings
@@ -63,7 +66,7 @@ def get_param_grid(config):
         'macd_signal_length': "MACD signal length"
     }
     
-    # ATDMF Strategy default parameters (Hardcoded Source of Truth)
+    # ATDMF Strategy author's expert-chosen default parameters (not derived from ranges)
     strategy_params = {
         'timeperiod': 20,
         'StDev': 2.0,
@@ -83,25 +86,9 @@ def get_param_grid(config):
         'macd_signal_length': 9
     }
     
-    # Default parameter ranges
-    default_ranges = {
-        'timeperiod': (10, 30, 5),
-        'StDev': (1, 2.5, 0.5),
-        'coeff_medianeBBW': (0.8, 1.6, 0.4),
-        'coef_mediane': (1, 1.5, 0.5),
-        'fenetre_lowest': (30, 60, 10),
-        'seuil_lowest': (1.0, 3.5, 0.5),
-        'longueur_mediane': (50, 150, 50),
-        'Nb_bars_above': (2, 6, 2),
-        'user_exit_sma_length': (10, 30, 10),
-        'sar_start': (0.02, 0.05, 0.01),
-        'sar_increment': (0.02, 0.05, 0.01),
-        'sar_maximum': (0.1, 0.3, 0.05),
-        'macd_fast_length': (8, 16, 2),
-        'macd_slow_length': (20, 40, 2),
-        'macd_signal_length': (5, 15, 2)
-    }
-    
+    # Use the canonical parameter ranges from config module (single source of truth)
+    default_ranges = DEFAULT_PARAM_GRID
+
     # Get selected parameters from config
     selected_params = config.get('selected_params', [])
     if not selected_params:
@@ -167,8 +154,8 @@ def display_default_parameters():
     """
     Display all default indicator parameters and their values.
     """
-    print("\n=== Default Indicator Parameters ===")
-    
+    logger.info("=== Default Indicator Parameters ===")
+
     # ATDMF Strategy parameters
     strategy_params = {
         # Bollinger Bands parameters
@@ -206,14 +193,14 @@ def display_default_parameters():
     max_param_len = max(len(param) for param in strategy_params.keys())
     max_desc_len = max(len(desc) for desc in param_descriptions.values())
     
-    print(f"{'Parameter':<{max_param_len+2}} | {'Description':<{max_desc_len+2}} | {'Default Value'}")
-    print("-" * (max_param_len+2 + max_desc_len+2 + 20))
-    
+    logger.debug(f"{'Parameter':<{max_param_len+2}} | {'Description':<{max_desc_len+2}} | {'Default Value'}")
+    logger.debug("-" * (max_param_len+2 + max_desc_len+2 + 20))
+
     for param, value in strategy_params.items():
         if param in param_descriptions:
-            print(f"{param:<{max_param_len+2}} | {param_descriptions[param]:<{max_desc_len+2}} | {value}")
+            logger.debug(f"{param:<{max_param_len+2}} | {param_descriptions[param]:<{max_desc_len+2}} | {value}")
         else:
-            print(f"{param:<{max_param_len+2}} | {'No description available':<{max_desc_len+2}} | {value}")
+            logger.debug(f"{param:<{max_param_len+2}} | {'No description available':<{max_desc_len+2}} | {value}")
 
 
 
@@ -306,7 +293,7 @@ def run_optimization(config, status_callback: Optional[Callable[[Any], None]] = 
     Run the optimization process using config dict.
     """
     def log(message: str):
-        print(message)
+        logger.info(message)
         if status_callback:
             status_callback(message)
 
@@ -444,8 +431,8 @@ def run_optimization(config, status_callback: Optional[Callable[[Any], None]] = 
 
 def main():
     """Main function to run the WFO process."""
-    print("=== ATDMF Strategy Walk-Forward Optimization ===")
-    print("This script performs Walk-Forward Optimization on the ATDMF strategy.")
+    logger.info("=== ATDMF Strategy Walk-Forward Optimization ===")
+    logger.info("This script performs Walk-Forward Optimization on the ATDMF strategy.")
     
     if '--config' in sys.argv:
         import json
@@ -454,10 +441,10 @@ def main():
             config_path = sys.argv[config_idx]
             with open(config_path, 'r') as f:
                 config = json.load(f)
-            print(f"Loading configuration from {config_path}...")
+            logger.info("Loading configuration from %s...", config_path)
             run_optimization(config)
         except Exception as e:
-            print(f"Error loading config: {e}")
+            logger.warning("Error loading config: %s", e)
             traceback.print_exc()
     elif '--no-gui' in sys.argv:
         # Console mode
@@ -478,14 +465,14 @@ def main():
         run_optimization(config)
     else:
         # GUI mode
-        print("Launching Streamlit GUI...")
+        logger.info("Launching Streamlit GUI...")
         import subprocess
         try:
             subprocess.run(["streamlit", "run", "app.py"], check=True)
         except FileNotFoundError:
-            print("Error: 'streamlit' command not found. Please install it using 'pip install streamlit'.")
+            logger.warning("Error: 'streamlit' command not found. Please install it using 'pip install streamlit'.")
         except KeyboardInterrupt:
-            print("\nStreamlit GUI stopped.")
+            logger.info("Streamlit GUI stopped.")
 
 if __name__ == "__main__":
     main()

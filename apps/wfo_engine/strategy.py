@@ -2,6 +2,7 @@
 import pandas as pd
 import numpy as np
 import vectorbtpro as vbt
+from metrics import trade_stat
 from indicators import (
     EcartBollingerBorne, BollingerHorizontal,
     CrossBBWLowSignal, SMAExit, ParabolicSAR, MACDExit
@@ -28,47 +29,29 @@ def create_signal_generators(df, **params):
     dict
         Dictionary of signal generators (VBT objects or DataFrames)
     """
-    # Extract parameters
-    timeperiod = params.get('timeperiod', 20)
-    StDev = params.get('StDev', 2.0)
-    matype = params.get('matype', 0)
-    coeff_medianeBBW = params.get('coeff_medianeBBW', 1.1)
-    coef_mediane = params.get('coef_mediane', 1.0)
-    Nb_bars_above = params.get('Nb_bars_above', 5)
-    fenetre_lowest = params.get('fenetre_lowest', 30)
-    seuil_lowest = params.get('seuil_lowest', 3.5)
-    longueur_mediane = params.get('longueur_mediane', 100)
-    user_exit_sma_length = params.get('user_exit_sma_length', 20)
-    sar_start = params.get('sar_start', 0.02)
-    sar_increment = params.get('sar_increment', 0.02)
-    sar_maximum = params.get('sar_maximum', 0.2)
-    exit_sar_enabled = params.get('exit_sar_enabled', True)
-    macd_fast_length = params.get('macd_fast_length', 12)
-    macd_slow_length = params.get('macd_slow_length', 26)
-    macd_signal_length = params.get('macd_signal_length', 9)
-    exit_macd_enabled = params.get('exit_macd_enabled', True)
-    exit_macd_type_a = params.get('exit_macd_type_a', True)
-    exit_macd_type_b = params.get('exit_macd_type_b', True)
-    
-    # Vectorization handling
-    # Check if any parameter is array-like to determine vectorized length.
-    vector_len = 1
-    all_params = [
-        timeperiod, StDev, matype, coeff_medianeBBW, coef_mediane,
-        Nb_bars_above, fenetre_lowest, seuil_lowest, longueur_mediane, user_exit_sma_length,
-        sar_start, sar_increment, sar_maximum, exit_sar_enabled,
-        macd_fast_length, macd_slow_length, macd_signal_length, exit_macd_enabled,
-        exit_macd_type_a, exit_macd_type_b
-    ]
+    # Parameter defaults for extraction, broadcast, and scalarization.
+    _PARAM_DEFAULTS = {
+        'timeperiod': 20, 'StDev': 2.0, 'matype': 0,
+        'coeff_medianeBBW': 1.1, 'coef_mediane': 1.0,
+        'Nb_bars_above': 5, 'fenetre_lowest': 30, 'seuil_lowest': 3.5,
+        'longueur_mediane': 100, 'user_exit_sma_length': 20,
+        'sar_start': 0.02, 'sar_increment': 0.02, 'sar_maximum': 0.2,
+        'exit_sar_enabled': True, 'macd_fast_length': 12,
+        'macd_slow_length': 26, 'macd_signal_length': 9,
+        'exit_macd_enabled': True, 'exit_macd_type_a': True, 'exit_macd_type_b': True,
+    }
 
     def is_array_like(val):
         return hasattr(val, "__len__") and not isinstance(val, (str, bytes, dict))
 
+    # Detect vectorized length from array-like parameters.
+    vector_len = 1
     lengths = []
-    for p in all_params:
-        if is_array_like(p):
+    for name in _PARAM_DEFAULTS:
+        val = params.get(name, _PARAM_DEFAULTS[name])
+        if is_array_like(val):
             try:
-                lengths.append(len(p))
+                lengths.append(len(val))
             except Exception:
                 pass
 
@@ -98,50 +81,34 @@ def create_signal_generators(df, **params):
             raise ValueError("Empty parameter array is not allowed.")
         out = arr[0]
         return out.item() if isinstance(out, np.generic) else out
-        
-    if vector_len > 1:
-        timeperiod = broadcast(timeperiod, vector_len)
-        StDev = broadcast(StDev, vector_len)
-        matype = broadcast(matype, vector_len)
-        coeff_medianeBBW = broadcast(coeff_medianeBBW, vector_len)
-        coef_mediane = broadcast(coef_mediane, vector_len)
-        Nb_bars_above = broadcast(Nb_bars_above, vector_len)
-        fenetre_lowest = broadcast(fenetre_lowest, vector_len)
-        seuil_lowest = broadcast(seuil_lowest, vector_len)
-        longueur_mediane = broadcast(longueur_mediane, vector_len)
-        user_exit_sma_length = broadcast(user_exit_sma_length, vector_len)
-        sar_start = broadcast(sar_start, vector_len)
-        sar_increment = broadcast(sar_increment, vector_len)
-        sar_maximum = broadcast(sar_maximum, vector_len)
-        exit_sar_enabled = broadcast(exit_sar_enabled, vector_len)
-        macd_fast_length = broadcast(macd_fast_length, vector_len)
-        macd_slow_length = broadcast(macd_slow_length, vector_len)
-        macd_signal_length = broadcast(macd_signal_length, vector_len)
-        exit_macd_enabled = broadcast(exit_macd_enabled, vector_len)
-        exit_macd_type_a = broadcast(exit_macd_type_a, vector_len)
-        exit_macd_type_b = broadcast(exit_macd_type_b, vector_len)
-    else:
-        # Scalar run: normalize single-element arrays/lists produced by chunked callers.
-        timeperiod = scalarize(timeperiod)
-        StDev = scalarize(StDev)
-        matype = scalarize(matype)
-        coeff_medianeBBW = scalarize(coeff_medianeBBW)
-        coef_mediane = scalarize(coef_mediane)
-        Nb_bars_above = scalarize(Nb_bars_above)
-        fenetre_lowest = scalarize(fenetre_lowest)
-        seuil_lowest = scalarize(seuil_lowest)
-        longueur_mediane = scalarize(longueur_mediane)
-        user_exit_sma_length = scalarize(user_exit_sma_length)
-        sar_start = scalarize(sar_start)
-        sar_increment = scalarize(sar_increment)
-        sar_maximum = scalarize(sar_maximum)
-        exit_sar_enabled = scalarize(exit_sar_enabled)
-        macd_fast_length = scalarize(macd_fast_length)
-        macd_slow_length = scalarize(macd_slow_length)
-        macd_signal_length = scalarize(macd_signal_length)
-        exit_macd_enabled = scalarize(exit_macd_enabled)
-        exit_macd_type_a = scalarize(exit_macd_type_a)
-        exit_macd_type_b = scalarize(exit_macd_type_b)
+
+    # Extract, broadcast or scalarize all parameters in a single loop.
+    p = {}
+    for name, default in _PARAM_DEFAULTS.items():
+        val = params.get(name, default)
+        p[name] = broadcast(val, vector_len) if vector_len > 1 else scalarize(val)
+
+    # Unpack for readability in downstream code.
+    timeperiod = p['timeperiod']
+    StDev = p['StDev']
+    matype = p['matype']
+    coeff_medianeBBW = p['coeff_medianeBBW']
+    coef_mediane = p['coef_mediane']
+    Nb_bars_above = p['Nb_bars_above']
+    fenetre_lowest = p['fenetre_lowest']
+    seuil_lowest = p['seuil_lowest']
+    longueur_mediane = p['longueur_mediane']
+    user_exit_sma_length = p['user_exit_sma_length']
+    sar_start = p['sar_start']
+    sar_increment = p['sar_increment']
+    sar_maximum = p['sar_maximum']
+    exit_sar_enabled = p['exit_sar_enabled']
+    macd_fast_length = p['macd_fast_length']
+    macd_slow_length = p['macd_slow_length']
+    macd_signal_length = p['macd_signal_length']
+    exit_macd_enabled = p['exit_macd_enabled']
+    exit_macd_type_a = p['exit_macd_type_a']
+    exit_macd_type_b = p['exit_macd_type_b']
 
     # Keep OHLC inputs as 1D series and let vectorbt broadcast with parameter arrays.
     # Pre-expanding price columns together with vectorized params can create cartesian
@@ -457,30 +424,6 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
         weight_metric1 = params.get('weight_metric1', 1.0)
         weight_metric2 = params.get('weight_metric2', 0.0)
         
-        def trade_stat(trades, attr_name, default=0.0):
-            """Safely extract a trade statistic from vectorbt trades objects/stats outputs."""
-            value = getattr(trades, attr_name, None)
-            if value is not None:
-                return value
-            try:
-                stats = trades.stats()
-            except Exception:
-                return default
-            keys = [
-                attr_name,
-                attr_name.replace('_', ' '),
-                attr_name.replace('_', ' ').title(),
-                attr_name.replace('_', ' ').capitalize(),
-            ]
-            for key in keys:
-                try:
-                    value = stats.get(key) if hasattr(stats, 'get') else stats[key]
-                except Exception:
-                    value = None
-                if value is not None:
-                    return value
-            return default
-
         # Helper to get metric safely
         def get_metric(port, name):
             """Compute a metric value for scalar or vectorized portfolios."""

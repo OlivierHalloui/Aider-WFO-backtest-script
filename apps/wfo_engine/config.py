@@ -1,6 +1,8 @@
 # Import necessary libraries for configuration
 import os
+from dataclasses import dataclass, field, fields
 from datetime import date
+from typing import Tuple
 
 TODAY = date.today().isoformat()
 DEFAULT_START_DATE = TODAY
@@ -8,11 +10,7 @@ DEFAULT_END_DATE = TODAY
 DEFAULT_TIMEFRAME = '5s'
 DEFAULT_STRATEGY_MODE = "native_atdmf"
 DEFAULT_STRATEGY_ID = "atdmf_native_v2"
-DEFAULT_DATA_FILE = (
-    "/home/olivier/Downloads/ATDMF_strategy_V5_long/ATDMF_strategy_long_"
-    "BTCFDUSD05S/Data/Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_1s/"
-    "Binance_BTCUSDT_OHLCV_B_2025-01-19_2025-01-31_5S.csv"
-)
+DEFAULT_DATA_FILE = os.environ.get("WFOE_DEFAULT_DATA_FILE", "")
 
 DEFAULT_PARAM_GRID = {
     'timeperiod': (10, 30, 5),
@@ -37,46 +35,56 @@ DEFAULT_PARAM_GRID = {
 # ======================================================================
 
 # Walk-Forward Optimization settings
+@dataclass
 class WFOSettings:
     """Runtime settings container for classic, NN-guided and adaptive WFO engines."""
 
-    def __init__(self):
-        """Initialize default optimization, execution and adaptive-guidance parameters."""
-        self.n_windows = 1               # Number of windows to divide data into
-        self.train_size = 0.5            # Proportion of window for training
-        self.anchored = False            # Whether to use anchored (fixed start date) WFO
-        self.optimization_metric = "sharpe_ratio"  # Main metric to optimize
-        self.secondary_metric = "total_return"     # Secondary metric to optimize
-        self.metric_weights = (1.0, 0.0) # Weights for primary and secondary metrics
-        self.parallel_backend = "dask"   # Parallelization backend ('dask', 'ray', 'pathos', 'threadpool')
-        self.use_numba = True            # Whether to use Numba for accelerated computations
-        self.chunk_size = 200            # Chunk size for parallelization
-        self.optimization_method = "bayesian"  # Optimization method ('bayesian', 'optuna', 'grid')
-        self.optimization_regime = "classic"   # 'classic', 'prev_best_grid', 'nn_guided', 'adaptive_continuous'
-        self.patience_level = "Medium"   # Patience for Bayesian/Optuna early stopping
-        self.max_trials = 200            # Maximum number of trials for Bayesian/Optuna optimization
-        self.neighbor_count = 5          # Neighbor count for stability selection
-        self.nn_min_samples = 500        # Min cumulative trials before enabling NN guidance
-        self.nn_candidate_pool_size = 3000  # Random candidates scored by the NN per window
-        self.nn_top_k = 250              # Top candidate count used to build next guided grid
-        self.nn_exploration_ratio = 0.15 # Fraction of baseline values kept for exploration
-        self.nn_hidden_size = 32         # Hidden neurons for the lightweight MLP
-        self.nn_epochs = 60              # Training epochs after each window
-        self.nn_learning_rate = 0.01     # Training learning rate
-        self.nn_l2 = 1e-4                # L2 regularization
-        self.adaptive_train_bars = 5000  # Lookback bars used for each adaptive training cycle
-        self.adaptive_cycle_bars = 1000  # Bars advanced/evaluated per cycle
-        self.adaptive_trials_per_cycle = 150  # Number of parameter trials per cycle
-        self.adaptive_candidate_pool_size = 3000  # Random candidates ranked before selecting trials
-        self.adaptive_keep_ratio = 0.40  # Fraction of best values kept per parameter in guided grid
-        self.adaptive_exploration_ratio = 0.20  # Fraction of random exploratory trials/values
-        self.adaptive_min_values_per_param = 2  # Minimum number of retained values per parameter
-        self.adaptive_decay = 0.98       # Exponential memory decay for historical value stats
-        self.adaptive_ucb_beta = 0.75    # Uncertainty bonus for value ranking (UCB-like)
-        self.adaptive_warmup_trials = 300  # Minimum historical trials before shrinking the grid
-        self.adaptive_max_cycles = 0     # 0 = no cap, otherwise max number of adaptive cycles
-        self.adaptive_oos_weight = 2.0   # Additional weight of OOS best score in value stats
-        self.exit_sar_enabled = True     # Enable Parabolic SAR exit
-        self.exit_macd_enabled = True    # Enable MACD exit
-        self.exit_macd_type_a = True     # MACD exit type A (crossunder + signal falling)
-        self.exit_macd_type_b = True     # MACD exit type B (crossunder)
+    n_windows: int = 1                          # Number of windows to divide data into
+    train_size: float = 0.5                     # Proportion of window for training
+    anchored: bool = False                      # Whether to use anchored (fixed start date) WFO
+    optimization_metric: str = "sharpe_ratio"   # Main metric to optimize
+    secondary_metric: str = "total_return"      # Secondary metric to optimize
+    metric_weights: Tuple[float, float] = (1.0, 0.0)  # Weights for primary and secondary metrics
+    parallel_backend: str = "dask"              # Parallelization backend ('dask', 'ray', 'pathos', 'threadpool')
+    use_numba: bool = True                      # Whether to use Numba for accelerated computations
+    chunk_size: int = 200                       # Chunk size for parallelization
+    optimization_method: str = "bayesian"       # Optimization method ('bayesian', 'optuna', 'grid')
+    optimization_regime: str = "classic"        # 'classic', 'prev_best_grid', 'nn_guided', 'adaptive_continuous'
+    patience_level: str = "Medium"              # Patience for Bayesian/Optuna early stopping
+    max_trials: int = 200                       # Maximum number of trials for Bayesian/Optuna optimization
+    neighbor_count: int = 5                     # Neighbor count for stability selection
+    nn_min_samples: int = 500                   # Min cumulative trials before enabling NN guidance
+    nn_candidate_pool_size: int = 3000          # Random candidates scored by the NN per window
+    nn_top_k: int = 250                         # Top candidate count used to build next guided grid
+    nn_exploration_ratio: float = 0.15          # Fraction of baseline values kept for exploration
+    nn_hidden_size: int = 32                    # Hidden neurons for the lightweight MLP
+    nn_epochs: int = 60                         # Training epochs after each window
+    nn_learning_rate: float = 0.01              # Training learning rate
+    nn_l2: float = 1e-4                         # L2 regularization
+    adaptive_train_bars: int = 5000             # Lookback bars used for each adaptive training cycle
+    adaptive_cycle_bars: int = 1000             # Bars advanced/evaluated per cycle
+    adaptive_trials_per_cycle: int = 150        # Number of parameter trials per cycle
+    adaptive_candidate_pool_size: int = 3000    # Random candidates ranked before selecting trials
+    adaptive_keep_ratio: float = 0.40           # Fraction of best values kept per parameter in guided grid
+    adaptive_exploration_ratio: float = 0.20    # Fraction of random exploratory trials/values
+    adaptive_min_values_per_param: int = 2      # Minimum number of retained values per parameter
+    adaptive_decay: float = 0.98                # Exponential memory decay for historical value stats
+    adaptive_ucb_beta: float = 0.75             # Uncertainty bonus for value ranking (UCB-like)
+    adaptive_warmup_trials: int = 300           # Minimum historical trials before shrinking the grid
+    adaptive_max_cycles: int = 0                # 0 = no cap, otherwise max number of adaptive cycles
+    adaptive_oos_weight: float = 2.0            # Additional weight of OOS best score in value stats
+    exit_sar_enabled: bool = True               # Enable Parabolic SAR exit
+    exit_macd_enabled: bool = True              # Enable MACD exit
+    exit_macd_type_a: bool = True               # MACD exit type A (crossunder + signal falling)
+    exit_macd_type_b: bool = True               # MACD exit type B (crossunder)
+
+    @classmethod
+    def from_config(cls, config: dict) -> "WFOSettings":
+        """Create a WFOSettings instance from a config dict.
+
+        Only keys that match a known field name are used; missing keys
+        fall back to the field default.
+        """
+        known = {f.name for f in fields(cls)}
+        kwargs = {k: v for k, v in config.items() if k in known}
+        return cls(**kwargs)
