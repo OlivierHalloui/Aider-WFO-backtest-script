@@ -5,7 +5,10 @@ import vectorbtpro as vbt
 from metrics import trade_stat
 from indicators import (
     EcartBollingerBorne, BollingerHorizontal,
-    CrossBBWLowSignal, SMAExit, ParabolicSAR, MACDExit
+    CrossBBWLowSignal, NbBarsUnderBBW, BBandCrossBarssince,
+    DepassementRoCLong,
+    SMAExit, ParabolicSAR, MACDExit,
+    CrossSARSMAExit, PivotLow, LinregExit, VolatDownExit
 )
 
 # ======================================================================
@@ -31,14 +34,23 @@ def create_signal_generators(df, **params):
     """
     # Parameter defaults for extraction, broadcast, and scalarization.
     _PARAM_DEFAULTS = {
-        'timeperiod': 20, 'StDev': 2.0, 'matype': 0,
-        'coeff_medianeBBW': 1.1, 'coef_mediane': 1.0,
-        'Nb_bars_above': 5, 'fenetre_lowest': 30, 'seuil_lowest': 3.5,
-        'longueur_mediane': 100, 'user_exit_sma_length': 20,
+        'timeperiod': 12, 'StDev': 1.3, 'matype': 0,
+        'coeff_medianeBBW': 1.2, 'coef_mediane': 0.89,
+        'Nb_bars_above': 1, 'fenetre_lowest': 80, 'seuil_lowest': 3.5,
+        'longueur_mediane': 100, 'nb_bars_under_bbw_mini': 4,
+        'nb_bars_entre_bb': 5,
+        'depassement_sma_roc': 0.01, 'roc_max_t1': 100.0,
+        'use_t2_signal': True,
+        'user_exit_sma_length': 14,
         'sar_start': 0.02, 'sar_increment': 0.02, 'sar_maximum': 0.2,
-        'exit_sar_enabled': True, 'macd_fast_length': 12,
-        'macd_slow_length': 26, 'macd_signal_length': 9,
+        'exit_sar_enabled': True, 'macd_fast_length': 9,
+        'macd_slow_length': 19, 'macd_signal_length': 6,
+        'macd_ma_type': 'sma',
         'exit_macd_enabled': True, 'exit_macd_type_a': True, 'exit_macd_type_b': True,
+        'exit_cross_sar_sma_enabled': True,
+        'exit_retour_bb_enabled': False, 'nb_bars_left_pivot': 2, 'nb_bars_right_pivot': 2,
+        'exit_regline_enabled': False, 'nombre_periodes_reglin': 15, 'i_bars_back': 1,
+        'exit_volat_down_enabled': False, 'seuil_overbought_bb': 0.85,
     }
 
     def is_array_like(val):
@@ -98,6 +110,11 @@ def create_signal_generators(df, **params):
     fenetre_lowest = p['fenetre_lowest']
     seuil_lowest = p['seuil_lowest']
     longueur_mediane = p['longueur_mediane']
+    nb_bars_under_bbw_mini = p['nb_bars_under_bbw_mini']
+    nb_bars_entre_bb = p['nb_bars_entre_bb']
+    depassement_sma_roc = p['depassement_sma_roc']
+    roc_max_t1 = p['roc_max_t1']
+    use_t2_signal = p['use_t2_signal']
     user_exit_sma_length = p['user_exit_sma_length']
     sar_start = p['sar_start']
     sar_increment = p['sar_increment']
@@ -106,9 +123,19 @@ def create_signal_generators(df, **params):
     macd_fast_length = p['macd_fast_length']
     macd_slow_length = p['macd_slow_length']
     macd_signal_length = p['macd_signal_length']
+    macd_ma_type = p['macd_ma_type']
     exit_macd_enabled = p['exit_macd_enabled']
     exit_macd_type_a = p['exit_macd_type_a']
     exit_macd_type_b = p['exit_macd_type_b']
+    exit_cross_sar_sma_enabled = p['exit_cross_sar_sma_enabled']
+    exit_retour_bb_enabled = p['exit_retour_bb_enabled']
+    nb_bars_left_pivot = p['nb_bars_left_pivot']
+    nb_bars_right_pivot = p['nb_bars_right_pivot']
+    exit_regline_enabled = p['exit_regline_enabled']
+    nombre_periodes_reglin = p['nombre_periodes_reglin']
+    i_bars_back = p['i_bars_back']
+    exit_volat_down_enabled = p['exit_volat_down_enabled']
+    seuil_overbought_bb = p['seuil_overbought_bb']
 
     # Keep OHLC inputs as 1D series and let vectorbt broadcast with parameter arrays.
     # Pre-expanding price columns together with vectorized params can create cartesian
@@ -201,7 +228,37 @@ def create_signal_generators(df, **params):
         seuil_lowest=seuil_lowest,
         per_column=True
     )
-    
+
+    # Nb bars under BBW (consecutive bars where cross_bbw_low is True)
+    cross_bbw_low_signal = normalize_columns(cross_bbw_low_ind.signal)
+    nb_bars_under_bbw_ind = NbBarsUnderBBW.run(
+        cross_bbw_low=cross_bbw_low_signal.astype(float),
+        nb_bars_mini=nb_bars_under_bbw_mini,
+        per_column=True
+    )
+
+    # BBand cross barssince (no recent crossover/crossunder of BB bands)
+    bbandcross_barssince_ind = BBandCrossBarssince.run(
+        close=close_price_aligned,
+        upper=upper_band,
+        lower=lower_band,
+        nb_bars_entre=nb_bars_entre_bb,
+        per_column=True
+    )
+
+    # DepassementRoC — T1 filter
+    open_price = df['Open']
+    open_price_aligned = align_input_to_columns(open_price, upper_band)
+    depassement_roc_ind = DepassementRoCLong.run(
+        close=close_price_aligned,
+        open_=open_price_aligned,
+        high=high_price_aligned,
+        low=low_price_aligned,
+        depass_sma_roc=depassement_sma_roc,
+        roc_max=roc_max_t1,
+        per_column=True
+    )
+
     # SMA Exit
     # Needs: close, length
     # 1 input -> N params -> N outputs. per_column=False (default)
@@ -211,6 +268,7 @@ def create_signal_generators(df, **params):
         per_column=True
     )
 
+    use_sma = (macd_ma_type == 'sma') if isinstance(macd_ma_type, str) else True
     macd_exit_ind = MACDExit.run(
         close=close_price_aligned,
         fast_length=macd_fast_length,
@@ -218,6 +276,7 @@ def create_signal_generators(df, **params):
         signal_length=macd_signal_length,
         use_type_a=exit_macd_type_a,
         use_type_b=exit_macd_type_b,
+        use_sma=use_sma,
         per_column=True
     )
 
@@ -274,16 +333,73 @@ def create_signal_generators(df, **params):
         if not bool(exit_macd_enabled):
             macd_exit_signal[:] = False
 
+    # --- Additional exit signals (Phase 5) ---
+
+    # 1. Cross SAR/SMA exit: SAR crosses above SMA
+    # Use the same SMA length as the SMA exit for consistency
+    _sma_len = int(scalarize(user_exit_sma_length)) if is_array_like(user_exit_sma_length) else int(user_exit_sma_length)
+    sma_series = close_price_aligned.rolling(window=_sma_len, min_periods=_sma_len).mean()
+    cross_sar_sma_exit_ind = CrossSARSMAExit.run(
+        sma=sma_series,
+        sar=sar_signal,
+        per_column=True
+    )
+    cross_sar_sma_signal = normalize_columns(cross_sar_sma_exit_ind.signal).astype(bool)
+    if not bool(exit_cross_sar_sma_enabled):
+        cross_sar_sma_signal[:] = False
+
+    # 2. Retour BB exit: pivot low on lower band
+    retour_bb_signal = None
+    if bool(exit_retour_bb_enabled):
+        retour_bb_ind = PivotLow.run(
+            series=lower_band,
+            left=nb_bars_left_pivot,
+            right=nb_bars_right_pivot,
+            per_column=True
+        )
+        retour_bb_signal = normalize_columns(retour_bb_ind.signal).astype(bool)
+
+    # 3. Regline exit: crossunder(close, linreg)
+    regline_signal = None
+    if bool(exit_regline_enabled):
+        regline_ind = LinregExit.run(
+            close=close_price_aligned,
+            length=nombre_periodes_reglin,
+            offset=i_bars_back,
+            per_column=True
+        )
+        regline_signal = normalize_columns(regline_ind.signal).astype(bool)
+
+    # 4. Volat down exit: crossunder(%BB, seuil_overbought)
+    volat_down_signal = None
+    if bool(exit_volat_down_enabled):
+        volat_down_ind = VolatDownExit.run(
+            close=close_price_aligned,
+            upper=upper_band,
+            lower=lower_band,
+            seuil_overbought=seuil_overbought_bb,
+            per_column=True
+        )
+        volat_down_signal = normalize_columns(volat_down_ind.signal).astype(bool)
+
     return {
         'upper_band': upper_band,
         'lower_band': lower_band,
         'middle_band': middle_band,
         'nb_bars_above_signal': normalize_columns(nb_bars_above_ind.signal),
         'bollinger_horizontal_signal': normalize_columns(bollinger_horizontal_ind.signal).astype(bool),
-        'cross_bbw_low_signal': normalize_columns(cross_bbw_low_ind.signal),
+        'cross_bbw_low_signal': cross_bbw_low_signal,
+        'nb_bars_under_bbw_signal': normalize_columns(nb_bars_under_bbw_ind.signal).astype(bool),
+        'bbandcross_barssince_signal': normalize_columns(bbandcross_barssince_ind.signal).astype(bool),
+        'depassement_roc_signal': normalize_columns(depassement_roc_ind.signal).astype(bool),
+        'use_t2_signal': use_t2_signal,
         'sma_exit_signal': normalize_columns(sma_exit_ind.signal),
         'sar_exit_signal': sar_exit_signal,
-        'macd_exit_signal': macd_exit_signal.astype(bool)
+        'macd_exit_signal': macd_exit_signal.astype(bool),
+        'cross_sar_sma_exit_signal': cross_sar_sma_signal,
+        'retour_bb_exit_signal': retour_bb_signal,
+        'regline_exit_signal': regline_signal,
+        'volat_down_exit_signal': volat_down_signal,
     }
 
 def create_entry_exit_conditions(df, signals):
@@ -328,20 +444,51 @@ def create_entry_exit_conditions(df, signals):
     # close > upper_band  => upper_band.lt(close, axis=0)
     # prev_close < prev_upper => prev_upper.gt(prev_close, axis=0)
     
-    entry_condition = (
-        signals['nb_bars_above_signal'] & 
-        signals['cross_bbw_low_signal'] & 
-        signals['bollinger_horizontal_signal'] & 
-        upper_band.lt(close, axis=0) & 
-        prev_upper.gt(prev_close, axis=0)
-    ).fillna(False).astype(bool)
+    # T0: all sub-signals must be True
+    T0 = (
+        signals['cross_bbw_low_signal'] &
+        signals['nb_bars_under_bbw_signal'] &
+        signals['bbandcross_barssince_signal'] &
+        signals['bollinger_horizontal_signal'] &
+        signals['nb_bars_above_signal']
+    )
+
+    # Crossover: close crosses above upper band
+    crossover_upper = upper_band.lt(close, axis=0) & prev_upper.ge(prev_close, axis=0)
+
+    # T1: T0 (current or previous bar) + crossover + RoC filter
+    T1 = (T0 | T0.shift(1).fillna(False)) & crossover_upper & signals['depassement_roc_signal']
+
+    # T2: high breakout + T1 on previous bar + divergence_BB
+    # divergence_BB = upper expanding AND lower expanding (bands diverging)
+    high = df['High']
+    lower_band = signals['lower_band']
+    divergence_BB = (upper_band.diff() > 0) & (lower_band.diff() < 0)
+
+    use_t2 = signals.get('use_t2_signal', True)
+    if use_t2:
+        T2 = (
+            high.gt(high.shift(1), axis=0) &
+            T1.shift(1).fillna(False) &
+            (divergence_BB | divergence_BB.shift(1).fillna(False))
+        )
+        entry_condition = T2.fillna(False).astype(bool)
+    else:
+        entry_condition = T1.fillna(False).astype(bool)
     
-    # Exit Condition
+    # Exit Condition — combine all enabled exits
     exit_condition = (
         signals['sma_exit_signal'] |
         signals['sar_exit_signal'] |
-        signals['macd_exit_signal']
-    ).fillna(False).astype(bool)
+        signals['macd_exit_signal'] |
+        signals['cross_sar_sma_exit_signal']
+    )
+    # Optional exits (None when disabled)
+    for key in ('retour_bb_exit_signal', 'regline_exit_signal', 'volat_down_exit_signal'):
+        sig = signals.get(key)
+        if sig is not None:
+            exit_condition = exit_condition | sig
+    exit_condition = exit_condition.fillna(False).astype(bool)
     
     return entry_condition, exit_condition
 

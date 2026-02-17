@@ -13,21 +13,21 @@ DEFAULT_STRATEGY_ID = "atdmf_native_v2"
 DEFAULT_DATA_FILE = os.environ.get("WFOE_DEFAULT_DATA_FILE", "")
 
 DEFAULT_PARAM_GRID = {
-    'timeperiod': (10, 30, 5),
-    'StDev': (1, 2.5, 0.5),
-    'coeff_medianeBBW': (0.8, 1.6, 0.4),
-    'coef_mediane': (1, 1.5, 0.5),
-    'fenetre_lowest': (30, 60, 10),
+    'timeperiod': (8, 20, 2),
+    'StDev': (0.8, 2.0, 0.3),
+    'coeff_medianeBBW': (0.9, 1.5, 0.3),
+    'coef_mediane': (0.7, 1.1, 0.1),
+    'fenetre_lowest': (40, 120, 20),
     'seuil_lowest': (1.0, 3.5, 0.5),
     'longueur_mediane': (50, 150, 50),
-    'Nb_bars_above': (2, 6, 2),
-    'user_exit_sma_length': (10, 30, 10),
+    'Nb_bars_above': (1, 6, 1),
+    'user_exit_sma_length': (8, 20, 2),
     'sar_start': (0.02, 0.05, 0.01),
     'sar_increment': (0.02, 0.05, 0.01),
     'sar_maximum': (0.1, 0.3, 0.05),
-    'macd_fast_length': (8, 16, 2),
-    'macd_slow_length': (20, 40, 2),
-    'macd_signal_length': (5, 15, 2)
+    'macd_fast_length': (6, 14, 2),
+    'macd_slow_length': (14, 26, 2),
+    'macd_signal_length': (4, 10, 2)
 }
 
 # ======================================================================
@@ -73,10 +73,15 @@ class WFOSettings:
     adaptive_warmup_trials: int = 300           # Minimum historical trials before shrinking the grid
     adaptive_max_cycles: int = 0                # 0 = no cap, otherwise max number of adaptive cycles
     adaptive_oos_weight: float = 2.0            # Additional weight of OOS best score in value stats
+    use_t2_signal: bool = True                   # Enable T2 cascade (divergence_BB + high breakout)
     exit_sar_enabled: bool = True               # Enable Parabolic SAR exit
     exit_macd_enabled: bool = True              # Enable MACD exit
     exit_macd_type_a: bool = True               # MACD exit type A (crossunder + signal falling)
     exit_macd_type_b: bool = True               # MACD exit type B (crossunder)
+    exit_cross_sar_sma_enabled: bool = True     # Cross SAR/SMA exit (SAR crosses above SMA)
+    exit_retour_bb_enabled: bool = False        # Retour BB exit (pivot low on lower band)
+    exit_regline_enabled: bool = False          # Linear regression exit
+    exit_volat_down_enabled: bool = False       # Volatility down / %BB exit
 
     @classmethod
     def from_config(cls, config: dict) -> "WFOSettings":
