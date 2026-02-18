@@ -69,8 +69,9 @@ All adapters implement: `get_param_space()`, `generate_signals()`, `run_backtest
 
 ### Core Modules (`apps/wfo_engine/`)
 
-- **`app.py`**: Streamlit UI entry point — sidebar config, session state, panel orchestration (~5,800 lines after extracting UI panels)
+- **`app.py`**: Streamlit UI entry point — sidebar config, session state, panel orchestration (~5,800 lines). Imports from `ui/` panels, `services/`, `expert/`, `pine_v3/`, and `domain/`
 - **`wfo.py`**: Walk-forward optimization engine — orchestrates train/test windows, optimization methods, parameter stability with neighbor smoothing, backtest caching
+- **`wfo_save.py`**: Persistence of WFO run results (JSON/CSV serialization)
 - **`strategy.py`**: ATDMF strategy logic — signal generation factory (`create_signal_generators`), backtest runner (`run_backtest`) building VectorBT portfolios
 - **`indicators.py`**: Technical indicators (Bollinger Bands, SAR, MACD, SMA) — Numba-optimized, VectorBT integrated
 - **`adaptive_optimization.py`**: Rolling optimization without fixed WFO windows, progressive grid narrowing
@@ -94,9 +95,10 @@ Pipeline: **Pine text → spec.v1 JSON → Python runtime → VectorBT signals**
 
 ### Supporting Modules
 
-- **`expert/`**: LLM gateway for WFO analysis (OpenAI-compatible API) — prompts, templates, storage in `reports/expert/`
-- **`services/`**: Run orchestration (`run_service.py`), ZIP export (`export_utils.py`), audit trail (`traceability.py`)
-- **`ui/`**: Streamlit UI panels extracted from `app.py` — `pine_panel.py` (Pine V3 import/parity), `expert_panel.py` (LLM analysis), `export_panel.py` (ZIP export/import), `final_backtest_panel.py` (final backtest display)
+- **`expert/`**: LLM gateway for WFO analysis (OpenAI-compatible API) — `llm_gateway.py`, `prompt_builder.py`, `analyzer.py`; storage in `reports/expert/`
+- **`services/`**: Run orchestration (`run_service.py`), ZIP export (`export_utils.py`), audit trail (`traceability.py`), timeframe/date helpers (`runtime_utils.py`)
+- **`ui/`**: Streamlit UI panels — `pine_panel.py` (Pine V3 import/parity), `expert_panel.py` (LLM analysis), `export_panel.py` (ZIP export/import), `final_backtest_panel.py` (final backtest display), `expert_report.py` (report rendering), `data_utils.py` (downsampling, trade metrics)
+- **`domain/`**: Cross-cutting utilities — `serialization.py` (JSON sanitization, UTC datetime, hashing, type conversion)
 - **`visualization.py`**: WFO results charts, parameter maps, PDF reports
 
 ### Other Apps

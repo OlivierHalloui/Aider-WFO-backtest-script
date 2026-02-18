@@ -339,10 +339,12 @@ def create_signal_generators(df, **params):
     # Use the same SMA length as the SMA exit for consistency
     _sma_len = int(scalarize(user_exit_sma_length)) if is_array_like(user_exit_sma_length) else int(user_exit_sma_length)
     sma_series = close_price_aligned.rolling(window=_sma_len, min_periods=_sma_len).mean()
+    # NOTE: CrossSARSMAExit has no VBT params (param_names=[]), so per_column=True
+    # is not valid.  With takes_1d=True, VBT already iterates over columns
+    # automatically when inputs are DataFrames.
     cross_sar_sma_exit_ind = CrossSARSMAExit.run(
         sma=sma_series,
         sar=sar_signal,
-        per_column=True
     )
     cross_sar_sma_signal = normalize_columns(cross_sar_sma_exit_ind.signal).astype(bool)
     if not bool(exit_cross_sar_sma_enabled):
