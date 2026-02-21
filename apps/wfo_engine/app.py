@@ -1,3 +1,5 @@
+import logging
+import sys
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -119,6 +121,31 @@ from pine_v3.catalog import (
     mark_catalog_entry_used as _mark_pine_catalog_entry_used,
     load_catalog_source_text as _load_pine_catalog_source_text,
 )
+
+# ---------------------------------------------------------------------------
+# Logging — enable INFO output for WFO engine modules in the terminal.
+# Each module gets a StreamHandler writing to stdout; propagation is disabled
+# so Streamlit's root-logger capture doesn't interfere.
+# ---------------------------------------------------------------------------
+_wfoe_handler = logging.StreamHandler(sys.stdout)
+_wfoe_handler.setLevel(logging.INFO)
+_wfoe_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+))
+for _mod in (
+    "wfo",
+    "adaptive_optimization",
+    "main",
+    "services.run_service",
+    "ui.campaign_panel",
+):
+    _lg = logging.getLogger(_mod)
+    _lg.setLevel(logging.INFO)
+    if not _lg.handlers:
+        _lg.addHandler(_wfoe_handler)
+    _lg.propagate = False
+del _wfoe_handler, _mod, _lg
 
 # Set page config
 st.set_page_config(
@@ -360,6 +387,18 @@ def _load_results_zip(zip_file):
         persist_pine_library_text=_persist_pine_library_text,
     )
 
+@st.cache_data(show_spinner=False)
+def _cached_csv_date_range(file_path: str, mtime: float):
+    """Cached wrapper — result is reused as long as file path and mtime are unchanged."""
+    return get_csv_date_range(file_path)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_load_data_for_final(file_path: str, mtime: float, start_date, end_date, timeframe):
+    """Cached loader for the final backtest — keyed by (file_path, mtime) so stale data is never used."""
+    return load_data(start_date, end_date, timeframe, from_file=True, file_path=file_path)
+
+
 def sync_dates_from_file(force=False):
     file_path = st.session_state.get('file_path')
     if not file_path or not os.path.exists(file_path):
@@ -368,7 +407,11 @@ def sync_dates_from_file(force=False):
     if not force and st.session_state.get('last_data_file_path') == file_path:
         return
 
-    min_date, max_date = get_csv_date_range(file_path)
+    try:
+        mtime = os.path.getmtime(file_path)
+    except OSError:
+        mtime = 0.0
+    min_date, max_date = _cached_csv_date_range(file_path, mtime)
     if min_date and max_date:
         # Never write directly to widget-bound keys here; this callback can
         # run after widgets are instantiated in the same Streamlit cycle.
@@ -838,6 +881,15 @@ def _get_observed_seconds_per_trial():
 with st.sidebar:
     st.header("⚙️ Configuration")
     st.caption("Parcours rapide: 1) Données 2) Paramètres 3) Moteur WFO 4) Lancer 5) Exporter")
+
+    # --- App mode switcher ---
+    st.radio(
+        "Mode",
+        options=["Single Run", "Campaign"],
+        horizontal=True,
+        key="app_mode",
+        help="Single Run: optimize one config. Campaign: run multiple configs sequentially and compare results.",
+    )
 
     has_final_params = 'final_params' in st.session_state or 'wfo_results' in st.session_state
     st.sidebar.button(
@@ -1651,6 +1703,7 @@ with st.sidebar:
                                 st.session_state.pop("pine_llm_override_spec", None)
                                 st.session_state.pop("pine_llm_override_source_sha1", None)
                         st.session_state["pine_strategy_spec"] = _sanitize_for_json(strategy_spec)
+                        st.session_state["pine_spec_sha256"] = _sha256_json(strategy_spec) if strategy_spec else None
                         st.session_state["pine_strategy_spec_validation"] = _sanitize_for_json(
                             strategy_spec_validation
                         )
@@ -1965,6 +2018,7 @@ with st.sidebar:
                                     accepted_validation.get("valid", False)
                                 ):
                                     st.session_state["pine_strategy_spec"] = _sanitize_for_json(accepted_spec)
+                                    st.session_state["pine_spec_sha256"] = _sha256_json(accepted_spec) if accepted_spec else None
                                     st.session_state["pine_strategy_spec_validation"] = _sanitize_for_json(
                                         accepted_validation
                                     )
@@ -2845,7 +2899,7 @@ with st.sidebar:
             adaptive_cycle_bars = st.number_input(
                 "Adaptive Cycle Bars",
                 min_value=50,
-                value=1000,
+                value=5000,
                 step=50,
                 key='adaptive_cycle_bars',
                 help="Nombre de bougies avancées et évaluées après chaque cycle adaptatif."
@@ -3132,7 +3186,7 @@ def get_current_config():
         'pine_compatibility_blocking': bool(pine_compat_report.get("is_blocking", False)),
         'strategy_spec_schema_version': pine_spec.get("schema_version"),
         'strategy_spec_valid': bool(pine_spec_validation.get("valid", False)),
-        'strategy_spec_sha256': _sha256_json(pine_spec) if pine_spec else None,
+        'strategy_spec_sha256': st.session_state.get("pine_spec_sha256") if pine_spec else None,
         'strategy_spec_validation_errors': len(pine_spec_validation.get("errors", []) or []),
         'strategy_spec_parser_backend_used': (
             (pine_spec.get("transcription") or {}).get("parser_backend_used")
@@ -3215,7 +3269,7 @@ def get_current_config():
         'nn_learning_rate': float(st.session_state.get('nn_learning_rate', 0.01)),
         'nn_l2': float(st.session_state.get('nn_l2', 1e-4)),
         'adaptive_train_bars': int(st.session_state.get('adaptive_train_bars', 5000)),
-        'adaptive_cycle_bars': int(st.session_state.get('adaptive_cycle_bars', 1000)),
+        'adaptive_cycle_bars': int(st.session_state.get('adaptive_cycle_bars', 5000)),
         'adaptive_trials_per_cycle': int(st.session_state.get('adaptive_trials_per_cycle', 150)),
         'adaptive_candidate_pool_size': int(st.session_state.get('adaptive_candidate_pool_size', 3000)),
         'adaptive_profile': st.session_state.get('adaptive_profile', 'balanced'),
@@ -3346,6 +3400,14 @@ def run_wfo(config, control=None, job_state=None):
     """Run WFO via the run service without direct UI calls."""
     return run_optimization_job(config=config, control=control, job_state=job_state)
 
+# ---------------------------------------------------------------------------
+# Campaign mode intercept — renders campaign panel and stops further execution
+# ---------------------------------------------------------------------------
+if st.session_state.get("app_mode", "Single Run") == "Campaign":
+    from ui.campaign_panel import render_campaign_panel
+    render_campaign_panel()
+    st.stop()
+
 # --- Action Buttons ---
 st.sidebar.divider()
 
@@ -3358,7 +3420,7 @@ if str(current_conf.get("optimization_regime", "")).lower() == "adaptive_continu
         end_date=current_conf.get("end_date"),
         timeframe_str=current_conf.get("timeframe"),
         train_bars=current_conf.get("adaptive_train_bars", 5000),
-        cycle_bars=current_conf.get("adaptive_cycle_bars", 1000),
+        cycle_bars=current_conf.get("adaptive_cycle_bars", 5000),
         trials_per_cycle=current_conf.get("adaptive_trials_per_cycle", 150),
         max_cycles=current_conf.get("adaptive_max_cycles", 0)
     )
@@ -3780,22 +3842,208 @@ if 'wfo_results' in st.session_state:
         run_final_backtest_logic()
 
 # ==============================================================================
+# CACHED FIGURE BUILDERS
+# Defined at module scope so @st.cache_data persists across reruns.
+# Cache key = str(id(results)) — changes only when a new WFO run completes.
+# Data arguments are prefixed with _ so Streamlit does not hash them.
+# ==============================================================================
+
+@st.cache_data(show_spinner=False)
+def _cached_price_windows_chart(cache_key: str, price_col: str, _df, _window_results):
+    """Price series + WFO train/test window overlays."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=_df.index, y=_df[price_col], mode='lines', name='Price',
+        line=dict(color='#1f77b4', width=1)
+    ))
+    colors = {'train': 'rgba(0, 255, 0, 0.1)', 'test': 'rgba(255, 0, 0, 0.1)'}
+    first_train_labeled = first_test_labeled = False
+    out_of_range_windows = 0
+    df_x_min = df_x_max = None
+    try:
+        if len(_df.index) > 0:
+            df_x_min = pd.to_datetime(_df.index.min(), errors="coerce")
+            df_x_max = pd.to_datetime(_df.index.max(), errors="coerce")
+    except Exception:
+        pass
+    for i, window in enumerate(_window_results):
+        info = window['window_info']
+        if info['in_sample_start'] and info['in_sample_end']:
+            kw = dict(x0=info['in_sample_start'], x1=info['in_sample_end'],
+                      fillcolor=colors['train'], layer="below", line_width=0)
+            if not first_train_labeled:
+                kw["annotation_text"] = f"W{i+1} Train"
+                first_train_labeled = True
+            fig.add_vrect(**kw)
+        if info['out_sample_start'] and info['out_sample_end']:
+            kw = dict(x0=info['out_sample_start'], x1=info['out_sample_end'],
+                      fillcolor=colors['test'], layer="below", line_width=0)
+            if not first_test_labeled:
+                kw["annotation_text"] = f"W{i+1} Test"
+                first_test_labeled = True
+            fig.add_vrect(**kw)
+        if df_x_min is not None and df_x_max is not None:
+            try:
+                w_start = pd.to_datetime(info.get('start_date'), errors='coerce')
+                w_end = pd.to_datetime(info.get('end_date'), errors='coerce')
+                if pd.notna(w_start) and pd.notna(w_end):
+                    if w_end < df_x_min or w_start > df_x_max:
+                        out_of_range_windows += 1
+            except Exception:
+                pass
+    fig.update_layout(height=500, template="plotly_dark", title_text="Market Data & WFO Windows")
+    if df_x_min is not None and df_x_max is not None and pd.notna(df_x_min) and pd.notna(df_x_max):
+        fig.update_xaxes(range=[df_x_min, df_x_max])
+    return fig, out_of_range_windows
+
+
+@st.cache_data(show_spinner=False)
+def _cached_is_oos_chart(cache_key: str, _oos_data, _is_data):
+    """IS vs OOS return & Sharpe per window (dual-axis bar+line)."""
+    oos_df = pd.DataFrame(_oos_data)
+    is_df = pd.DataFrame(_is_data)
+    if not oos_df.empty:
+        oos_df['Window'] = oos_df['window'].astype(str)
+    if not is_df.empty:
+        is_df['Window'] = is_df['window'].astype(str)
+    windows = sorted(
+        (set(oos_df['Window'].tolist()) if not oos_df.empty else set()) |
+        (set(is_df['Window'].tolist()) if not is_df.empty else set()),
+        key=lambda x: int(x)
+    )
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    if not is_df.empty:
+        fig.add_trace(go.Bar(
+            x=windows, y=is_df.set_index('Window').reindex(windows)['return'],
+            name="IS Return %", marker_color='rgb(255, 127, 14)', opacity=0.7
+        ), secondary_y=False)
+        fig.add_trace(go.Scatter(
+            x=windows, y=is_df.set_index('Window').reindex(windows)['sharpe'],
+            name="IS Sharpe", mode='lines+markers', line=dict(color='rgb(214, 39, 40)')
+        ), secondary_y=True)
+    if not oos_df.empty:
+        fig.add_trace(go.Bar(
+            x=windows, y=oos_df.set_index('Window').reindex(windows)['return'],
+            name="OOS Return %", marker_color='rgb(55, 83, 109)'
+        ), secondary_y=False)
+        fig.add_trace(go.Scatter(
+            x=windows, y=oos_df.set_index('Window').reindex(windows)['sharpe'],
+            name="OOS Sharpe", mode='lines+markers', line=dict(color='rgb(26, 118, 255)')
+        ), secondary_y=True)
+    fig.update_layout(height=450, template="plotly_dark", barmode="group",
+                      title_text="Returns & Sharpe Ratio per Window (IS vs OOS)")
+    fig.update_yaxes(title_text="Return %", secondary_y=False)
+    fig.update_yaxes(title_text="Sharpe Ratio", secondary_y=True)
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def _cached_param_heatmap(cache_key: str, selected_params_key: tuple, _params_df):
+    """Normalised parameter stability heatmap."""
+    numeric_cols = list(_params_df.select_dtypes(include=[np.number]).columns)
+    numeric_cols = [c for c in numeric_cols if c not in ['window', 'metric1_name', 'metric2_name']]
+    if selected_params_key:
+        numeric_cols = [c for c in numeric_cols if c in selected_params_key]
+    if not numeric_cols:
+        return None
+    norm_df = _params_df[numeric_cols].copy()
+    for col in norm_df.columns:
+        col_min, col_max = norm_df[col].min(), norm_df[col].max()
+        norm_df[col] = (norm_df[col] - col_min) / (col_max - col_min) if col_max != col_min else 0.5
+    fig = px.imshow(norm_df.T,
+                    labels=dict(x="Window", y="Parameter", color="Normalized Value"),
+                    x=list(range(1, len(_params_df) + 1)),
+                    aspect="auto", color_continuous_scale="Viridis")
+    fig.update_layout(title="Parameter Evolution Across Windows (Normalized)", height=500)
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def _cached_params_table(cache_key: str, _params_df):
+    """Best parameters per window as an interactive Plotly table."""
+    df_w = _params_df.copy()
+    df_w['Window'] = list(range(1, len(_params_df) + 1))
+    fig = go.Figure(data=[go.Table(
+        header=dict(values=['Window'] + list(_params_df.columns),
+                    fill_color='paleturquoise', align='left',
+                    font=dict(size=12, color='black')),
+        cells=dict(values=[df_w['Window']] + [df_w[c] for c in _params_df.columns],
+                   fill_color='lavender', align='left',
+                   font=dict(size=11, color='black'))
+    )])
+    fig.update_layout(title='Best Parameters Used for Backtesting in Each WFO Window',
+                      title_font_size=16, width=1200, height=400)
+    fig.add_annotation(
+        text=("This table lists the optimal parameters selected during optimization for each "
+              "Walk-Forward window.<br>These were used to generate the backtest results shown "
+              "in the out-of-sample performance."),
+        xref="paper", yref="paper", x=0.5, y=-0.15, showarrow=False,
+        font=dict(size=12), align="center", bgcolor="white",
+        bordercolor="black", borderwidth=1, borderpad=10
+    )
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def _cached_robust_support_chart(cache_key: str, _support_data):
+    """Robust set support ratio bar chart."""
+    support_df = pd.DataFrame(_support_data)
+    if support_df.empty or not {"parameter", "support_ratio"}.issubset(support_df.columns):
+        return None
+    support_df = support_df.copy()
+    support_df["support_ratio"] = pd.to_numeric(support_df["support_ratio"], errors="coerce")
+    support_df = support_df.dropna(subset=["support_ratio"]).sort_values("support_ratio", ascending=False)
+    if support_df.empty:
+        return None
+    fig = px.bar(support_df, x="parameter", y="support_ratio",
+                 template="plotly_dark", title="Robust Set Support Ratio by Parameter",
+                 labels={"support_ratio": "Support ratio pondéré", "parameter": "Paramètre"})
+    fig.update_layout(height=320)
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def _cached_winrate_hist(cache_key: str, _oos_df):
+    """Win rate distribution histogram."""
+    return px.histogram(_oos_df, x="win_rate", nbins=10,
+                        title="Win Rate Distribution", template="plotly_dark")
+
+
+@st.cache_data(show_spinner=False)
+def _cached_drawdown_hist(cache_key: str, _oos_df):
+    """Max drawdown distribution histogram."""
+    return px.histogram(_oos_df, x="max_drawdown", nbins=10,
+                        title="Max Drawdown Distribution", template="plotly_dark",
+                        color_discrete_sequence=['red'])
+
+
+# ==============================================================================
 # RESULTS VISUALIZATION
 # ==============================================================================
 
 if 'wfo_results' in st.session_state:
     results = st.session_state['wfo_results']
     if isinstance(results, dict):
-        results["robust_set_summary"] = _build_robust_set_summary(results, current_conf)
-        st.session_state["wfo_results"] = results
+        # Guard expensive derivations behind a results-identity token.
+        # id(results) changes only when a new WFO run assigns a fresh dict to
+        # session state, so all three builders are skipped on every plain rerender.
+        _results_token = id(results)
+        if st.session_state.get("_wfo_results_token") != _results_token:
+            results["robust_set_summary"] = _build_robust_set_summary(results, current_conf)
+            st.session_state["wfo_results"] = results
+
+            all_trials_df = _build_trials_dataframe_from_results(results)
+            if not all_trials_df.empty:
+                st.session_state["all_trials_df"] = all_trials_df
+
+            window_info_df = _build_window_info_dataframe(results)
+            if not window_info_df.empty:
+                st.session_state["window_info_df"] = window_info_df
+
+            st.session_state["_wfo_results_token"] = _results_token
+
     df = st.session_state.get('df')
     traceability = results.get("traceability") or st.session_state.get("wfo_traceability")
-    all_trials_df_live = _build_trials_dataframe_from_results(results)
-    if not all_trials_df_live.empty:
-        st.session_state["all_trials_df"] = all_trials_df_live
-    window_info_df_live = _build_window_info_dataframe(results)
-    if not window_info_df_live.empty:
-        st.session_state["window_info_df"] = window_info_df_live
     
     st.divider()
     st.header("📊 Optimization Results")
@@ -3832,6 +4080,9 @@ if 'wfo_results' in st.session_state:
         col4.metric("Avg Win Rate", f"{oos_df['win_rate'].mean():.2f}%")
     
     # Tabs for different views
+    # Stable cache key: changes only when a new results dict is assigned to session state.
+    _results_cache_key = str(id(results))
+
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📈 OOS Performance",
         "🔍 Parameters",
@@ -3849,138 +4100,26 @@ if 'wfo_results' in st.session_state:
         if df is None or df.empty:
             st.warning("Price data (df) not available. Re-run optimization or include df.csv in the results ZIP.")
         else:
-            # Using Plotly for interactive chart
-            fig = go.Figure()
-            
-            # Price Line
-            if 'Close' in df.columns:
-                price_col = 'Close'
-            else:
-                price_col = df.columns[0]
-                
-            fig.add_trace(go.Scatter(x=df.index, y=df[price_col], mode='lines', name='Price', line=dict(color='#1f77b4', width=1)))
-            
-            # Add Windows
-            colors = {'train': 'rgba(0, 255, 0, 0.1)', 'test': 'rgba(255, 0, 0, 0.1)'}
-            first_train_labeled = False
-            first_test_labeled = False
-            out_of_range_windows = 0
-            df_x_min = None
-            df_x_max = None
-            try:
-                if len(df.index) > 0:
-                    df_x_min = pd.to_datetime(df.index.min(), errors="coerce")
-                    df_x_max = pd.to_datetime(df.index.max(), errors="coerce")
-            except Exception:
-                df_x_min = None
-                df_x_max = None
-
-            for i, window in enumerate(results['window_results']):
-                info = window['window_info']
-                # IS
-                if info['in_sample_start'] and info['in_sample_end']:
-                    rect_kwargs = dict(
-                        x0=info['in_sample_start'], x1=info['in_sample_end'],
-                        fillcolor=colors['train'], layer="below", line_width=0
-                    )
-                    if not first_train_labeled:
-                        rect_kwargs["annotation_text"] = f"W{i+1} Train"
-                        first_train_labeled = True
-                    fig.add_vrect(**rect_kwargs)
-                # OOS
-                if info['out_sample_start'] and info['out_sample_end']:
-                    rect_kwargs = dict(
-                        x0=info['out_sample_start'], x1=info['out_sample_end'],
-                        fillcolor=colors['test'], layer="below", line_width=0
-                    )
-                    if not first_test_labeled:
-                        rect_kwargs["annotation_text"] = f"W{i+1} Test"
-                        first_test_labeled = True
-                    fig.add_vrect(**rect_kwargs)
-
-                # Detect window/date mismatch between plotted df and WFO windows.
-                if df_x_min is not None and df_x_max is not None:
-                    try:
-                        w_start = pd.to_datetime(info.get('start_date'), errors='coerce')
-                        w_end = pd.to_datetime(info.get('end_date'), errors='coerce')
-                        if pd.notna(w_start) and pd.notna(w_end):
-                            if w_end < df_x_min or w_start > df_x_max:
-                                out_of_range_windows += 1
-                    except Exception:
-                        pass
-                    
-            fig.update_layout(height=500, template="plotly_dark", title_text="Market Data & WFO Windows")
-            if df_x_min is not None and df_x_max is not None and pd.notna(df_x_min) and pd.notna(df_x_max):
-                # Keep x-axis aligned with the displayed price data range.
-                fig.update_xaxes(range=[df_x_min, df_x_max])
-            st.plotly_chart(fig, use_container_width=True)
-            if out_of_range_windows > 0:
+            price_col = 'Close' if 'Close' in df.columns else df.columns[0]
+            _fig_price, _out_of_range = _cached_price_windows_chart(
+                _results_cache_key, price_col, df, results['window_results']
+            )
+            st.plotly_chart(_fig_price, use_container_width=True)
+            if _out_of_range > 0:
                 st.info(
-                    f"{out_of_range_windows} fenêtre(s) WFO sont hors de la plage de prix affichée. "
+                    f"{_out_of_range} fenêtre(s) WFO sont hors de la plage de prix affichée. "
                     "Cela arrive si les résultats WFO importés et la série de prix active n'ont pas la même période."
                 )
         
         # IS + OOS Performance per Window (shared scale)
         if results['out_of_sample_performance'] or results['in_sample_performance']:
             st.subheader("In-Sample vs Out-of-Sample Performance by Window")
-            oos_metrics_df = pd.DataFrame(results['out_of_sample_performance'])
-            is_metrics_df = pd.DataFrame(results['in_sample_performance'])
-
-            if not oos_metrics_df.empty:
-                oos_metrics_df['Window'] = oos_metrics_df['window'].astype(str)
-            if not is_metrics_df.empty:
-                is_metrics_df['Window'] = is_metrics_df['window'].astype(str)
-
-            windows = sorted(
-                set(oos_metrics_df.get('Window', [])) | set(is_metrics_df.get('Window', [])),
-                key=lambda x: int(x)
+            _fig_perf = _cached_is_oos_chart(
+                _results_cache_key,
+                results['out_of_sample_performance'],
+                results['in_sample_performance'],
             )
-
-            fig_perf = make_subplots(specs=[[{"secondary_y": True}]])
-
-            if not is_metrics_df.empty:
-                fig_perf.add_trace(go.Bar(
-                    x=windows,
-                    y=is_metrics_df.set_index('Window').reindex(windows)['return'],
-                    name="IS Return %",
-                    marker_color='rgb(255, 127, 14)',
-                    opacity=0.7
-                ), secondary_y=False)
-
-                fig_perf.add_trace(go.Scatter(
-                    x=windows,
-                    y=is_metrics_df.set_index('Window').reindex(windows)['sharpe'],
-                    name="IS Sharpe",
-                    mode='lines+markers',
-                    line=dict(color='rgb(214, 39, 40)')
-                ), secondary_y=True)
-
-            if not oos_metrics_df.empty:
-                fig_perf.add_trace(go.Bar(
-                    x=windows,
-                    y=oos_metrics_df.set_index('Window').reindex(windows)['return'],
-                    name="OOS Return %",
-                    marker_color='rgb(55, 83, 109)'
-                ), secondary_y=False)
-
-                fig_perf.add_trace(go.Scatter(
-                    x=windows,
-                    y=oos_metrics_df.set_index('Window').reindex(windows)['sharpe'],
-                    name="OOS Sharpe",
-                    mode='lines+markers',
-                    line=dict(color='rgb(26, 118, 255)')
-                ), secondary_y=True)
-
-            fig_perf.update_layout(
-                height=450,
-                template="plotly_dark",
-                barmode="group",
-                title_text="Returns & Sharpe Ratio per Window (IS vs OOS)"
-            )
-            fig_perf.update_yaxes(title_text="Return %", secondary_y=False)
-            fig_perf.update_yaxes(title_text="Sharpe Ratio", secondary_y=True)
-
-            st.plotly_chart(fig_perf, use_container_width=True)
+            st.plotly_chart(_fig_perf, use_container_width=True)
 
     with tab2:
         st.subheader("Parameter Stability Analysis")
@@ -4005,23 +4144,11 @@ if 'wfo_results' in st.session_state:
             numeric_cols = [c for c in numeric_cols if c in selected_for_opt]
         
         if numeric_cols:
-            # Normalize for heatmap
-            norm_df = params_df[numeric_cols].copy()
-            for col in norm_df.columns:
-                if norm_df[col].max() != norm_df[col].min():
-                    norm_df[col] = (norm_df[col] - norm_df[col].min()) / (norm_df[col].max() - norm_df[col].min())
-                else:
-                    norm_df[col] = 0.5 # Constant parameter
-            
-            fig_heat = px.imshow(
-                norm_df.T, 
-                labels=dict(x="Window", y="Parameter", color="Normalized Value"),
-                x=list(range(1, len(params_df)+1)),
-                aspect="auto",
-                color_continuous_scale="Viridis"
+            _fig_heat = _cached_param_heatmap(
+                _results_cache_key, tuple(selected_for_opt), params_df
             )
-            fig_heat.update_layout(title="Parameter Evolution Across Windows (Normalized)", height=500)
-            st.plotly_chart(fig_heat, use_container_width=True)
+            if _fig_heat is not None:
+                st.plotly_chart(_fig_heat, use_container_width=True)
             
             # =========================================================================
             # BEST PARAMETERS TABLE PER WFO WINDOW
@@ -4030,45 +4157,8 @@ if 'wfo_results' in st.session_state:
 
             # Create a table showing the best parameters for each WFO window
             if not params_df.empty:
-                # Add a 'Window' column for clarity
-                params_df_with_window = params_df.copy()
-                params_df_with_window['Window'] = list(range(1, len(params_df) + 1))
-
-                # Use Plotly for an interactive table
-                fig_table = go.Figure(data=[go.Table(
-                    header=dict(values=['Window'] + list(params_df.columns),
-                                fill_color='paleturquoise',
-                                align='left',
-                                font=dict(size=12, color='black')),
-                    cells=dict(values=[params_df_with_window['Window']] + [params_df_with_window[col] for col in params_df.columns],
-                              fill_color='lavender',
-                              align='left',
-                              font=dict(size=11, color='black'))
-                )])
-
-                fig_table.update_layout(
-                    title='Best Parameters Used for Backtesting in Each WFO Window',
-                    title_font_size=16,
-                    width=1200,
-                    height=400
-                )
-
-                # Add description as annotation
-                fig_table.add_annotation(
-                    text="This table lists the optimal parameters selected during optimization for each Walk-Forward window.<br>"
-                         "These were used to generate the backtest results shown in the out-of-sample performance.",
-                    xref="paper", yref="paper",
-                    x=0.5, y=-0.15,
-                    showarrow=False,
-                    font=dict(size=12),
-                    align="center",
-                    bgcolor="white",
-                    bordercolor="black",
-                    borderwidth=1,
-                    borderpad=10
-                )
-
-                st.plotly_chart(fig_table, use_container_width=True)
+                _fig_table = _cached_params_table(_results_cache_key, params_df)
+                st.plotly_chart(_fig_table, use_container_width=True)
 
             st.subheader("Robust Set (Level 1)")
             robust_summary = results.get("robust_set_summary", {}) if isinstance(results, dict) else {}
@@ -4094,25 +4184,14 @@ if 'wfo_results' in st.session_state:
                     st.markdown("##### Paramètres robustes retenus")
                     st.dataframe(robust_params_df, width="stretch")
 
-                support_df = pd.DataFrame(robust_summary.get("support_by_param", []) or [])
+                _support_data = robust_summary.get("support_by_param", []) or []
+                support_df = pd.DataFrame(_support_data)
                 if not support_df.empty:
                     st.markdown("##### Support par paramètre")
                     st.dataframe(support_df, width="stretch")
-                    if {"parameter", "support_ratio"}.issubset(support_df.columns):
-                        support_plot = support_df.copy()
-                        support_plot["support_ratio"] = pd.to_numeric(support_plot["support_ratio"], errors="coerce")
-                        support_plot = support_plot.dropna(subset=["support_ratio"]).sort_values("support_ratio", ascending=False)
-                        if not support_plot.empty:
-                            fig_support = px.bar(
-                                support_plot,
-                                x="parameter",
-                                y="support_ratio",
-                                template="plotly_dark",
-                                title="Robust Set Support Ratio by Parameter",
-                                labels={"support_ratio": "Support ratio pondéré", "parameter": "Paramètre"},
-                            )
-                            fig_support.update_layout(height=320)
-                            st.plotly_chart(fig_support, use_container_width=True)
+                    _fig_support = _cached_robust_support_chart(_results_cache_key, _support_data)
+                    if _fig_support is not None:
+                        st.plotly_chart(_fig_support, use_container_width=True)
 
             # Removed duplicate raw parameters table
         else:
@@ -4135,13 +4214,16 @@ if 'wfo_results' in st.session_state:
             col_a, col_b = st.columns(2)
             with col_a:
                 st.subheader("Win Rate Distribution")
-                fig_hist = px.histogram(oos_df, x="win_rate", nbins=10, title="Win Rate Distribution", template="plotly_dark")
-                st.plotly_chart(fig_hist, use_container_width=True)
-            
+                st.plotly_chart(
+                    _cached_winrate_hist(_results_cache_key, oos_df),
+                    use_container_width=True,
+                )
             with col_b:
                 st.subheader("Drawdown Distribution")
-                fig_dd = px.histogram(oos_df, x="max_drawdown", nbins=10, title="Max Drawdown Distribution", template="plotly_dark", color_discrete_sequence=['red'])
-                st.plotly_chart(fig_dd, use_container_width=True)
+                st.plotly_chart(
+                    _cached_drawdown_hist(_results_cache_key, oos_df),
+                    use_container_width=True,
+                )
 
     with tab4:
         st.subheader("Adaptive Optimization Insights")
@@ -5708,12 +5790,13 @@ if 'wfo_results' in st.session_state:
                             final_file_path = st.session_state.get('final_file_path', config_local.get('file_path'))
                             with st.spinner("Loading data for final backtest range..."):
                                 if config_local.get('from_file'):
-                                    df_final = load_data(
+                                    _final_mtime = os.path.getmtime(final_file_path) if final_file_path and os.path.exists(final_file_path) else 0.0
+                                    df_final = _cached_load_data_for_final(
+                                        final_file_path,
+                                        _final_mtime,
                                         final_start_date,
                                         final_end_date,
                                         config_local.get('timeframe', DEFAULT_TIMEFRAME),
-                                        from_file=True,
-                                        file_path=final_file_path
                                     )
                                 else:
                                     df_final = load_data(

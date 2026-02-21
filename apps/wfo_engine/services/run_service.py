@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
@@ -12,9 +13,30 @@ from main import get_metrics_info, get_param_grid, get_wfo_settings
 from strategy_adapters import resolve_strategy_adapter
 from wfo import OptimizationInterrupted, walk_forward_optimization
 
+logger = logging.getLogger(__name__)
 
-def run_optimization_job(config: dict, control: Any = None, job_state: dict | None = None):
-    """Run optimization without direct Streamlit calls (thread-safe job state updates)."""
+
+def run_optimization_job(
+    config: dict,
+    control: Any = None,
+    job_state: dict | None = None,
+    df=None,
+):
+    """Run optimization without direct Streamlit calls (thread-safe job state updates).
+
+    Parameters
+    ----------
+    config : dict
+        Full WFO configuration dictionary.
+    control : Any, optional
+        Stop-signal object (must expose ``should_stop()`` and ``wait_if_paused()``).
+    job_state : dict, optional
+        Shared mutable dict updated in-place with progress, window, evaluations, etc.
+    df : pandas.DataFrame, optional
+        Pre-loaded OHLCV DataFrame.  When provided the data-loading step is skipped,
+        which eliminates the full-file CSV read when multiple campaign configs share
+        the same dataset.
+    """
     try:
         strategy_mode = str(config.get("strategy_mode", DEFAULT_STRATEGY_MODE)).lower()
         strategy_id = str(config.get("strategy_id", DEFAULT_STRATEGY_ID))
@@ -30,29 +52,45 @@ def run_optimization_job(config: dict, control: Any = None, job_state: dict | No
                 job_state["error"] = message
             return None, None, None
 
-        if job_state is not None:
-            job_state["message"] = "Loading data..."
+        if df is None:
+            if job_state is not None:
+                job_state["message"] = "Loading data..."
 
-        if config["from_file"]:
-            df = load_data(
-                config["start_date"],
-                config["end_date"],
-                config["timeframe"],
-                from_file=True,
-                file_path=config["file_path"],
+            _t0 = time.time()
+            if config["from_file"]:
+                df = load_data(
+                    config["start_date"],
+                    config["end_date"],
+                    config["timeframe"],
+                    from_file=True,
+                    file_path=config["file_path"],
+                )
+            else:
+                df = load_data(
+                    config["start_date"],
+                    config["end_date"],
+                    config["timeframe"],
+                    from_file=False,
+                )
+            _load_s = time.time() - _t0
+            _lm, _ls = divmod(int(_load_s), 60)
+            logger.info(
+                "Data loaded in %dm %02ds: %d bars | %s → %s | tf=%s | source=%s",
+                _lm, _ls,
+                len(df) if df is not None else 0,
+                df.index[0].strftime("%Y-%m-%d %H:%M") if df is not None and len(df) else "?",
+                df.index[-1].strftime("%Y-%m-%d %H:%M") if df is not None and len(df) else "?",
+                config.get("timeframe", "?"),
+                "file" if config.get("from_file") else "api",
             )
         else:
-            df = load_data(
-                config["start_date"],
-                config["end_date"],
-                config["timeframe"],
-                from_file=False,
+            logger.info(
+                "Data reused from cache: %d bars | %s → %s | tf=%s",
+                len(df),
+                df.index[0].strftime("%Y-%m-%d %H:%M") if len(df) else "?",
+                df.index[-1].strftime("%Y-%m-%d %H:%M") if len(df) else "?",
+                config.get("timeframe", "?"),
             )
-
-        if df is None or df.empty:
-            if job_state is not None:
-                job_state["error"] = "No data found for the specified range/source."
-            return None, None, None
 
         params_grid = get_param_grid(config)
         metrics_info = get_metrics_info(config)
@@ -133,6 +171,8 @@ def run_optimization_job(config: dict, control: Any = None, job_state: dict | No
             )
 
         elapsed = time.time() - start_time
+        _m, _s = divmod(int(elapsed), 60)
+        logger.info("Run complete in %dm %02ds", _m, _s)
         if job_state is not None:
             job_state["progress"] = 1.0
             job_state["message"] = "Optimization complete."
@@ -141,8 +181,10 @@ def run_optimization_job(config: dict, control: Any = None, job_state: dict | No
     except OptimizationInterrupted:
         if job_state is not None:
             job_state["message"] = "Stop requested. Optimization interrupted."
+        logger.info("Run interrupted by stop request.")
         return None, None, None
     except Exception as e:
         if job_state is not None:
             job_state["error"] = str(e)
+        logger.error("Run failed: %s", e)
         return None, None, None

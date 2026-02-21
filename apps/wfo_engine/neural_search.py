@@ -147,12 +147,11 @@ class NeuralSearchGuide:
         if not param_cols:
             return
 
-        for _, row in valid_rows.iterrows():
-            row_dict = {key: row.get(key) for key in param_cols}
-            score = _safe_float(row.get('combined_score'), default=np.nan)
+        for record in valid_rows[param_cols + ['combined_score']].to_dict('records'):
+            score = _safe_float(record.get('combined_score'), default=np.nan)
             if np.isnan(score) or np.isinf(score):
                 continue
-            self.records.append(row_dict)
+            self.records.append({key: record[key] for key in param_cols})
             self.targets.append(score)
 
         if len(self.targets) > self.max_records:

@@ -53,23 +53,20 @@ def rolling_mean(arr, window):
 
 @njit(cache=True)
 def rolling_median(arr, window):
-    # Performance note: O(n * w * log w) due to per-window nanmedian.
-    # Restructuring to pre-compute median outside Numba would improve to O(n * log w)
-    # but requires changes to the indicator factory pipeline.
-    #
-    # VectorBT Pro doesn't expose a public rolling_median_1d_nb in generic.nb yet.
-    # We keep the custom implementation.
+    # O(n * w) using np.partition for O(w) median selection per bar,
+    # down from O(n * w * log w) with nanmedian (full sort).
+    # np.partition finds the k-th smallest element without a full sort.
     result = np.full(len(arr), np.nan)
-    for i in range(len(arr)):
-        if i >= window - 1:
-            # We use nanmedian to be safe, or just median if we are sure no nans in slice
-            # But the slice might contain nans if input has nans.
-            # vbt usually handles nans.
-            window_slice = arr[i - window + 1:i + 1]
-            if np.isnan(window_slice).all():
-                result[i] = np.nan
-            else:
-                result[i] = np.nanmedian(window_slice)
+    half = window // 2
+    for i in range(window - 1, len(arr)):
+        window_slice = arr[i - window + 1:i + 1]
+        if np.isnan(window_slice).all():
+            continue
+        partitioned = np.partition(window_slice, half)
+        if window % 2 == 1:
+            result[i] = partitioned[half]
+        else:
+            result[i] = (partitioned[half - 1] + partitioned[half]) / 2.0
     return result
 
 @njit(cache=True)
@@ -184,46 +181,75 @@ def pivot_low_nb(series, left, right):
 @njit(cache=True)
 def linreg_exit_nb(close, length, offset):
     """Linear regression exit: crossunder(close, linreg(close, length, offset)).
-    linreg = linear regression forecast value at bar - offset."""
+    linreg = linear regression forecast value at bar - offset.
+
+    O(n) incremental algorithm: sum_x and sum_x2 are mathematical constants that
+    depend only on `length` (not on which window).  sum_y and sum_qy are maintained
+    as sliding accumulators — O(1) update per bar vs the previous O(length) inner loop.
+
+      sum_x  = 0+1+...+(L-1)     = L*(L-1)/2         (constant)
+      sum_x2 = 0²+1²+...+(L-1)² = L*(L-1)*(2L-1)/6  (constant)
+      sum_xy = sum_qy - start * sum_y    (sum_qy uses absolute bar indices)
+    """
     n = len(close)
     signal = np.zeros(n, dtype=np.bool_)
     if n < length + offset:
         return signal
 
-    # Pre-compute linreg values
+    L = float(length)
+    sum_x_c = L * (L - 1.0) / 2.0
+    sum_x2_c = L * (L - 1.0) * (2.0 * L - 1.0) / 6.0
+    denom_c = L * sum_x2_c - sum_x_c * sum_x_c
+
     linreg = np.full(n, np.nan)
-    for i in range(length - 1 + offset, n):
-        # Fit regression on close[i-offset-length+1 : i-offset+1]
+    first_i = length - 1 + offset
+
+    # Initialise sliding accumulators for the first window (bars 0..length-1)
+    sum_y = 0.0
+    sum_qy = 0.0   # Σ j * close[j] using absolute bar index j
+    nan_count = 0
+    for j in range(length):
+        v = close[j]
+        if np.isnan(v):
+            nan_count += 1
+        else:
+            sum_y += v
+            sum_qy += float(j) * v
+
+    if nan_count == 0 and denom_c != 0.0:
+        start0 = first_i - offset - length + 1  # == 0
+        sum_xy = sum_qy - float(start0) * sum_y
+        slope = (L * sum_xy - sum_x_c * sum_y) / denom_c
+        intercept = (sum_y - slope * sum_x_c) / L
+        linreg[first_i] = intercept + slope * (L - 1.0)
+
+    # Slide window one bar at a time — O(1) per bar
+    for i in range(first_i + 1, n):
         start = i - offset - length + 1
-        end = i - offset + 1
-        if start < 0:
+        old_start = start - 1    # bar dropping out of the back of the window
+        new_end = i - offset     # bar entering the front of the window
+
+        old_val = close[old_start]
+        if np.isnan(old_val):
+            nan_count -= 1
+        else:
+            sum_y -= old_val
+            sum_qy -= float(old_start) * old_val
+
+        new_val = close[new_end]
+        if np.isnan(new_val):
+            nan_count += 1
+        else:
+            sum_y += new_val
+            sum_qy += float(new_end) * new_val
+
+        if nan_count > 0 or denom_c == 0.0:
             continue
-        # Simple linear regression using least squares
-        sum_x = 0.0
-        sum_y = 0.0
-        sum_xy = 0.0
-        sum_x2 = 0.0
-        count = 0
-        has_nan = False
-        for j in range(start, end):
-            if np.isnan(close[j]):
-                has_nan = True
-                break
-            x = float(j - start)
-            sum_x += x
-            sum_y += close[j]
-            sum_xy += x * close[j]
-            sum_x2 += x * x
-            count += 1
-        if has_nan or count < 2:
-            continue
-        denom = count * sum_x2 - sum_x * sum_x
-        if denom == 0.0:
-            continue
-        slope = (count * sum_xy - sum_x * sum_y) / denom
-        intercept = (sum_y - slope * sum_x) / count
-        # Forecast at x = length - 1 (end of window)
-        linreg[i] = intercept + slope * (length - 1)
+
+        sum_xy = sum_qy - float(start) * sum_y
+        slope = (L * sum_xy - sum_x_c * sum_y) / denom_c
+        intercept = (sum_y - slope * sum_x_c) / L
+        linreg[i] = intercept + slope * (L - 1.0)
 
     # Crossunder detection: close crosses below linreg
     for i in range(1, n):

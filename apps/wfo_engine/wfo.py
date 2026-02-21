@@ -11,7 +11,8 @@ import threading
 from scipy.spatial import KDTree
 from config import WFOSettings
 from strategy_adapters import resolve_strategy_adapter
-from metrics import trade_stat, calc_avg_pl, safe_float
+from strategy import clear_window_indicator_cache
+from metrics import trade_stat, calc_avg_pl, safe_float, _get_trades_stats
 from neural_search import NeuralSearchGuide, _match_prev_value_to_candidates, _build_prev_best_grid, _safe_float
 import optuna
 
@@ -324,8 +325,7 @@ def optimize_parameters(
             if score is None or np.isnan(score) or np.isinf(score):
                 return float('inf') # Return worst possible value for minimization
 
-            noisy_value = -score + np.random.normal(0, 1e-6)
-            return noisy_value
+            return -score
 
         early_stopper = NoImprovementStopper(patience)
         try:
@@ -667,6 +667,9 @@ def walk_forward_optimization(
             else:
                 log("NN-guided grid not active yet (insufficient cumulative trials).")
 
+        # Clear per-window indicator cache so new window data is used
+        clear_window_indicator_cache()
+
         # Optimize parameters on in-sample data
         log(f"Optimizing parameters on in-sample data ({len(in_sample_df)} bars)...")
 
@@ -713,14 +716,15 @@ def walk_forward_optimization(
             in_sample_df, best_params, timeframe=timeframe, return_portfolio=True
         )
 
+        _is_stats = _get_trades_stats(in_sample_portfolio.trades)
         in_sample_metrics = {
             'window': i + 1,
             'return': in_sample_portfolio.total_return * 100,
             'sharpe': in_sample_portfolio.sharpe_ratio,
             'max_drawdown': in_sample_portfolio.max_drawdown * 100,
             'win_rate': in_sample_portfolio.trades.win_rate,
-            'avg_gain_per_trade': trade_stat(in_sample_portfolio.trades, 'avg_winning_trade'),
-            'avg_loss_per_trade': trade_stat(in_sample_portfolio.trades, 'avg_losing_trade'),
+            'avg_gain_per_trade': trade_stat(in_sample_portfolio.trades, 'avg_winning_trade', _stats_cache=_is_stats),
+            'avg_loss_per_trade': trade_stat(in_sample_portfolio.trades, 'avg_losing_trade', _stats_cache=_is_stats),
             'avg_pl_per_trade': calc_avg_pl(in_sample_portfolio),
             'calmar_ratio': in_sample_portfolio.calmar_ratio if in_sample_portfolio.max_drawdown > 0 else np.nan,
             'sortino_ratio': in_sample_portfolio.sortino_ratio,
@@ -737,14 +741,15 @@ def walk_forward_optimization(
                 out_sample_df, best_params, timeframe=timeframe, return_portfolio=True
             )
 
+            _oos_stats = _get_trades_stats(out_sample_portfolio.trades)
             out_sample_metrics = {
                 'window': i + 1,
                 'return': out_sample_portfolio.total_return * 100,
                 'sharpe': out_sample_portfolio.sharpe_ratio,
                 'max_drawdown': out_sample_portfolio.max_drawdown * 100,
                 'win_rate': out_sample_portfolio.trades.win_rate,  #* 100,
-                'avg_gain_per_trade': trade_stat(out_sample_portfolio.trades, 'avg_winning_trade'),
-                'avg_loss_per_trade': trade_stat(out_sample_portfolio.trades, 'avg_losing_trade'),
+                'avg_gain_per_trade': trade_stat(out_sample_portfolio.trades, 'avg_winning_trade', _stats_cache=_oos_stats),
+                'avg_loss_per_trade': trade_stat(out_sample_portfolio.trades, 'avg_losing_trade', _stats_cache=_oos_stats),
                 'avg_pl_per_trade': calc_avg_pl(out_sample_portfolio),
                 'calmar_ratio': out_sample_portfolio.calmar_ratio if out_sample_portfolio.max_drawdown > 0 else np.nan,
                 'sortino_ratio': out_sample_portfolio.sortino_ratio,

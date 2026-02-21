@@ -12,6 +12,26 @@ from indicators import (
 )
 
 # ======================================================================
+# Per-window indicator cache
+# ======================================================================
+# Bollinger Bands and derived rolling statistics (bbw, mmbbw, mediane_bbw) are
+# expensive to compute and depend only on (timeperiod, StDev, matype) — not on
+# the other tunable parameters.  In sequential (non-vectorised) mode, many trials
+# share the same Bollinger Band settings.  Caching here gives a high hit rate:
+#   7 timeperiod × 5 StDev × 1 matype → ~35 distinct entries vs 1000+ trials.
+#
+# Thread safety: this cache is intentionally module-level and works correctly for
+# the current single-threaded window loop.  If window-level parallelism is ever
+# added, replace with threading.local().
+_WINDOW_INDICATOR_CACHE: dict = {}
+
+
+def clear_window_indicator_cache() -> None:
+    """Reset the per-window indicator cache.  Call once at the start of each WFO window."""
+    _WINDOW_INDICATOR_CACHE.clear()
+
+
+# ======================================================================
 # STRATEGY IMPLEMENTATION
 # ======================================================================
 
@@ -40,7 +60,9 @@ def create_signal_generators(df, **params):
         'longueur_mediane': 100, 'nb_bars_under_bbw_mini': 4,
         'nb_bars_entre_bb': 5,
         'depassement_sma_roc': 0.01, 'roc_max_t1': 100.0,
-        'use_t2_signal': True,
+        # Keep T2 optional by default in native mode to avoid ultra-sparse entries
+        # on short WFO windows; Pine-parity runs can still force True explicitly.
+        'use_t2_signal': False,
         'user_exit_sma_length': 14,
         'sar_start': 0.02, 'sar_increment': 0.02, 'sar_maximum': 0.2,
         'exit_sar_enabled': True, 'macd_fast_length': 9,
@@ -155,17 +177,41 @@ def create_signal_generators(df, **params):
     # 1. Bollinger Bands (Vectorized via TA-Lib wrapper in VBT)
     # This handles scalar or array parameters for timeperiod/StDev
     # 1 input -> N params -> N outputs. per_column=False (default)
-    bbands = vbt.talib("BBANDS").run(
-        close_price, 
-        timeperiod=timeperiod, 
-        nbdevup=StDev, 
-        nbdevdn=StDev, 
-        matype=matype,
-        skipna=True # Good practice
+    #
+    # Per-window cache: bbands and derived rolling stats depend only on
+    # (timeperiod, StDev, matype).  In sequential mode, many trials share the same
+    # Bollinger Band settings — cache the result to avoid recomputation.
+    # Cache key includes a data signature so cached arrays from the IS period are
+    # never reused for OOS or final-backtest DataFrames (different index/length).
+    _df_sig = (len(df), df.index[0] if len(df) > 0 else None)
+    _bb_key = (
+        int(timeperiod) if np.isscalar(timeperiod) else None,
+        round(float(StDev), 6) if np.isscalar(StDev) else None,
+        int(matype) if np.isscalar(matype) else None,
+        _df_sig,
     )
-    upper_band = normalize_columns(bbands.upperband)
-    lower_band = normalize_columns(bbands.lowerband)
-    middle_band = normalize_columns(bbands.middleband)
+    _bb_cached = _WINDOW_INDICATOR_CACHE.get(_bb_key) if None not in _bb_key else None
+    if _bb_cached is not None:
+        upper_band, lower_band, middle_band, bbw, mmbbw, mediane_bbw = _bb_cached
+    else:
+        bbands = vbt.talib("BBANDS").run(
+            close_price,
+            timeperiod=timeperiod,
+            nbdevup=StDev,
+            nbdevdn=StDev,
+            matype=matype,
+            skipna=True
+        )
+        upper_band = normalize_columns(bbands.upperband)
+        lower_band = normalize_columns(bbands.lowerband)
+        middle_band = normalize_columns(bbands.middleband)
+        bbw = (upper_band - lower_band) / middle_band
+        mmbbw = bbw.rolling(window=5).mean()
+        mediane_bbw = bbw.rolling(window=200).median()
+        if None not in _bb_key:
+            _WINDOW_INDICATOR_CACHE[_bb_key] = (
+                upper_band, lower_band, middle_band, bbw, mmbbw, mediane_bbw
+            )
 
     def align_input_to_columns(base_series, reference_obj):
         if not hasattr(reference_obj, "columns"):
@@ -178,9 +224,9 @@ def create_signal_generators(df, **params):
     close_price_aligned = align_input_to_columns(close_price, upper_band)
     high_price_aligned = align_input_to_columns(high_price, upper_band)
     low_price_aligned = align_input_to_columns(low_price, upper_band)
-    
+
     # 2. Custom Indicators (Vectorized via indicators.py factories)
-    
+
     # Ecart Bollinger Borne
     # Needs: price, upper, lower, timeperiod, longueur_mediane, coef_mediane, Nb_bars_above
     # N inputs -> N params -> N outputs (1-to-1). per_column=True
@@ -194,19 +240,10 @@ def create_signal_generators(df, **params):
         Nb_bars_above=Nb_bars_above,
         per_column=True
     )
-    
+
     # Bollinger Horizontal
     # Needs: bbw, mmbbw, mediane_bbw, coeff_medianeBBW
-    # Optimization: Calculate rolling stats using efficient Pandas/VBT backend
-    # instead of Numba loop for median
-    bbw = (upper_band - lower_band) / middle_band
-    
-    # Using vbt accessor for rolling if available, or pandas
-    # bbands outputs are vbt-wrapped pandas objects
-    # We explicitly access .vbt to ensure we get VBT functionality if needed, or just standard pandas
-    # Standard pandas rolling is efficient enough compared to custom Numba loop
-    mmbbw = bbw.rolling(window=5).mean()
-    mediane_bbw = bbw.rolling(window=200).median()
+    # bbw / mmbbw / mediane_bbw are read from cache above (or freshly computed).
     
     # Pass pre-calculated stats to indicator logic
     bollinger_horizontal_ind = BollingerHorizontal.run(
@@ -259,38 +296,80 @@ def create_signal_generators(df, **params):
         per_column=True
     )
 
-    # SMA Exit
-    # Needs: close, length
-    # 1 input -> N params -> N outputs. per_column=False (default)
-    sma_exit_ind = SMAExit.run(
-        close=close_price_aligned,
-        user_exit_sma_length=user_exit_sma_length,
-        per_column=True
+    # SMA Exit — cached by (user_exit_sma_length, data); sma_series co-computed here
+    _sma_exit_key = (
+        "sma",
+        int(user_exit_sma_length) if np.isscalar(user_exit_sma_length) else None,
+        _df_sig,
     )
+    _sma_exit_cached = _WINDOW_INDICATOR_CACHE.get(_sma_exit_key) if None not in _sma_exit_key else None
+    if _sma_exit_cached is not None:
+        _sma_exit_signal, sma_series = _sma_exit_cached
+    else:
+        sma_exit_ind = SMAExit.run(
+            close=close_price_aligned,
+            user_exit_sma_length=user_exit_sma_length,
+            per_column=True
+        )
+        _sma_exit_signal = normalize_columns(sma_exit_ind.signal)
+        _sma_len = int(scalarize(user_exit_sma_length)) if is_array_like(user_exit_sma_length) else int(user_exit_sma_length)
+        sma_series = close_price_aligned.rolling(window=_sma_len, min_periods=_sma_len).mean()
+        if None not in _sma_exit_key:
+            _WINDOW_INDICATOR_CACHE[_sma_exit_key] = (_sma_exit_signal, sma_series)
 
     use_sma = (macd_ma_type == 'sma') if isinstance(macd_ma_type, str) else True
-    macd_exit_ind = MACDExit.run(
-        close=close_price_aligned,
-        fast_length=macd_fast_length,
-        slow_length=macd_slow_length,
-        signal_length=macd_signal_length,
-        use_type_a=exit_macd_type_a,
-        use_type_b=exit_macd_type_b,
-        use_sma=use_sma,
-        per_column=True
+    # MACD Exit — cached by (fast, slow, signal, type_a, type_b, use_sma, data)
+    _macd_exit_key = (
+        "macd",
+        int(macd_fast_length) if np.isscalar(macd_fast_length) else None,
+        int(macd_slow_length) if np.isscalar(macd_slow_length) else None,
+        int(macd_signal_length) if np.isscalar(macd_signal_length) else None,
+        bool(exit_macd_type_a) if np.isscalar(exit_macd_type_a) else None,
+        bool(exit_macd_type_b) if np.isscalar(exit_macd_type_b) else None,
+        bool(use_sma),
+        _df_sig,
     )
+    _macd_cached = _WINDOW_INDICATOR_CACHE.get(_macd_exit_key) if None not in _macd_exit_key else None
+    if _macd_cached is not None:
+        macd_exit_signal = _macd_cached
+    else:
+        _macd_ind = MACDExit.run(
+            close=close_price_aligned,
+            fast_length=macd_fast_length,
+            slow_length=macd_slow_length,
+            signal_length=macd_signal_length,
+            use_type_a=exit_macd_type_a,
+            use_type_b=exit_macd_type_b,
+            use_sma=use_sma,
+            per_column=True
+        )
+        macd_exit_signal = normalize_columns(_macd_ind.signal)
+        if None not in _macd_exit_key:
+            _WINDOW_INDICATOR_CACHE[_macd_exit_key] = macd_exit_signal
 
-    # Parabolic SAR
-    psar_ind = ParabolicSAR.run(
-        high=high_price_aligned,
-        low=low_price_aligned,
-        sar_start=sar_start,
-        sar_increment=sar_increment,
-        sar_maximum=sar_maximum,
-        per_column=True
+    # Parabolic SAR — cached by (sar_start, sar_increment, sar_maximum, data)
+    _sar_key = (
+        "sar",
+        round(float(sar_start), 6) if np.isscalar(sar_start) else None,
+        round(float(sar_increment), 6) if np.isscalar(sar_increment) else None,
+        round(float(sar_maximum), 6) if np.isscalar(sar_maximum) else None,
+        _df_sig,
     )
-
-    sar_signal = normalize_columns(psar_ind.sar)
+    _sar_cached = _WINDOW_INDICATOR_CACHE.get(_sar_key) if None not in _sar_key else None
+    if _sar_cached is not None:
+        sar_signal = _sar_cached
+    else:
+        psar_ind = ParabolicSAR.run(
+            high=high_price_aligned,
+            low=low_price_aligned,
+            sar_start=sar_start,
+            sar_increment=sar_increment,
+            sar_maximum=sar_maximum,
+            per_column=True
+        )
+        sar_signal = normalize_columns(psar_ind.sar)
+        if None not in _sar_key:
+            _WINDOW_INDICATOR_CACHE[_sar_key] = sar_signal
     prev_sar = sar_signal.shift(1)
     prev_close = close_price_aligned.shift(1)
     if hasattr(sar_signal, "columns"):
@@ -310,7 +389,7 @@ def create_signal_generators(df, **params):
             (sar_signal > close_price_aligned)
         ).fillna(False).astype(bool)
 
-    macd_exit_signal = normalize_columns(macd_exit_ind.signal)
+    # macd_exit_signal set in MACD cache block above
     if vector_len > 1 and is_array_like(exit_sar_enabled):
         exit_mask = pd.DataFrame(
             np.tile(np.asarray(exit_sar_enabled, dtype=bool), (len(sar_exit_signal), 1)),
@@ -336,9 +415,7 @@ def create_signal_generators(df, **params):
     # --- Additional exit signals (Phase 5) ---
 
     # 1. Cross SAR/SMA exit: SAR crosses above SMA
-    # Use the same SMA length as the SMA exit for consistency
-    _sma_len = int(scalarize(user_exit_sma_length)) if is_array_like(user_exit_sma_length) else int(user_exit_sma_length)
-    sma_series = close_price_aligned.rolling(window=_sma_len, min_periods=_sma_len).mean()
+    # sma_series already computed and cached alongside SMAExit above.
     # NOTE: CrossSARSMAExit has no VBT params (param_names=[]), so per_column=True
     # is not valid.  With takes_1d=True, VBT already iterates over columns
     # automatically when inputs are DataFrames.
@@ -361,16 +438,28 @@ def create_signal_generators(df, **params):
         )
         retour_bb_signal = normalize_columns(retour_bb_ind.signal).astype(bool)
 
-    # 3. Regline exit: crossunder(close, linreg)
+    # 3. Regline exit: crossunder(close, linreg) — cached by (length, offset, data)
     regline_signal = None
     if bool(exit_regline_enabled):
-        regline_ind = LinregExit.run(
-            close=close_price_aligned,
-            length=nombre_periodes_reglin,
-            offset=i_bars_back,
-            per_column=True
+        _linreg_key = (
+            "linreg",
+            int(nombre_periodes_reglin) if np.isscalar(nombre_periodes_reglin) else None,
+            int(i_bars_back) if np.isscalar(i_bars_back) else None,
+            _df_sig,
         )
-        regline_signal = normalize_columns(regline_ind.signal).astype(bool)
+        _linreg_cached = _WINDOW_INDICATOR_CACHE.get(_linreg_key) if None not in _linreg_key else None
+        if _linreg_cached is not None:
+            regline_signal = _linreg_cached
+        else:
+            regline_ind = LinregExit.run(
+                close=close_price_aligned,
+                length=nombre_periodes_reglin,
+                offset=i_bars_back,
+                per_column=True
+            )
+            regline_signal = normalize_columns(regline_ind.signal).astype(bool)
+            if None not in _linreg_key:
+                _WINDOW_INDICATOR_CACHE[_linreg_key] = regline_signal
 
     # 4. Volat down exit: crossunder(%BB, seuil_overbought)
     volat_down_signal = None
@@ -395,7 +484,7 @@ def create_signal_generators(df, **params):
         'bbandcross_barssince_signal': normalize_columns(bbandcross_barssince_ind.signal).astype(bool),
         'depassement_roc_signal': normalize_columns(depassement_roc_ind.signal).astype(bool),
         'use_t2_signal': use_t2_signal,
-        'sma_exit_signal': normalize_columns(sma_exit_ind.signal),
+        'sma_exit_signal': _sma_exit_signal,
         'sar_exit_signal': sar_exit_signal,
         'macd_exit_signal': macd_exit_signal.astype(bool),
         'cross_sar_sma_exit_signal': cross_sar_sma_signal,

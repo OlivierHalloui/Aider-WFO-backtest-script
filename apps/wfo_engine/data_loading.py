@@ -138,7 +138,7 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
         df = pd.read_csv(file_path, usecols=usecols, dtype=dtypes)
         df['Open time'] = pd.to_datetime(df['Open time'], errors='coerce')
         df.set_index('Open time', inplace=True)
-        df = df[~df.index.isna()].sort_index()
+        df = df[~df.index.isna()]
         # Resample efficiently
         df = df.resample(timeframe).agg({
             'Open': 'first',

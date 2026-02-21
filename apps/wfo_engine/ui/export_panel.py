@@ -174,12 +174,19 @@ def _export_results_zip(
         parity_reference_payload=pine_parity_reference_payload,
         parity_reference_validation=pine_parity_reference_validation,
     )
+    # Batch all session-state mutations: collect into _updates / _pops, then apply
+    # in two calls instead of 40+ individual Streamlit serialisation checkpoints.
+    # NOTE: pine_library_paths/names depend on pine_library_files — resolved via
+    #       local variable _pine_lib_files to avoid a read-after-write dependency.
+    _updates: dict = {}
+    _pops: list = []
+
     if isinstance(pine_source_artifact, dict) and pine_source_artifact.get("text"):
-        st.session_state["pine_source_text"] = pine_source_artifact.get("text")
+        _updates["pine_source_text"] = pine_source_artifact.get("text")
     else:
-        st.session_state.pop("pine_source_text", None)
+        _pops.append("pine_source_text")
     if isinstance(pine_library_artifacts, list):
-        st.session_state["pine_library_files"] = [
+        _pine_lib_files = [
             {
                 "source_name": str(item.get("source_name") or ""),
                 "path": str(item.get("path") or ""),
@@ -189,67 +196,70 @@ def _export_results_zip(
             for item in pine_library_artifacts
             if isinstance(item, dict)
         ]
-        st.session_state["pine_library_paths"] = [str(item.get("path") or "") for item in st.session_state["pine_library_files"]]
-        st.session_state["pine_library_names"] = [str(item.get("source_name") or "") for item in st.session_state["pine_library_files"]]
+        _updates["pine_library_files"] = _pine_lib_files
+        _updates["pine_library_paths"] = [str(item.get("path") or "") for item in _pine_lib_files]
+        _updates["pine_library_names"] = [str(item.get("source_name") or "") for item in _pine_lib_files]
     if isinstance(pine_import_mapping, dict):
-        st.session_state["pine_import_mapping"] = dict(pine_import_mapping)
+        _updates["pine_import_mapping"] = dict(pine_import_mapping)
     if isinstance(pine_codegen_report, dict) and pine_codegen_report:
-        st.session_state["pine_codegen_report"] = pine_codegen_report
+        _updates["pine_codegen_report"] = pine_codegen_report
     else:
-        st.session_state.pop("pine_codegen_report", None)
+        _pops.append("pine_codegen_report")
     if isinstance(pine_generated_module_path, str) and pine_generated_module_path.strip():
-        st.session_state["pine_generated_module_path"] = pine_generated_module_path.strip()
+        _updates["pine_generated_module_path"] = pine_generated_module_path.strip()
     else:
-        st.session_state.pop("pine_generated_module_path", None)
+        _pops.append("pine_generated_module_path")
     if isinstance(pine_generation_trace, dict) and pine_generation_trace:
-        st.session_state["pine_generation_trace"] = pine_generation_trace
+        _updates["pine_generation_trace"] = pine_generation_trace
     else:
-        st.session_state.pop("pine_generation_trace", None)
-        st.session_state.pop("pine_llm_migration_report", None)
-        st.session_state.pop("pine_catalog_last_entry", None)
-        st.session_state.pop("pine_llm_override_spec", None)
-        st.session_state.pop("pine_llm_override_source_sha1", None)
+        _pops.extend(["pine_generation_trace", "pine_llm_migration_report",
+                       "pine_catalog_last_entry", "pine_llm_override_spec",
+                       "pine_llm_override_source_sha1"])
     if isinstance(pine_beta_readiness_report, dict) and pine_beta_readiness_report:
-        st.session_state["pine_beta_readiness_report"] = pine_beta_readiness_report
+        _updates["pine_beta_readiness_report"] = pine_beta_readiness_report
     else:
-        st.session_state.pop("pine_beta_readiness_report", None)
+        _pops.append("pine_beta_readiness_report")
     if isinstance(pine_execution_gate_report, dict) and pine_execution_gate_report:
-        st.session_state["pine_execution_gate_report"] = pine_execution_gate_report
+        _updates["pine_execution_gate_report"] = pine_execution_gate_report
     else:
-        st.session_state.pop("pine_execution_gate_report", None)
+        _pops.append("pine_execution_gate_report")
     if isinstance(pine_order_semantics_report, dict) and pine_order_semantics_report:
-        st.session_state["pine_order_semantics_report"] = pine_order_semantics_report
+        _updates["pine_order_semantics_report"] = pine_order_semantics_report
     else:
-        st.session_state.pop("pine_order_semantics_report", None)
+        _pops.append("pine_order_semantics_report")
     if isinstance(pine_parity_report, dict) and pine_parity_report:
-        st.session_state["pine_parity_report"] = pine_parity_report
+        _updates["pine_parity_report"] = pine_parity_report
     else:
-        st.session_state.pop("pine_parity_report", None)
+        _pops.append("pine_parity_report")
     if isinstance(pine_request_security_diagnostics, dict) and pine_request_security_diagnostics:
-        st.session_state["pine_request_security_diagnostics"] = pine_request_security_diagnostics
+        _updates["pine_request_security_diagnostics"] = pine_request_security_diagnostics
     else:
-        st.session_state.pop("pine_request_security_diagnostics", None)
+        _pops.append("pine_request_security_diagnostics")
     if isinstance(pine_mtf_parity_proof_report, dict) and pine_mtf_parity_proof_report:
-        st.session_state["pine_mtf_parity_proof_report"] = pine_mtf_parity_proof_report
+        _updates["pine_mtf_parity_proof_report"] = pine_mtf_parity_proof_report
     else:
-        st.session_state.pop("pine_mtf_parity_proof_report", None)
+        _pops.append("pine_mtf_parity_proof_report")
     if isinstance(pine_parity_reference_payload, dict) and pine_parity_reference_payload:
-        st.session_state["pine_parity_reference_payload"] = pine_parity_reference_payload
+        _updates["pine_parity_reference_payload"] = pine_parity_reference_payload
     else:
-        st.session_state.pop("pine_parity_reference_payload", None)
+        _pops.append("pine_parity_reference_payload")
     if isinstance(pine_parity_reference_validation, dict) and pine_parity_reference_validation:
-        st.session_state["pine_parity_reference_validation"] = pine_parity_reference_validation
+        _updates["pine_parity_reference_validation"] = pine_parity_reference_validation
     else:
-        st.session_state.pop("pine_parity_reference_validation", None)
+        _pops.append("pine_parity_reference_validation")
     if isinstance(pine_parity_reference_metrics, dict) and pine_parity_reference_metrics:
-        st.session_state["pine_parity_reference_metrics"] = pine_parity_reference_metrics
+        _updates["pine_parity_reference_metrics"] = pine_parity_reference_metrics
     else:
-        st.session_state.pop("pine_parity_reference_metrics", None)
-        st.session_state.pop("pine_parity_reference_text", None)
+        _pops.extend(["pine_parity_reference_metrics", "pine_parity_reference_text"])
     if isinstance(pine_artifacts_manifest, dict) and pine_artifacts_manifest:
-        st.session_state["pine_artifacts_manifest"] = pine_artifacts_manifest
+        _updates["pine_artifacts_manifest"] = pine_artifacts_manifest
     else:
-        st.session_state.pop("pine_artifacts_manifest", None)
+        _pops.append("pine_artifacts_manifest")
+
+    # Apply all mutations in two Streamlit operations instead of 40+
+    for _k in _pops:
+        st.session_state.pop(_k, None)
+    st.session_state.update(_updates)
 
     payload = build_results_payload()
     config_snapshot = payload.get("config", {})

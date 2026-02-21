@@ -62,7 +62,7 @@ class WFOSettings:
     nn_learning_rate: float = 0.01              # Training learning rate
     nn_l2: float = 1e-4                         # L2 regularization
     adaptive_train_bars: int = 5000             # Lookback bars used for each adaptive training cycle
-    adaptive_cycle_bars: int = 1000             # Bars advanced/evaluated per cycle
+    adaptive_cycle_bars: int = 5000             # Bars advanced/evaluated per cycle
     adaptive_trials_per_cycle: int = 150        # Number of parameter trials per cycle
     adaptive_candidate_pool_size: int = 3000    # Random candidates ranked before selecting trials
     adaptive_keep_ratio: float = 0.40           # Fraction of best values kept per parameter in guided grid
@@ -73,7 +73,7 @@ class WFOSettings:
     adaptive_warmup_trials: int = 300           # Minimum historical trials before shrinking the grid
     adaptive_max_cycles: int = 0                # 0 = no cap, otherwise max number of adaptive cycles
     adaptive_oos_weight: float = 2.0            # Additional weight of OOS best score in value stats
-    use_t2_signal: bool = True                   # Enable T2 cascade (divergence_BB + high breakout)
+    use_t2_signal: bool = False                  # Enable T2 cascade (divergence_BB + high breakout)
     exit_sar_enabled: bool = True               # Enable Parabolic SAR exit
     exit_macd_enabled: bool = True              # Enable MACD exit
     exit_macd_type_a: bool = True               # MACD exit type A (crossunder + signal falling)

@@ -4,6 +4,7 @@ This module keeps a rolling memory of parameter-value performance and
 progressively narrows/refreshes the active grid without fixed WFO windows.
 """
 
+import functools
 import logging
 import time
 from datetime import timedelta
@@ -24,6 +25,7 @@ from metrics import (
 from strategy_adapters import resolve_strategy_adapter
 
 
+@functools.lru_cache(maxsize=512)
 def _value_token(value):
     if isinstance(value, (bool, np.bool_)):
         return ("bool", int(bool(value)))
@@ -147,8 +149,8 @@ class AdaptiveValueModel:
     def update_from_trials(self, trials_df, score_col="combined_score"):
         if trials_df is None or trials_df.empty or score_col not in trials_df.columns:
             return
-        for _, row in trials_df.iterrows():
-            self.update_single(row.to_dict(), row.get(score_col), weight=1.0)
+        for record in trials_df.to_dict('records'):
+            self.update_single(record, record.get(score_col), weight=1.0)
 
     def score_candidate_thompson(self, candidate):
         total = 0.0
@@ -212,7 +214,11 @@ class AdaptiveValueModel:
 
             keep_n = max(self.min_values, int(np.ceil(len(values) * self.keep_ratio)))
             keep_n = min(len(values), keep_n)
-            top_idx = np.argsort(-rank_score)[:keep_n]
+            # argpartition is O(N) vs argsort O(N log N); order within top_k not needed.
+            if keep_n >= len(rank_score):
+                top_idx = np.arange(len(rank_score))
+            else:
+                top_idx = np.argpartition(-rank_score, keep_n)[:keep_n]
             selected_idx = set(int(i) for i in top_idx.tolist())
 
             if isinstance(last_best_params, dict) and name in last_best_params:
@@ -288,7 +294,7 @@ def adaptive_continuous_optimization(
         }
 
     train_bars = int(getattr(settings, "adaptive_train_bars", 5000))
-    cycle_bars = int(getattr(settings, "adaptive_cycle_bars", 1000))
+    cycle_bars = int(getattr(settings, "adaptive_cycle_bars", 5000))
     trials_per_cycle = int(getattr(settings, "adaptive_trials_per_cycle", 150))
     candidate_pool_size = int(getattr(settings, "adaptive_candidate_pool_size", 3000))
     exploration_ratio = float(getattr(settings, "adaptive_exploration_ratio", 0.20))

@@ -69,19 +69,36 @@ def python_scalar(value):
     return value
 
 
-def trade_stat(trades, attr_name, default=0.0):
+def _get_trades_stats(trades) -> dict:
+    """Compute ``trades.stats()`` once and return the result dict.
+
+    Callers that extract multiple statistics from the same trades object should
+    call this once, then pass the result as ``_stats_cache`` to every
+    ``trade_stat()`` call, avoiding repeated dict rebuilds.
+    """
+    try:
+        return trades.stats() or {}
+    except Exception:
+        return {}
+
+
+def trade_stat(trades, attr_name, default=0.0, _stats_cache=None):
     """Retrieve a named statistic from a VectorBT ``Trades`` object.
 
     Tries direct attribute access first, then falls back to the full
     ``trades.stats()`` dict with several key-casing variants.
+
+    Parameters
+    ----------
+    _stats_cache : dict, optional
+        Pre-built result of ``trades.stats()``.  When provided the
+        ``trades.stats()`` call is skipped entirely.
     """
     value = getattr(trades, attr_name, None)
     if value is not None:
         return value
-    try:
-        stats = trades.stats()
-    except Exception:
-        return default
+    if _stats_cache is None:
+        _stats_cache = _get_trades_stats(trades)
     keys = [
         attr_name,
         attr_name.replace("_", " "),
@@ -90,7 +107,7 @@ def trade_stat(trades, attr_name, default=0.0):
     ]
     for key in keys:
         try:
-            value = stats.get(key) if hasattr(stats, "get") else stats[key]
+            value = _stats_cache.get(key) if hasattr(_stats_cache, "get") else _stats_cache[key]
         except Exception:
             value = None
         if value is not None:

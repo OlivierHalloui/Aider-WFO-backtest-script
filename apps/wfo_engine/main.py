@@ -146,6 +146,8 @@ def get_param_grid(config):
     param_grid['order_sizing_mode'] = [config.get('order_sizing_mode', 'percent_equity')]
     param_grid['order_fixed_cash'] = [float(config.get('order_fixed_cash', 10000.0))]
     param_grid['fees_pct'] = [float(config.get('fees_pct', 0.0))]
+    # Entry strictness toggle (kept fixed per run by default)
+    param_grid['use_t2_signal'] = [bool(config.get('use_t2_signal', False))]
 
     return param_grid
 
@@ -270,7 +272,7 @@ def get_wfo_settings(config):
     settings.nn_learning_rate = config.get('nn_learning_rate', 0.01)
     settings.nn_l2 = config.get('nn_l2', 1e-4)
     settings.adaptive_train_bars = config.get('adaptive_train_bars', 5000)
-    settings.adaptive_cycle_bars = config.get('adaptive_cycle_bars', 1000)
+    settings.adaptive_cycle_bars = config.get('adaptive_cycle_bars', 5000)
     settings.adaptive_trials_per_cycle = config.get('adaptive_trials_per_cycle', 150)
     settings.adaptive_candidate_pool_size = config.get('adaptive_candidate_pool_size', 3000)
     settings.adaptive_keep_ratio = config.get('adaptive_keep_ratio', 0.40)
@@ -281,6 +283,7 @@ def get_wfo_settings(config):
     settings.adaptive_warmup_trials = config.get('adaptive_warmup_trials', 300)
     settings.adaptive_max_cycles = config.get('adaptive_max_cycles', 0)
     settings.adaptive_oos_weight = config.get('adaptive_oos_weight', 2.0)
+    settings.use_t2_signal = bool(config.get('use_t2_signal', False))
     settings.exit_sar_enabled = config.get('exit_sar_enabled', True)
     settings.exit_macd_enabled = config.get('exit_macd_enabled', True)
     settings.exit_macd_type_a = config.get('exit_macd_type_a', True)
