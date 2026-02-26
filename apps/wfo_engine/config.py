@@ -11,6 +11,10 @@ DEFAULT_TIMEFRAME = '5s'
 DEFAULT_STRATEGY_MODE = "native_atdmf"
 DEFAULT_STRATEGY_ID = "atdmf_native_v2"
 DEFAULT_DATA_FILE = os.environ.get("WFOE_DEFAULT_DATA_FILE", "")
+WFOE_UPLOAD_DIR = os.environ.get(
+    "WFOE_UPLOAD_DIR",
+    os.path.join(os.path.expanduser("~"), ".atdmf", "uploads"),
+)
 
 DEFAULT_PARAM_GRID = {
     'timeperiod': (8, 20, 2),

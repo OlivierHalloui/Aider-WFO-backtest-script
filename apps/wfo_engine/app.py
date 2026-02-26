@@ -32,7 +32,7 @@ from plotly.subplots import make_subplots
 from config import (
     DEFAULT_START_DATE, DEFAULT_END_DATE, DEFAULT_TIMEFRAME, DEFAULT_DATA_FILE, DEFAULT_PARAM_GRID,
     DEFAULT_STRATEGY_MODE, DEFAULT_STRATEGY_ID,
-    WFOSettings
+    WFOSettings, WFOE_UPLOAD_DIR,
 )
 from wfo import OptimizationInterrupted
 from data_loading import load_data, get_csv_date_range
@@ -438,7 +438,7 @@ def _persist_uploaded_data_file(uploaded_file):
             safe_name = f"{safe_name}.csv"
 
         digest = hashlib.sha1(f"{file_id}_{time.time_ns()}".encode("utf-8")).hexdigest()[:12]
-        target_dir = os.path.join(tempfile.gettempdir(), "atdmf_streamlit_uploads")
+        target_dir = WFOE_UPLOAD_DIR
         os.makedirs(target_dir, exist_ok=True)
         target_path = os.path.join(target_dir, f"{digest}_{safe_name}")
 
@@ -1040,7 +1040,27 @@ with st.sidebar:
                     st.session_state["pine_library_names"] = [str(item.get("source_name") or "") for item in rebuilt]
 
                 if loaded_config.get('from_file'):
-                    sync_dates_from_file(force=True)
+                    restored_fp = st.session_state.get('file_path', '')
+                    if isinstance(restored_fp, str) and restored_fp and not os.path.exists(restored_fp):
+                        # File no longer accessible (old /tmp upload, deleted, or moved).
+                        # Reset to avoid a stale path being silently used.
+                        _missing_name = os.path.basename(restored_fp)
+                        st.session_state['file_path'] = ''
+                        st.session_state.pop('uploaded_data_file_id', None)
+                        st.session_state.pop('uploaded_data_file_path', None)
+                        st.warning(
+                            f"Le fichier de données `{_missing_name}` est introuvable. "
+                            "Veuillez re-uploader le CSV ou corriger le chemin."
+                        )
+                    else:
+                        sync_dates_from_file(force=True)
+                        # sync_dates_from_file overwrites pending_start/end_date with the
+                        # file's full date range.  Re-apply the config's specific dates so
+                        # that the widgets show the saved values, not the file extremes.
+                        if 'start_date' in loaded_config:
+                            st.session_state['pending_start_date'] = str(loaded_config['start_date'])
+                        if 'end_date' in loaded_config:
+                            st.session_state['pending_end_date'] = str(loaded_config['end_date'])
 
                 st.success(f"Loaded config: {uploaded_config.name}")
         except Exception as e:
@@ -3965,21 +3985,24 @@ def _cached_params_table(cache_key: str, _params_df):
     df_w['Window'] = list(range(1, len(_params_df) + 1))
     fig = go.Figure(data=[go.Table(
         header=dict(values=['Window'] + list(_params_df.columns),
-                    fill_color='paleturquoise', align='left',
-                    font=dict(size=12, color='black')),
+                    fill_color='#1e3a5f', align='left',
+                    font=dict(size=12, color='#EAF2FF')),
         cells=dict(values=[df_w['Window']] + [df_w[c] for c in _params_df.columns],
-                   fill_color='lavender', align='left',
-                   font=dict(size=11, color='black'))
+                   fill_color=[['#18202A', '#1e2d40'] * (len(df_w) // 2 + 1)][:len(df_w)],
+                   align='left',
+                   font=dict(size=11, color='#EAF2FF'))
     )])
     fig.update_layout(title='Best Parameters Used for Backtesting in Each WFO Window',
-                      title_font_size=16, width=1200, height=400)
+                      title_font_size=16, title_font_color='#EAF2FF',
+                      width=1200, height=400,
+                      paper_bgcolor='#0F141B', plot_bgcolor='#0F141B')
     fig.add_annotation(
         text=("This table lists the optimal parameters selected during optimization for each "
               "Walk-Forward window.<br>These were used to generate the backtest results shown "
               "in the out-of-sample performance."),
         xref="paper", yref="paper", x=0.5, y=-0.15, showarrow=False,
-        font=dict(size=12), align="center", bgcolor="white",
-        bordercolor="black", borderwidth=1, borderpad=10
+        font=dict(size=12, color='#EAF2FF'), align="center", bgcolor="#18202A",
+        bordercolor="#4DA3FF", borderwidth=1, borderpad=10
     )
     return fig
 
