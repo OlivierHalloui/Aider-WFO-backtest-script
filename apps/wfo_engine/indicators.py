@@ -56,14 +56,16 @@ def rolling_median(arr, window):
     # O(n * w) using np.partition for O(w) median selection per bar,
     # down from O(n * w * log w) with nanmedian (full sort).
     # np.partition finds the k-th smallest element without a full sort.
+    # VBT passes window as float64; cast to int — np.partition and range() require int.
+    w = int(window)
     result = np.full(len(arr), np.nan)
-    half = window // 2
-    for i in range(window - 1, len(arr)):
-        window_slice = arr[i - window + 1:i + 1]
+    half = w // 2
+    for i in range(w - 1, len(arr)):
+        window_slice = arr[i - w + 1:i + 1]
         if np.isnan(window_slice).all():
             continue
         partitioned = np.partition(window_slice, half)
-        if window % 2 == 1:
+        if w % 2 == 1:
             result[i] = partitioned[half]
         else:
             result[i] = (partitioned[half - 1] + partitioned[half]) / 2.0
@@ -91,7 +93,12 @@ def compute_bars_since_below(ecart_borne1, mediane, coef, Nb_bars_above):
 
 @njit(cache=True)
 def ecart_bollinger_borne_signal_nb(prix, upper_band, lower_band, timeperiod, longueur_mediane, coef_mediane, Nb_bars_above):
-    ecart = upper_band - lower_band
+    # Pine V6 uses the v80 destructuring bug: ta.bb() -> [middle, upper, lower] but
+    # the old library assigned upperBand=middle, lowerBand=upper.
+    # So Pine's ecart = upperBand - lowerBand = middle - upper → NEGATIVE.
+    # Python must replicate this signed behaviour so that compute_bars_since_below
+    # fires on WIDE bands (not narrow), matching Pine semantics for nb_bars_above_signal.
+    ecart = lower_band - upper_band  # negative, like Pine's (middle - upper)
     # Note: using vbt.indicators.nb.ma_1d_nb directly inside
     sma = vbt.indicators.nb.ma_1d_nb(prix, timeperiod)
     ecart_borne1 = ecart / sma
@@ -191,24 +198,28 @@ def linreg_exit_nb(close, length, offset):
       sum_x2 = 0²+1²+...+(L-1)² = L*(L-1)*(2L-1)/6  (constant)
       sum_xy = sum_qy - start * sum_y    (sum_qy uses absolute bar indices)
     """
+    # VBT passes length and offset as float64; cast to int for indices and range().
+    # Keep L as float64 for the regression arithmetic.
+    _length = int(length)
+    _offset = int(offset)
     n = len(close)
     signal = np.zeros(n, dtype=np.bool_)
-    if n < length + offset:
+    if n < _length + _offset:
         return signal
 
-    L = float(length)
+    L = float(_length)
     sum_x_c = L * (L - 1.0) / 2.0
     sum_x2_c = L * (L - 1.0) * (2.0 * L - 1.0) / 6.0
     denom_c = L * sum_x2_c - sum_x_c * sum_x_c
 
     linreg = np.full(n, np.nan)
-    first_i = length - 1 + offset
+    first_i = _length - 1 + _offset
 
-    # Initialise sliding accumulators for the first window (bars 0..length-1)
+    # Initialise sliding accumulators for the first window (bars 0.._length-1)
     sum_y = 0.0
     sum_qy = 0.0   # Σ j * close[j] using absolute bar index j
     nan_count = 0
-    for j in range(length):
+    for j in range(_length):
         v = close[j]
         if np.isnan(v):
             nan_count += 1
@@ -217,17 +228,16 @@ def linreg_exit_nb(close, length, offset):
             sum_qy += float(j) * v
 
     if nan_count == 0 and denom_c != 0.0:
-        start0 = first_i - offset - length + 1  # == 0
-        sum_xy = sum_qy - float(start0) * sum_y
+        sum_xy = sum_qy  # start0 == 0, so sum_qy - 0 * sum_y == sum_qy
         slope = (L * sum_xy - sum_x_c * sum_y) / denom_c
         intercept = (sum_y - slope * sum_x_c) / L
         linreg[first_i] = intercept + slope * (L - 1.0)
 
     # Slide window one bar at a time — O(1) per bar
     for i in range(first_i + 1, n):
-        start = i - offset - length + 1
+        start = i - _offset - _length + 1
         old_start = start - 1    # bar dropping out of the back of the window
-        new_end = i - offset     # bar entering the front of the window
+        new_end = i - _offset    # bar entering the front of the window
 
         old_val = close[old_start]
         if np.isnan(old_val):

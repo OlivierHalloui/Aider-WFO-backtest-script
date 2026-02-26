@@ -1,8 +1,8 @@
-// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+/ This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © ohalloui
 
 //@version=6
-
+//essai
 // @description TODO: add library description here
 library(title = 'Librairie_indicateurs_preT1')
 
@@ -448,3 +448,4 @@ export Cross_SAR_SMA20_short(float Prix = close, int longueurBB = 20) =>
     SMA20 = ta.sma(Prix, longueurBB)
     Cross_SAR_SMA20_short = ta.crossunder(SAR, SMA20)
     Cross_SAR_SMA20_short
+
