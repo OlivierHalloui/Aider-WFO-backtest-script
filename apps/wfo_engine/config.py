@@ -77,6 +77,7 @@ class WFOSettings:
     adaptive_warmup_trials: int = 300           # Minimum historical trials before shrinking the grid
     adaptive_max_cycles: int = 0                # 0 = no cap, otherwise max number of adaptive cycles
     adaptive_oos_weight: float = 2.0            # Additional weight of OOS best score in value stats
+    macd_ma_type: str = 'sma'                   # MA type for MACD calculation ('sma' = Pine V6, 'ema' = legacy)
     use_t2_signal: bool = False                  # Enable T2 cascade (divergence_BB + high breakout)
     exit_sar_enabled: bool = True               # Enable Parabolic SAR exit
     exit_macd_enabled: bool = True              # Enable MACD exit

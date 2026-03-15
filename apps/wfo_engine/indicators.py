@@ -312,6 +312,10 @@ def macd_exit_signal_nb(close, fast_length, slow_length, signal_length, use_type
     signal = np.zeros(n, dtype=np.bool_)
     if n < 2:
         return signal
+    # VBT passes param-grid values as float64; cast to int before use as array window.
+    fast_length = int(fast_length)
+    slow_length = int(slow_length)
+    signal_length = int(signal_length)
 
     if use_sma:
         ma_fast = vbt.indicators.nb.ma_1d_nb(close, fast_length)

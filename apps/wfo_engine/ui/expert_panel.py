@@ -35,27 +35,10 @@ def _get_build_trials_dataframe_from_results():
 
 
 # ---------------------------------------------------------------------------
-# Parameter help texts (duplicated from app.py constants to keep the module
-# self-contained for the subset of functions that reference it).
+# Parameter help texts — single source of truth lives in ui/strategy_panel.py.
 # ---------------------------------------------------------------------------
 
-PARAMETER_HELP = {
-    'timeperiod': "Période des bandes de Bollinger (lookback).",
-    'StDev': "Nombre d'écarts-types utilisé pour les bandes de Bollinger.",
-    'coeff_medianeBBW': "Coefficient du signal de compression/horizontalité BBW.",
-    'coef_mediane': "Coefficient du signal écart Bollinger borné.",
-    'fenetre_lowest': "Fenêtre utilisée pour détecter les plus bas de BBW.",
-    'seuil_lowest': "Seuil appliqué sur le signal 'lowest' de BBW.",
-    'longueur_mediane': "Longueur de fenêtre pour la médiane de référence.",
-    'Nb_bars_above': "Nombre de barres de validation du signal d'entrée.",
-    'user_exit_sma_length': "Longueur de SMA pour le signal de sortie.",
-    'sar_start': "Valeur initiale du Parabolic SAR.",
-    'sar_increment': "Incrément du Parabolic SAR.",
-    'sar_maximum': "Valeur maximale du facteur d'accélération SAR.",
-    'macd_fast_length': "Période EMA rapide du MACD.",
-    'macd_slow_length': "Période EMA lente du MACD.",
-    'macd_signal_length': "Période de la ligne signal MACD."
-}
+from ui.strategy_panel import PARAMETER_HELP
 
 # ---------------------------------------------------------------------------
 # Expert model catalog

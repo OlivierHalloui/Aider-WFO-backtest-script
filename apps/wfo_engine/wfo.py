@@ -561,7 +561,13 @@ def walk_forward_optimization(
             'exit_sar_enabled': getattr(settings, 'exit_sar_enabled', True),
             'exit_macd_enabled': getattr(settings, 'exit_macd_enabled', True),
             'exit_macd_type_a': getattr(settings, 'exit_macd_type_a', True),
-            'exit_macd_type_b': getattr(settings, 'exit_macd_type_b', True)
+            'exit_macd_type_b': getattr(settings, 'exit_macd_type_b', True),
+            'exit_cross_sar_sma_enabled': getattr(settings, 'exit_cross_sar_sma_enabled', True),
+            'exit_retour_bb_enabled': getattr(settings, 'exit_retour_bb_enabled', False),
+            'exit_regline_enabled': getattr(settings, 'exit_regline_enabled', False),
+            'exit_volat_down_enabled': getattr(settings, 'exit_volat_down_enabled', False),
+            'use_t2_signal': getattr(settings, 'use_t2_signal', False),
+            'macd_ma_type': getattr(settings, 'macd_ma_type', 'sma'),
         }
     }
 

@@ -87,6 +87,7 @@ from ui.final_backtest_panel import (
     _build_robust_set_summary,
     _select_final_params_from_results,
 )
+from ui.strategy_panel import render_strategy_panel
 from pine_v3 import (
     build_strategy_spec_v1_from_pine_text as _build_strategy_spec_v1_from_pine_text,
     validate_strategy_spec_v1 as _validate_strategy_spec_v1,
@@ -514,23 +515,6 @@ def load_best_params_into_inputs():
     return _load_best_params(get_current_config=get_current_config)
 
 
-PARAMETER_HELP = {
-    'timeperiod': "Période des bandes de Bollinger (lookback).",
-    'StDev': "Nombre d'écarts-types utilisé pour les bandes de Bollinger.",
-    'coeff_medianeBBW': "Coefficient du signal de compression/horizontalité BBW.",
-    'coef_mediane': "Coefficient du signal écart Bollinger borné.",
-    'fenetre_lowest': "Fenêtre utilisée pour détecter les plus bas de BBW.",
-    'seuil_lowest': "Seuil appliqué sur le signal 'lowest' de BBW.",
-    'longueur_mediane': "Longueur de fenêtre pour la médiane de référence.",
-    'Nb_bars_above': "Nombre de barres de validation du signal d'entrée.",
-    'user_exit_sma_length': "Longueur de SMA pour le signal de sortie.",
-    'sar_start': "Valeur initiale du Parabolic SAR.",
-    'sar_increment': "Incrément du Parabolic SAR.",
-    'sar_maximum': "Valeur maximale du facteur d'accélération SAR.",
-    'macd_fast_length': "Période EMA rapide du MACD.",
-    'macd_slow_length': "Période EMA lente du MACD.",
-    'macd_signal_length': "Période de la ligne signal MACD."
-}
 
 ADAPTIVE_PROFILE_DEFS = {
     "custom": {
@@ -1152,115 +1136,6 @@ with st.sidebar:
                 st.error("File not found! Please check the path.")
         else:
             file_path = DEFAULT_DATA_FILE
-
-    # Helper to create param inputs
-    def param_input(key, label, default_min, default_max, default_step):
-        display_label = str(label).replace("_", " ")
-        # Row 1: activation + parameter label on full width (prevents crushed names).
-        c_toggle, c_label = st.columns([0.14, 0.86])
-        with c_toggle:
-            enabled = st.checkbox(
-                "Activer",
-                value=True,
-                key=f"check_{key}",
-                label_visibility="collapsed",
-                help=PARAMETER_HELP.get(key, "Active/désactive ce paramètre dans l'optimisation.")
-            )
-        with c_label:
-            st.markdown(f"**{display_label}**")
-            st.caption(PARAMETER_HELP.get(key, ""))
-
-        # Row 2: numeric controls in a clean 3-column grid.
-        c2, c3, c4 = st.columns([1, 1, 1])
-        with c2:
-            min_val = st.number_input(
-                "Min",
-                value=float(default_min),
-                key=f"min_{key}",
-                disabled=not enabled,
-                help=f"Borne minimale testée pour `{key}`."
-            )
-        with c3:
-            max_val = st.number_input(
-                "Max",
-                value=float(default_max),
-                key=f"max_{key}",
-                disabled=not enabled,
-                help=f"Borne maximale testée pour `{key}`."
-            )
-        with c4:
-            step_val = st.number_input(
-                "Step",
-                value=float(default_step),
-                key=f"step_{key}",
-                disabled=not enabled,
-                help=f"Pas d'incrément entre Min et Max pour `{key}`."
-            )
-        st.markdown(
-            "<div style='height: 0.15rem; border-bottom: 1px solid rgba(120,145,170,0.20); margin: 0.25rem 0 0.45rem 0;'></div>",
-            unsafe_allow_html=True
-        )
-        return enabled, min_val, max_val, step_val
-
-    # --- Entry Parameters ---
-    with st.expander("2. Entry Parameters", expanded=False):
-        st.info("Configure l'espace de recherche des paramètres d'entrée.")
-        
-        entry_params = [
-            'timeperiod', 'StDev', 'coeff_medianeBBW', 'coef_mediane',
-            'fenetre_lowest', 'seuil_lowest', 'longueur_mediane', 'Nb_bars_above'
-        ]
-
-        config_params = {}
-        selected_params = []
-
-        for param in entry_params:
-            d_min, d_max, d_step = DEFAULT_PARAM_GRID[param]
-            enabled, p_min, p_max, p_step = param_input(param, param, d_min, d_max, d_step)
-            if enabled:
-                selected_params.append(param)
-                config_params[f'{param}_min'] = p_min
-                config_params[f'{param}_max'] = p_max
-                config_params[f'{param}_step'] = p_step
-
-    # --- Exit Parameters ---
-    with st.expander("3. Exit Parameters", expanded=False):
-        st.info("Configure l'espace de recherche des paramètres de sortie.")
-
-        exit_sar_enabled = st.checkbox(
-            "Enable Parabolic SAR Exit",
-            value=True,
-            key='exit_sar_enabled'
-        )
-
-        exit_macd_enabled = st.checkbox(
-            "Enable MACD Exit",
-            value=True,
-            key='exit_macd_enabled'
-        )
-        exit_macd_type_a = st.checkbox(
-            "MACD Exit Type A (signal falling)",
-            value=True,
-            key='exit_macd_type_a'
-        )
-        exit_macd_type_b = st.checkbox(
-            "MACD Exit Type B (simple crossunder)",
-            value=True,
-            key='exit_macd_type_b'
-        )
-
-        exit_params = [
-            'user_exit_sma_length', 'sar_start', 'sar_increment', 'sar_maximum',
-            'macd_fast_length', 'macd_slow_length', 'macd_signal_length'
-        ]
-        for param in exit_params:
-            d_min, d_max, d_step = DEFAULT_PARAM_GRID[param]
-            enabled, p_min, p_max, p_step = param_input(param, param, d_min, d_max, d_step)
-            if enabled:
-                selected_params.append(param)
-                config_params[f'{param}_min'] = p_min
-                config_params[f'{param}_max'] = p_max
-                config_params[f'{param}_step'] = p_step
 
     # --- WFO Settings ---
     with st.expander("4. WFO Engine Settings", expanded=False):
@@ -3141,7 +3016,28 @@ def _restore_state_snapshot(snapshot):
         st.session_state[key] = value
 
 def get_current_config():
-    """Collects all sidebar widgets into a configuration dictionary."""
+    """Collects all widgets into a configuration dictionary.
+
+    Strategy parameters (selected_params, config_params, exit flags) are read from
+    st.session_state — they are now managed by render_strategy_panel() in the main panel.
+    All other sidebar parameters (dates, timeframe, WFO engine settings) are still
+    read from module-level variables set during the with st.sidebar: block.
+    """
+    # ---------------------------------------------------------------------------
+    # Rebuild selected_params + config_params from session_state widget keys.
+    # strategy_panel.py renders check_{key}, min_{key}, max_{key}, step_{key}
+    # for every param in DEFAULT_PARAM_GRID.
+    # ---------------------------------------------------------------------------
+    selected_params = []
+    config_params = {}
+    for param in DEFAULT_PARAM_GRID:
+        if st.session_state.get(f"check_{param}", True):
+            selected_params.append(param)
+            d_min, d_max, d_step = DEFAULT_PARAM_GRID[param]
+            config_params[f'{param}_min'] = float(st.session_state.get(f"min_{param}", d_min))
+            config_params[f'{param}_max'] = float(st.session_state.get(f"max_{param}", d_max))
+            config_params[f'{param}_step'] = float(st.session_state.get(f"step_{param}", d_step))
+
     pine_report = st.session_state.get("pine_precheck_report")
     pine_report = pine_report if isinstance(pine_report, dict) else {}
     pine_compat_report = st.session_state.get("pine_compatibility_report")
@@ -3258,10 +3154,27 @@ def get_current_config():
         'metric2_name': metric2,
         'weight_metric1': weight1,
         'weight_metric2': weight2,
-        'exit_sar_enabled': exit_sar_enabled,
-        'exit_macd_enabled': exit_macd_enabled,
-        'exit_macd_type_a': exit_macd_type_a,
-        'exit_macd_type_b': exit_macd_type_b,
+        # Exit toggles — read from session_state (set by render_strategy_panel)
+        'exit_sar_enabled': bool(st.session_state.get("exit_sar_enabled", True)),
+        'exit_macd_enabled': bool(st.session_state.get("exit_macd_enabled", True)),
+        'exit_macd_type_a': bool(st.session_state.get("exit_macd_type_a", True)),
+        'exit_macd_type_b': bool(st.session_state.get("exit_macd_type_b", True)),
+        'exit_cross_sar_sma_enabled': bool(st.session_state.get("exit_cross_sar_sma_enabled", True)),
+        'exit_retour_bb_enabled': bool(st.session_state.get("exit_retour_bb_enabled", False)),
+        'exit_regline_enabled': bool(st.session_state.get("exit_regline_enabled", False)),
+        'exit_volat_down_enabled': bool(st.session_state.get("exit_volat_down_enabled", False)),
+        'use_t2_signal': bool(st.session_state.get("use_t2_signal", False)),
+        'macd_ma_type': str(st.session_state.get("macd_ma_type", "sma")),
+        # Fixed strategy params (Pine V6 defaults — not in optimisation grid)
+        'nb_bars_under_bbw_mini': int(st.session_state.get("nb_bars_under_bbw_mini", 4)),
+        'nb_bars_entre_bb': int(st.session_state.get("nb_bars_entre_bb", 5)),
+        'depassement_sma_roc': float(st.session_state.get("depassement_sma_roc", 0.01)),
+        'roc_max_t1': float(st.session_state.get("roc_max_t1", 100.0)),
+        'nb_bars_left_pivot': int(st.session_state.get("nb_bars_left_pivot", 2)),
+        'nb_bars_right_pivot': int(st.session_state.get("nb_bars_right_pivot", 2)),
+        'nombre_periodes_reglin': int(st.session_state.get("nombre_periodes_reglin", 15)),
+        'i_bars_back': int(st.session_state.get("i_bars_back", 1)),
+        'seuil_overbought_bb': float(st.session_state.get("seuil_overbought_bb", 0.85)),
         'order_sizing_mode': order_sizing_mode,
         'order_fixed_cash': order_fixed_cash,
         'fees_pct': fees_pct,
@@ -3592,7 +3505,7 @@ with col_run:
 
             if not adapter_ready:
                 pass
-            elif not selected_params:
+            elif not current_conf.get('selected_params'):
                 st.error("Select params!")
             else:
                 run_started_at = _utc_now_iso()
@@ -4039,6 +3952,13 @@ def _cached_drawdown_hist(cache_key: str, _oos_df):
                         title="Max Drawdown Distribution", template="plotly_dark",
                         color_discrete_sequence=['red'])
 
+
+# ==============================================================================
+# STRATEGY CONFIGURATION PANEL (central panel — phases 1-8)
+# Widgets set st.session_state keys read by get_current_config() on next rerun.
+# ==============================================================================
+
+render_strategy_panel()
 
 # ==============================================================================
 # RESULTS VISUALIZATION

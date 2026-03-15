@@ -380,8 +380,11 @@ def load_best_params_into_inputs(*, get_current_config):
         st.sidebar.error("No final parameters available.")
         return
 
-    int_params = {'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length',
-                  'macd_fast_length', 'macd_slow_length', 'macd_signal_length'}
+    int_params = {
+        'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length',
+        'macd_fast_length', 'macd_slow_length', 'macd_signal_length',
+        'nb_bars_under_bbw_mini', 'nb_bars_entre_bb',
+    }
     for param in DEFAULT_PARAM_GRID:
         st.session_state[f"check_{param}"] = False
 
@@ -474,7 +477,8 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
     # Define integer parameters that should be rounded
     int_params = {
         'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length',
-        'macd_fast_length', 'macd_slow_length', 'macd_signal_length'
+        'macd_fast_length', 'macd_slow_length', 'macd_signal_length',
+        'nb_bars_under_bbw_mini', 'nb_bars_entre_bb',
     }
     for param in list(chosen_params.keys()):
         if param in int_params:

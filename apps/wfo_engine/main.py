@@ -148,6 +148,22 @@ def get_param_grid(config):
     param_grid['fees_pct'] = [float(config.get('fees_pct', 0.0))]
     # Entry strictness toggle (kept fixed per run by default)
     param_grid['use_t2_signal'] = [bool(config.get('use_t2_signal', False))]
+    # Phase 5 exit toggles (fixed per run — not varied in grid)
+    param_grid['exit_cross_sar_sma_enabled'] = [bool(config.get('exit_cross_sar_sma_enabled', True))]
+    param_grid['exit_retour_bb_enabled'] = [bool(config.get('exit_retour_bb_enabled', False))]
+    param_grid['exit_regline_enabled'] = [bool(config.get('exit_regline_enabled', False))]
+    param_grid['exit_volat_down_enabled'] = [bool(config.get('exit_volat_down_enabled', False))]
+    param_grid['macd_ma_type'] = [str(config.get('macd_ma_type', 'sma'))]
+    # Fixed T0/T1 strategy params (Pine V6 defaults — not in optimisation grid)
+    param_grid['nb_bars_under_bbw_mini'] = [int(config.get('nb_bars_under_bbw_mini', 4))]
+    param_grid['nb_bars_entre_bb'] = [int(config.get('nb_bars_entre_bb', 5))]
+    param_grid['depassement_sma_roc'] = [float(config.get('depassement_sma_roc', 0.01))]
+    param_grid['roc_max_t1'] = [float(config.get('roc_max_t1', 100.0))]
+    param_grid['nb_bars_left_pivot'] = [int(config.get('nb_bars_left_pivot', 2))]
+    param_grid['nb_bars_right_pivot'] = [int(config.get('nb_bars_right_pivot', 2))]
+    param_grid['nombre_periodes_reglin'] = [int(config.get('nombre_periodes_reglin', 15))]
+    param_grid['i_bars_back'] = [int(config.get('i_bars_back', 1))]
+    param_grid['seuil_overbought_bb'] = [float(config.get('seuil_overbought_bb', 0.85))]
 
     return param_grid
 
@@ -288,7 +304,12 @@ def get_wfo_settings(config):
     settings.exit_macd_enabled = config.get('exit_macd_enabled', True)
     settings.exit_macd_type_a = config.get('exit_macd_type_a', True)
     settings.exit_macd_type_b = config.get('exit_macd_type_b', True)
-    
+    settings.exit_cross_sar_sma_enabled = config.get('exit_cross_sar_sma_enabled', True)
+    settings.exit_retour_bb_enabled = config.get('exit_retour_bb_enabled', False)
+    settings.exit_regline_enabled = config.get('exit_regline_enabled', False)
+    settings.exit_volat_down_enabled = config.get('exit_volat_down_enabled', False)
+    settings.macd_ma_type = str(config.get('macd_ma_type', 'sma'))
+
     return settings
 
 def run_optimization(config, status_callback: Optional[Callable[[Any], None]] = None, control: Optional[Any] = None):
