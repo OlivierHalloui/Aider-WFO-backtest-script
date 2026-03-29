@@ -144,6 +144,24 @@ def calc_avg_pl(portfolio):
         return 0.0
 
 
+def calc_pqs(portfolio) -> float:
+    """Profit Quality Score — (Return% / |MaxDD%|) × AvgP&L/tr%.
+
+    Combines risk-adjusted return (Calmar-like) with per-trade quality.
+    Higher is better. Returns 0.0 when MaxDD or n_trades is zero.
+    """
+    try:
+        ret = float(to_scalar_score(getattr(portfolio, "total_return", 0.0) * 100))
+        dd = float(to_scalar_score(getattr(portfolio, "max_drawdown", 0.0) * 100))
+        abs_dd = abs(dd)
+        if abs_dd == 0.0:
+            return 0.0
+        avg_pl = float(to_scalar_score(calc_avg_pl(portfolio)))
+        return (ret / abs_dd) * avg_pl
+    except Exception:
+        return 0.0
+
+
 def portfolio_metrics(portfolio, window_id):
     """Build a summary dict of key performance metrics for *portfolio*.
 
@@ -168,6 +186,7 @@ def portfolio_metrics(portfolio, window_id):
         "avg_pl_per_trade": float(to_scalar_score(calc_avg_pl(portfolio))),
         "calmar_ratio": float(to_scalar_score(getattr(portfolio, "calmar_ratio", 0.0))),
         "sortino_ratio": float(to_scalar_score(getattr(portfolio, "sortino_ratio", 0.0))),
+        "pqs": calc_pqs(portfolio),
         "n_trades": int(n_trades),
     }
 

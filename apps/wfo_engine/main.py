@@ -77,6 +77,8 @@ def get_param_grid(config):
         'fenetre_lowest': 30,
         'seuil_lowest': 3.5,
         'longueur_mediane': 100,
+        'nb_bars_under_bbw_mini': 4,
+        'nb_bars_entre_bb': 5,
         'user_exit_sma_length': 20,
         'sar_start': 0.02,
         'sar_increment': 0.02,
@@ -111,6 +113,32 @@ def get_param_grid(config):
                 values = np.arange(min_val, max_val + step, step)
                 param_grid[param] = list(np.round(values, decimals))
     
+    # 1b. Collapse SAR/MACD params to fixed defaults when their exit is disabled.
+    # A param in selected_params has no effect on the objective when its exit is off —
+    # optimizing it would add dead dimensions to the search space.
+    _sar_active  = bool(config.get('exit_sar_enabled', True)) or bool(config.get('exit_cross_sar_sma_enabled', True))
+    _macd_active = bool(config.get('exit_macd_enabled', True))
+
+    _SAR_DEFAULTS  = {'sar_start': 0.02, 'sar_increment': 0.02, 'sar_maximum': 0.2}
+    _MACD_DEFAULTS = {'macd_fast_length': 12, 'macd_slow_length': 26, 'macd_signal_length': 9}
+
+    if not _sar_active:
+        for _p, _default in _SAR_DEFAULTS.items():
+            if _p in param_grid:
+                logger.debug(
+                    "Collapsing '%s' to fixed default %s (exit_sar_enabled=False, "
+                    "exit_cross_sar_sma_enabled=False)", _p, _default
+                )
+                param_grid[_p] = [strategy_params.get(_p, _default)]
+
+    if not _macd_active:
+        for _p, _default in _MACD_DEFAULTS.items():
+            if _p in param_grid:
+                logger.debug(
+                    "Collapsing '%s' to fixed default %s (exit_macd_enabled=False)", _p, _default
+                )
+                param_grid[_p] = [strategy_params.get(_p, _default)]
+
     # 2. Add Unselected Parameters (Fixed Defaults)
     # Iterate over all known strategy parameters. If not in param_grid, add default as single value.
     for param, default_val in strategy_params.items():
@@ -147,7 +175,19 @@ def get_param_grid(config):
     param_grid['order_fixed_cash'] = [float(config.get('order_fixed_cash', 10000.0))]
     param_grid['fees_pct'] = [float(config.get('fees_pct', 0.0))]
     # Entry strictness toggle (kept fixed per run by default)
+    param_grid['use_roc_filter'] = [bool(config.get('use_roc_filter', True))]
     param_grid['use_t2_signal'] = [bool(config.get('use_t2_signal', False))]
+    # use_divergence_bb is only meaningful when T2 is active.
+    # When T2 is disabled, collapse to fixed default to avoid a dead dimension.
+    _t2_active = bool(config.get('use_t2_signal', False))
+    if _t2_active:
+        _div_bb_values = config.get('use_divergence_bb_values')
+        if isinstance(_div_bb_values, list) and len(_div_bb_values) > 0:
+            param_grid['use_divergence_bb'] = [bool(v) for v in _div_bb_values]
+        else:
+            param_grid['use_divergence_bb'] = [bool(config.get('use_divergence_bb', True))]
+    else:
+        param_grid['use_divergence_bb'] = [bool(config.get('use_divergence_bb', True))]
     # Phase 5 exit toggles (fixed per run — not varied in grid)
     param_grid['exit_cross_sar_sma_enabled'] = [bool(config.get('exit_cross_sar_sma_enabled', True))]
     param_grid['exit_retour_bb_enabled'] = [bool(config.get('exit_retour_bb_enabled', False))]
@@ -155,8 +195,6 @@ def get_param_grid(config):
     param_grid['exit_volat_down_enabled'] = [bool(config.get('exit_volat_down_enabled', False))]
     param_grid['macd_ma_type'] = [str(config.get('macd_ma_type', 'sma'))]
     # Fixed T0/T1 strategy params (Pine V6 defaults — not in optimisation grid)
-    param_grid['nb_bars_under_bbw_mini'] = [int(config.get('nb_bars_under_bbw_mini', 4))]
-    param_grid['nb_bars_entre_bb'] = [int(config.get('nb_bars_entre_bb', 5))]
     param_grid['depassement_sma_roc'] = [float(config.get('depassement_sma_roc', 0.01))]
     param_grid['roc_max_t1'] = [float(config.get('roc_max_t1', 100.0))]
     param_grid['nb_bars_left_pivot'] = [int(config.get('nb_bars_left_pivot', 2))]

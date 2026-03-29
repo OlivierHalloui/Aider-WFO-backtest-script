@@ -25,6 +25,8 @@ DEFAULT_PARAM_GRID = {
     'seuil_lowest': (1.0, 3.5, 0.5),
     'longueur_mediane': (50, 150, 50),
     'Nb_bars_above': (1, 6, 1),
+    'nb_bars_under_bbw_mini': (1, 8, 1),
+    'nb_bars_entre_bb': (1, 10, 1),
     'user_exit_sma_length': (8, 20, 2),
     'sar_start': (0.02, 0.05, 0.01),
     'sar_increment': (0.02, 0.05, 0.01),
@@ -78,7 +80,9 @@ class WFOSettings:
     adaptive_max_cycles: int = 0                # 0 = no cap, otherwise max number of adaptive cycles
     adaptive_oos_weight: float = 2.0            # Additional weight of OOS best score in value stats
     macd_ma_type: str = 'sma'                   # MA type for MACD calculation ('sma' = Pine V6, 'ema' = legacy)
-    use_t2_signal: bool = False                  # Enable T2 cascade (divergence_BB + high breakout)
+    use_roc_filter: bool = True                 # Enable T1 RoC momentum filter
+    use_t2_signal: bool = False                  # Enable T2 cascade (high breakout on next bar after T1)
+    use_divergence_bb: bool = True               # T2: require BB divergence on T1 bar (optimizable when T2 active)
     exit_sar_enabled: bool = True               # Enable Parabolic SAR exit
     exit_macd_enabled: bool = True              # Enable MACD exit
     exit_macd_type_a: bool = True               # MACD exit type A (crossunder + signal falling)

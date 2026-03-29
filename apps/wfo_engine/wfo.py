@@ -12,7 +12,7 @@ from scipy.spatial import KDTree
 from config import WFOSettings
 from strategy_adapters import resolve_strategy_adapter
 from strategy import clear_window_indicator_cache
-from metrics import trade_stat, calc_avg_pl, safe_float, _get_trades_stats
+from metrics import trade_stat, calc_avg_pl, calc_pqs, safe_float, _get_trades_stats
 from neural_search import NeuralSearchGuide, _match_prev_value_to_candidates, _build_prev_best_grid, _safe_float
 import optuna
 
@@ -734,6 +734,7 @@ def walk_forward_optimization(
             'avg_pl_per_trade': calc_avg_pl(in_sample_portfolio),
             'calmar_ratio': in_sample_portfolio.calmar_ratio if in_sample_portfolio.max_drawdown > 0 else np.nan,
             'sortino_ratio': in_sample_portfolio.sortino_ratio,
+            'pqs': calc_pqs(in_sample_portfolio),
             'n_trades': len(in_sample_portfolio.trades)
         }
 
@@ -759,6 +760,7 @@ def walk_forward_optimization(
                 'avg_pl_per_trade': calc_avg_pl(out_sample_portfolio),
                 'calmar_ratio': out_sample_portfolio.calmar_ratio if out_sample_portfolio.max_drawdown > 0 else np.nan,
                 'sortino_ratio': out_sample_portfolio.sortino_ratio,
+                'pqs': calc_pqs(out_sample_portfolio),
                 'n_trades': len(out_sample_portfolio.trades)
             }
 

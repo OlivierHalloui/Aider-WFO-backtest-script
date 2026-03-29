@@ -86,6 +86,7 @@ from ui.final_backtest_panel import (
     _weighted_median,
     _build_robust_set_summary,
     _select_final_params_from_results,
+    render_window_comparison_panel as _render_window_comparison_panel,
 )
 from ui.strategy_panel import render_strategy_panel
 from pine_v3 import (
@@ -318,6 +319,7 @@ def _build_results_payload():
 from metrics import (
     build_trials_dataframe_from_results as _build_trials_dataframe_from_results,
     build_window_info_dataframe as _build_window_info_dataframe,
+    calc_pqs as _calc_pqs,
 )
 
 # NOTE: `_to_jsonable` and `_safe_float_scalar` now come from
@@ -2589,64 +2591,6 @@ with st.sidebar:
             help="Lissage local utilisé pour sélectionner un meilleur paramètre plus robuste."
         )
 
-        st.markdown("##### Robust Tests (Level 1)")
-        robust_tests_enabled = st.checkbox(
-            "Enable Robust Set (Top-N + vote multi-fenêtres)",
-            value=bool(st.session_state.get("robust_tests_enabled", False)),
-            key="robust_tests_enabled",
-            help=(
-                "Construit un ensemble robuste en prenant les Top-N trials de chaque fenêtre, "
-                "puis en agrégeant les paramètres par vote/médiane pondérés."
-            ),
-        )
-        robust_top_n_per_window = st.number_input(
-            "Robust Top-N / fenêtre",
-            min_value=3,
-            max_value=500,
-            value=int(st.session_state.get("robust_top_n_per_window", 20)),
-            step=1,
-            key="robust_top_n_per_window",
-            disabled=not robust_tests_enabled,
-            help=(
-                "Nombre de meilleurs trials IS conservés par fenêtre pour construire le pool robuste. "
-                "Plus N est élevé, plus la robustesse augmente, mais la sélection est moins agressive."
-            ),
-        )
-        robust_min_windows = st.number_input(
-            "Robust min fenêtres requises",
-            min_value=1,
-            max_value=100,
-            value=int(st.session_state.get("robust_min_windows", 3)),
-            step=1,
-            key="robust_min_windows",
-            disabled=not robust_tests_enabled,
-            help=(
-                "Nombre minimal de fenêtres avec trials exploitables pour valider le robust set. "
-                "Si ce seuil n'est pas atteint, l'app revient automatiquement au mode classique."
-            ),
-        )
-        robust_use_for_final_backtest = st.checkbox(
-            "Use Robust Set for Final Backtest",
-            value=bool(st.session_state.get("robust_use_for_final_backtest", False)),
-            key="robust_use_for_final_backtest",
-            disabled=not robust_tests_enabled,
-            help=(
-                "Si activé, le backtest final utilise les paramètres robustes. "
-                "Sinon, il conserve le meilleur jeu de paramètres d'une fenêtre."
-            ),
-        )
-        with st.expander("Guide utilisateur - Robust Tests", expanded=False):
-            st.markdown(
-                "Le mode `Robust Set` réduit la dépendance à un optimum local de fenêtre.\n"
-                "- Étape 1: on prend les Top-N trials dans chaque fenêtre.\n"
-                "- Étape 2: on agrège les paramètres via vote pondéré (catégoriels/bool) et médiane pondérée (numériques).\n"
-                "- Étape 3: on obtient un jeu de paramètres plus stable inter-fenêtres.\n\n"
-                "Conseils:\n"
-                "- Commence avec `Top-N=20` et `min fenêtres=3`.\n"
-                "- Active `Use Robust Set for Final Backtest` pour tester la robustesse OOS globale.\n"
-                "- Si les fenêtres sont peu nombreuses, garde un fallback classique."
-            )
-        
         backends = ['thread', 'dask', 'ray', 'pathos']
         parallel_backend = st.selectbox(
             "Parallel Backend",
@@ -2908,7 +2852,7 @@ with st.sidebar:
 
     # --- Metrics ---
     with st.expander("5. Performance Metrics", expanded=False):
-        metric_options = ['sharpe_ratio', 'total_return', 'max_drawdown', 'win_rate', 'avg_gain_per_trade', 'avg_loss_per_trade', 'avg_pl_per_trade']
+        metric_options = ['sharpe_ratio', 'total_return', 'max_drawdown', 'win_rate', 'avg_gain_per_trade', 'avg_loss_per_trade', 'avg_pl_per_trade', 'pqs']
         
         m1_idx = 0 # Default sharpe
         metric1 = st.selectbox(
@@ -3163,7 +3107,10 @@ def get_current_config():
         'exit_retour_bb_enabled': bool(st.session_state.get("exit_retour_bb_enabled", False)),
         'exit_regline_enabled': bool(st.session_state.get("exit_regline_enabled", False)),
         'exit_volat_down_enabled': bool(st.session_state.get("exit_volat_down_enabled", False)),
+        'use_roc_filter': bool(st.session_state.get("use_roc_filter", True)),
         'use_t2_signal': bool(st.session_state.get("use_t2_signal", False)),
+        'use_divergence_bb': bool(st.session_state.get("use_divergence_bb", True)),
+        'use_divergence_bb_values': st.session_state.get("use_divergence_bb_values"),
         'macd_ma_type': str(st.session_state.get("macd_ma_type", "sma")),
         # Fixed strategy params (Pine V6 defaults — not in optimisation grid)
         'nb_bars_under_bbw_mini': int(st.session_state.get("nb_bars_under_bbw_mini", 4)),
@@ -3740,39 +3687,103 @@ if "wfo_results" in st.session_state:
 else:
     st.sidebar.info("Run an optimization or load a results ZIP to enable export.")
 
-# Run Final Backtest Button (Conditional)
+# Final Backtest section (Conditional — requires a completed WFO run)
 if 'wfo_results' in st.session_state:
     st.sidebar.divider()
-    st.sidebar.subheader("🗓️ Final Backtest Range")
-    default_final_start = st.session_state.get('opt_start_date', st.session_state.get('start_date', DEFAULT_START_DATE))
-    default_final_end = st.session_state.get('opt_end_date', st.session_state.get('end_date', DEFAULT_END_DATE))
-    final_start_date = st.sidebar.text_input(
-        "Final Start Date (YYYY-MM-DD)",
-        value=default_final_start,
-        key="final_start_date",
-        help="Date de début du jeu de données utilisé pour le backtest final."
-    )
-    final_end_date = st.sidebar.text_input(
-        "Final End Date (YYYY-MM-DD)",
-        value=default_final_end,
-        key="final_end_date",
-        help="Date de fin du jeu de données utilisé pour le backtest final."
-    )
-    final_file_path = st.sidebar.text_input(
-        "Final Data File Path",
-        value=st.session_state.get('file_path', DEFAULT_DATA_FILE),
-        key="final_file_path",
-        help="Chemin du fichier de données pour le backtest final (si source locale)."
-    )
-    if st.sidebar.button(
-        "🏆 Run Final Backtest",
-        width="stretch",
-        help=(
-            "Exécute un backtest complet avec le jeu de paramètres final. "
-            "Source: best_window ou robust_set selon les options Robust Tests."
+    with st.sidebar.expander("🏆 Final Backtest", expanded=True):
+
+        # --- Robust Tests (Level 1) ---
+        st.markdown("##### Robust Tests (Level 1)")
+        robust_tests_enabled = st.checkbox(
+            "Enable Robust Set (Top-N + vote multi-fenêtres)",
+            value=bool(st.session_state.get("robust_tests_enabled", False)),
+            key="robust_tests_enabled",
+            help=(
+                "Construit un ensemble robuste en prenant les Top-N trials de chaque fenêtre, "
+                "puis en agrégeant les paramètres par vote/médiane pondérés."
+            ),
         )
-    ):
-        run_final_backtest_logic()
+        st.number_input(
+            "Robust Top-N / fenêtre",
+            min_value=3,
+            max_value=500,
+            value=int(st.session_state.get("robust_top_n_per_window", 20)),
+            step=1,
+            key="robust_top_n_per_window",
+            disabled=not robust_tests_enabled,
+            help=(
+                "Nombre de meilleurs trials IS conservés par fenêtre pour construire le pool robuste. "
+                "Plus N est élevé, plus la robustesse augmente, mais la sélection est moins agressive."
+            ),
+        )
+        st.number_input(
+            "Robust min fenêtres requises",
+            min_value=1,
+            max_value=100,
+            value=int(st.session_state.get("robust_min_windows", 3)),
+            step=1,
+            key="robust_min_windows",
+            disabled=not robust_tests_enabled,
+            help=(
+                "Nombre minimal de fenêtres avec trials exploitables pour valider le robust set. "
+                "Si ce seuil n'est pas atteint, l'app revient automatiquement au mode classique."
+            ),
+        )
+        st.checkbox(
+            "Use Robust Set for Final Backtest",
+            value=bool(st.session_state.get("robust_use_for_final_backtest", False)),
+            key="robust_use_for_final_backtest",
+            disabled=not robust_tests_enabled,
+            help=(
+                "Si activé, le backtest final utilise les paramètres robustes. "
+                "Sinon, il conserve le meilleur jeu de paramètres d'une fenêtre."
+            ),
+        )
+        with st.expander("Guide utilisateur - Robust Tests", expanded=False):
+            st.markdown(
+                "Le mode `Robust Set` réduit la dépendance à un optimum local de fenêtre.\n"
+                "- Étape 1: on prend les Top-N trials dans chaque fenêtre.\n"
+                "- Étape 2: on agrège les paramètres via vote pondéré (catégoriels/bool) et médiane pondérée (numériques).\n"
+                "- Étape 3: on obtient un jeu de paramètres plus stable inter-fenêtres.\n\n"
+                "Conseils:\n"
+                "- Commence avec `Top-N=20` et `min fenêtres=3`.\n"
+                "- Active `Use Robust Set for Final Backtest` pour tester la robustesse OOS globale.\n"
+                "- Si les fenêtres sont peu nombreuses, garde un fallback classique."
+            )
+
+        st.divider()
+
+        # --- Date range & data file ---
+        st.markdown("##### Plage de données")
+        default_final_start = st.session_state.get('opt_start_date', st.session_state.get('start_date', DEFAULT_START_DATE))
+        default_final_end = st.session_state.get('opt_end_date', st.session_state.get('end_date', DEFAULT_END_DATE))
+        st.text_input(
+            "Final Start Date (YYYY-MM-DD)",
+            value=default_final_start,
+            key="final_start_date",
+            help="Date de début du jeu de données utilisé pour le backtest final."
+        )
+        st.text_input(
+            "Final End Date (YYYY-MM-DD)",
+            value=default_final_end,
+            key="final_end_date",
+            help="Date de fin du jeu de données utilisé pour le backtest final."
+        )
+        st.text_input(
+            "Final Data File Path",
+            value=st.session_state.get('file_path', DEFAULT_DATA_FILE),
+            key="final_file_path",
+            help="Chemin du fichier de données pour le backtest final (si source locale)."
+        )
+        if st.button(
+            "🏆 Run Final Backtest",
+            width="stretch",
+            help=(
+                "Exécute un backtest complet avec le jeu de paramètres final. "
+                "Source: best_window ou robust_set selon les options Robust Tests."
+            )
+        ):
+            run_final_backtest_logic()
 
 # ==============================================================================
 # CACHED FIGURE BUILDERS
@@ -4016,11 +4027,13 @@ if 'wfo_results' in st.session_state:
     if results['out_of_sample_performance']:
         oos_df = pd.DataFrame(results['out_of_sample_performance'])
         
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("Avg Return", f"{oos_df['return'].mean():.2f}%")
         col2.metric("Avg Sharpe", f"{oos_df['sharpe'].mean():.2f}")
         col3.metric("Avg Max Drawdown", f"{oos_df['max_drawdown'].mean():.2f}%")
         col4.metric("Avg Win Rate", f"{oos_df['win_rate'].mean():.2f}%")
+        _avg_pqs = oos_df['pqs'].mean() if 'pqs' in oos_df.columns else float('nan')
+        col5.metric("Avg PQS", f"{_avg_pqs:.4f}" if not (isinstance(_avg_pqs, float) and _avg_pqs != _avg_pqs) else "—")
     
     # Tabs for different views
     # Stable cache key: changes only when a new results dict is assigned to session state.
@@ -5394,6 +5407,8 @@ if 'wfo_results' in st.session_state:
             else:
                 st.markdown(f"**Used Parameters (Best Window):** `{params}`")
             if best_is_metrics:
+                _is_pqs = best_is_metrics.get('pqs')
+                _is_pqs_str = f", PQS `{_is_pqs:.4f}`" if _is_pqs is not None else ""
                 st.markdown(
                     f"**IS (Window {best_is_metrics['window']}):** "
                     f"Return `{best_is_metrics['return']:.2f}%`, "
@@ -5401,8 +5416,11 @@ if 'wfo_results' in st.session_state:
                     f"Max DD `{best_is_metrics['max_drawdown']:.2f}%`, "
                     f"Win Rate `{best_is_metrics['win_rate']:.2f}%`, "
                     f"Trades `{best_is_metrics['n_trades']}`"
+                    f"{_is_pqs_str}"
                 )
             if best_oos_metrics:
+                _oos_pqs = best_oos_metrics.get('pqs')
+                _oos_pqs_str = f", PQS `{_oos_pqs:.4f}`" if _oos_pqs is not None else ""
                 st.markdown(
                     f"**OOS (Window {best_oos_metrics['window']}):** "
                     f"Return `{best_oos_metrics['return']:.2f}%`, "
@@ -5410,14 +5428,17 @@ if 'wfo_results' in st.session_state:
                     f"Max DD `{best_oos_metrics['max_drawdown']:.2f}%`, "
                     f"Win Rate `{best_oos_metrics['win_rate']:.2f}%`, "
                     f"Trades `{best_oos_metrics['n_trades']}`"
+                    f"{_oos_pqs_str}"
                 )
             
             # Metrics
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Total Return", f"{pf.total_return * 100:.2f}%")
             m2.metric("Sharpe Ratio", f"{pf.sharpe_ratio:.2f}")
             m3.metric("Max Drawdown", f"{pf.max_drawdown * 100:.2f}%")
             m4.metric("Win Rate", f"{pf.trades.win_rate * 100:.2f}%")
+            _pqs_val = _calc_pqs(pf)
+            m5.metric("PQS", f"{_pqs_val:.4f}")
             
             st.markdown("#### Cumulative Returns")
             max_points = st.slider(
@@ -5687,97 +5708,12 @@ if 'wfo_results' in st.session_state:
             else:
                 st.info("Run the final backtest or load a results ZIP that includes final backtest data.")
         
-        # Manual re-run using a selected WFO window
-        if results.get('window_results'):
-            st.markdown("#### Re-run Final Backtest by WFO Window")
-            if df is None or df.empty:
-                st.info("Price data (df) not available. Re-run optimization or include df.csv in the results ZIP.")
-            else:
-                window_options = [w.get('window_info', {}).get('window') for w in results['window_results']]
-                window_options = [w for w in window_options if w is not None]
-                if window_options:
-                    with st.form("final_backtest_window_form"):
-                        selected_window = st.selectbox("Select WFO Window", options=window_options, key='final_selected_window')
-                        submitted = st.form_submit_button("Run Final Backtest (Selected Window)")
-
-                    if submitted:
-                        try:
-                            selected_window_int = int(selected_window)
-                        except Exception:
-                            selected_window_int = selected_window
-                        selected_entry = None
-                        for window in results['window_results']:
-                            if window.get('window_info', {}).get('window') == selected_window_int:
-                                selected_entry = window
-                                break
-
-                        if selected_entry:
-                            st.session_state.pop('final_portfolio', None)
-                            selected_params = (selected_entry.get('best_params') or {}).copy()
-                            int_params = {
-                                'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length',
-                                'macd_fast_length', 'macd_slow_length', 'macd_signal_length'
-                            }
-                            for param in list(selected_params.keys()):
-                                if param in int_params:
-                                    try:
-                                        selected_params[param] = int(round(float(selected_params[param])))
-                                    except Exception:
-                                        pass
-                                elif isinstance(selected_params[param], float):
-                                    selected_params[param] = round(selected_params[param], 2)
-
-                            config_local = get_current_config()
-                            final_start_date = st.session_state.get('final_start_date', config_local.get('start_date'))
-                            final_end_date = st.session_state.get('final_end_date', config_local.get('end_date'))
-                            final_file_path = st.session_state.get('final_file_path', config_local.get('file_path'))
-                            with st.spinner("Loading data for final backtest range..."):
-                                if config_local.get('from_file'):
-                                    _final_mtime = os.path.getmtime(final_file_path) if final_file_path and os.path.exists(final_file_path) else 0.0
-                                    df_final = _cached_load_data_for_final(
-                                        final_file_path,
-                                        _final_mtime,
-                                        final_start_date,
-                                        final_end_date,
-                                        config_local.get('timeframe', DEFAULT_TIMEFRAME),
-                                    )
-                                else:
-                                    df_final = load_data(
-                                        final_start_date,
-                                        final_end_date,
-                                        config_local.get('timeframe', DEFAULT_TIMEFRAME),
-                                        from_file=False
-                                    )
-                            if df_final is None or df_final.empty:
-                                st.error("No data loaded for the final backtest range.")
-                            else:
-                                selected_params['order_sizing_mode'] = config_local.get('order_sizing_mode', 'percent_equity')
-                                selected_params['order_fixed_cash'] = float(config_local.get('order_fixed_cash', 10000.0))
-                                selected_params['fees_pct'] = float(config_local.get('fees_pct', 0.0))
-                                with st.spinner("Running Final Backtest on Full Dataset..."):
-                                    try:
-                                        strategy_adapter = resolve_strategy_adapter(
-                                            strategy_mode=config_local.get("strategy_mode"),
-                                            strategy_id=config_local.get("strategy_id"),
-                                            config=config_local,
-                                        )
-                                        selected_portfolio = strategy_adapter.run_backtest(
-                                            df_final,
-                                            selected_params,
-                                            config_local.get('timeframe', DEFAULT_TIMEFRAME),
-                                            return_portfolio=True
-                                        )
-                                        st.session_state['final_backtest_df'] = df_final
-                                        st.session_state['final_portfolio'] = selected_portfolio
-                                        st.session_state['final_params'] = selected_params
-                                        st.session_state['final_params_window'] = selected_window_int
-                                        st.session_state['final_params_source'] = "best_window"
-                                        st.session_state['final_params_robust_summary'] = results.get("robust_set_summary", {})
-                                        st.success("Final Backtest Complete!")
-                                        # Results panel is rendered above this form; rerun to show updated state immediately.
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Error in final backtest: {e}")
+        # Comparative backtests — all windows on full date range
+        _render_window_comparison_panel(
+            get_current_config=get_current_config,
+            load_data=load_data,
+            resolve_strategy_adapter=resolve_strategy_adapter,
+        )
 
 elif not os.path.exists(DEFAULT_DATA_FILE):
     st.warning(f"⚠️ Default data file not found at: `{DEFAULT_DATA_FILE}`. Please configure the data source in the sidebar.")

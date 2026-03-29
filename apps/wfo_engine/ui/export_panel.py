@@ -455,6 +455,37 @@ def _export_results_zip(
             except Exception:
                 pass
 
+        # Window comparison — IS params applied on the full period (if available)
+        window_cmp_rows = st.session_state.get("window_comparison_results")
+        if isinstance(window_cmp_rows, list) and window_cmp_rows:
+            cmp_export = _sanitize_for_json([
+                {
+                    "window_id": r.get("window_id"),
+                    "params": r.get("params", {}),
+                    "metrics": r.get("metrics", {}),
+                }
+                for r in window_cmp_rows
+            ])
+            zf.writestr("window_comparison.json", json.dumps(cmp_export, indent=2))
+
+            metrics_records = []
+            for r in cmp_export:
+                rec = {"window": r.get("window_id")}
+                rec.update(r.get("metrics") or {})
+                metrics_records.append(rec)
+            metrics_df = pd.DataFrame(metrics_records)
+            if not metrics_df.empty:
+                zf.writestr("window_comparison_metrics.csv", metrics_df.to_csv(index=False))
+
+            params_records = []
+            for r in cmp_export:
+                rec = {"window": r.get("window_id")}
+                rec.update(r.get("params") or {})
+                params_records.append(rec)
+            params_df = pd.DataFrame(params_records)
+            if not params_df.empty:
+                zf.writestr("window_comparison_params.csv", params_df.to_csv(index=False))
+
         replay_manifest = _build_replay_manifest(
             payload,
             snapshot_mode_requested=snapshot_mode_requested,

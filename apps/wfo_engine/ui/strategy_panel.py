@@ -159,22 +159,9 @@ def render_strategy_panel() -> None:
                     d = DEFAULT_PARAM_GRID[p]
                     param_input(p, p, *d)
             with col_bbw2:
-                st.markdown("**Paramètres fixes T0** *(non optimisés par grille)*")
-                st.caption("Valeurs Pine V6 par défaut.")
-                st.number_input(
-                    "Bars sous BBW mini",
-                    value=int(st.session_state.get("nb_bars_under_bbw_mini", 4)),
-                    min_value=1, max_value=20, step=1,
-                    key="nb_bars_under_bbw_mini",
-                    help="Nombre de barres consécutives sous le seuil BBW requis (Bars_sous_BBW=4).",
-                )
-                st.number_input(
-                    "Bars entre BB cross",
-                    value=int(st.session_state.get("nb_bars_entre_bb", 5)),
-                    min_value=1, max_value=30, step=1,
-                    key="nb_bars_entre_bb",
-                    help="Barres min depuis le dernier crossover/crossunder des BB (Bars_entre_BB=5).",
-                )
+                for p in ('nb_bars_under_bbw_mini', 'nb_bars_entre_bb'):
+                    d = DEFAULT_PARAM_GRID[p]
+                    param_input(p, p, *d)
 
             st.divider()
 
@@ -193,50 +180,84 @@ def render_strategy_panel() -> None:
             st.divider()
 
             # --- T1: RoC filter ---
-            st.markdown("##### 🔶 T1 — Filtre momentum RoC *(paramètres fixes)*")
-            st.caption("Non optimisés par grille — valeurs Pine V6 par défaut.")
-            c_roc1, c_roc2 = st.columns(2)
-            with c_roc1:
-                st.number_input(
-                    "Dépassement SMA RoC",
-                    value=float(st.session_state.get("depassement_sma_roc", 0.01)),
-                    min_value=0.0, step=0.005, format="%.3f",
-                    key="depassement_sma_roc",
-                    help=(
-                        "RoC = (high−low)/high×100. Signal valide si "
-                        "RoC ≥ Depass × SMA20(RoC). Pine V6: 0.01."
-                    ),
-                )
-            with c_roc2:
-                st.number_input(
-                    "RoC Max",
-                    value=float(st.session_state.get("roc_max_t1", 100.0)),
-                    min_value=1.0, step=1.0,
-                    key="roc_max_t1",
-                    help="RoC ≤ RoC_Max × SMA20(RoC) — filtre mouvements extrêmes. Pine V6: 100.",
-                )
+            st.markdown("##### 🔶 T1 — Filtre momentum RoC")
+            use_roc = st.checkbox(
+                "Activer filtre RoC",
+                value=bool(st.session_state.get("use_roc_filter", True)),
+                key="use_roc_filter",
+                help=(
+                    "Active le filtre de momentum RoC sur le signal T1. "
+                    "Désactiver supprime la condition RoC du signal d'entrée, "
+                    "ce qui augmente le nombre de trades mais réduit la sélectivité."
+                ),
+            )
+            if use_roc:
+                st.caption("Paramètres fixes — valeurs Pine V6 par défaut.")
+                c_roc1, c_roc2 = st.columns(2)
+                with c_roc1:
+                    st.number_input(
+                        "Dépassement SMA RoC",
+                        value=float(st.session_state.get("depassement_sma_roc", 0.01)),
+                        min_value=0.0, step=0.005, format="%.3f",
+                        key="depassement_sma_roc",
+                        help=(
+                            "RoC = (high−low)/high×100. Signal valide si "
+                            "RoC ≥ Depass × SMA20(RoC). Pine V6: 0.01."
+                        ),
+                    )
+                with c_roc2:
+                    st.number_input(
+                        "RoC Max",
+                        value=float(st.session_state.get("roc_max_t1", 100.0)),
+                        min_value=1.0, step=1.0,
+                        key="roc_max_t1",
+                        help="RoC ≤ RoC_Max × SMA20(RoC) — filtre mouvements extrêmes. Pine V6: 100.",
+                    )
 
             st.divider()
 
             # --- T2 toggle ---
-            st.markdown("##### 🟢 T2 — Signal final (divergence BB + breakout high)")
+            st.markdown("##### 🟢 T2 — Signal final (breakout high après T1)")
             use_t2 = st.checkbox(
                 "Activer signal T2",
                 value=st.session_state.get("use_t2_signal", False),
                 key="use_t2_signal",
                 help=(
-                    "T2 = T1[−1] AND high > high[−1] AND (divergence_BB | divergence_BB[−1]).\n\n"
-                    "divergence_BB = upper↑ ET lower↓ simultanément (BB en expansion).\n\n"
+                    "T2 = T1[−1] AND high[t] > high[t−1].\n\n"
+                    "Ordre stop-buy placé au High de la barre T1 + mintick (0.01).\n\n"
                     "Désactivé : entrée directe sur crossover de la bande supérieure (T1)."
                 ),
             )
             if use_t2:
                 st.success(
-                    "T2 activé : entrée sur breakout du high avec expansion des bandes BB. "
+                    "T2 activé : ordre stop-buy au High T1 + 0.01. "
                     "⚠️ Réduit le nombre de trades."
                 )
+                st.markdown("###### Filtre Divergence BB")
+                st.checkbox(
+                    "Activer filtre Divergence BB",
+                    value=st.session_state.get("use_divergence_bb", True),
+                    key="use_divergence_bb",
+                    help=(
+                        "Divergence BB = upper band ↑ ET lower band ↓ simultanément sur la barre T1.\n\n"
+                        "Filtre supplémentaire : T2 n'est valide que si les bandes sont en expansion "
+                        "sur la barre setup (T1)."
+                    ),
+                )
+                _optimize_div = st.checkbox(
+                    "Optimiser Divergence BB (True / False)",
+                    value=st.session_state.get("check_use_divergence_bb", False),
+                    key="check_use_divergence_bb",
+                    help="Si coché, l'optimiseur teste T2 avec et sans filtre Divergence BB.",
+                )
+                if _optimize_div:
+                    st.session_state["use_divergence_bb_values"] = [True, False]
+                    st.info("Divergence BB sera optimisée : [True, False].")
+                else:
+                    st.session_state["use_divergence_bb_values"] = None
             else:
                 st.info("T2 désactivé : entrée directe sur crossover bande supérieure (T1).")
+                st.session_state["use_divergence_bb_values"] = None
 
         # -----------------------------------------------------------------------
         # TAB 2 — Sorties

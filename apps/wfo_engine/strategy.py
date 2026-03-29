@@ -2,7 +2,7 @@
 import pandas as pd
 import numpy as np
 import vectorbtpro as vbt
-from metrics import trade_stat
+from metrics import trade_stat, calc_pqs
 from indicators import (
     EcartBollingerBorne, BollingerHorizontal,
     CrossBBWLowSignal, NbBarsUnderBBW, BBandCrossBarssince,
@@ -60,9 +60,10 @@ def create_signal_generators(df, **params):
         'longueur_mediane': 100, 'nb_bars_under_bbw_mini': 4,
         'nb_bars_entre_bb': 5,
         'depassement_sma_roc': 0.01, 'roc_max_t1': 100.0,
+        'use_roc_filter': True,
         # Keep T2 optional by default in native mode to avoid ultra-sparse entries
         # on short WFO windows; Pine-parity runs can still force True explicitly.
-        'use_t2_signal': False,
+        'use_t2_signal': False, 'use_divergence_bb': True,
         'user_exit_sma_length': 14,
         'sar_start': 0.02, 'sar_increment': 0.02, 'sar_maximum': 0.2,
         'exit_sar_enabled': True, 'macd_fast_length': 9,
@@ -136,7 +137,9 @@ def create_signal_generators(df, **params):
     nb_bars_entre_bb = p['nb_bars_entre_bb']
     depassement_sma_roc = p['depassement_sma_roc']
     roc_max_t1 = p['roc_max_t1']
+    use_roc_filter = bool(p.get('use_roc_filter', True))
     use_t2_signal = p['use_t2_signal']
+    use_divergence_bb = bool(p.get('use_divergence_bb', True))
     user_exit_sma_length = p['user_exit_sma_length']
     sar_start = p['sar_start']
     sar_increment = p['sar_increment']
@@ -483,7 +486,9 @@ def create_signal_generators(df, **params):
         'nb_bars_under_bbw_signal': normalize_columns(nb_bars_under_bbw_ind.signal).astype(bool),
         'bbandcross_barssince_signal': normalize_columns(bbandcross_barssince_ind.signal).astype(bool),
         'depassement_roc_signal': normalize_columns(depassement_roc_ind.signal).astype(bool),
+        'use_roc_filter': use_roc_filter,
         'use_t2_signal': use_t2_signal,
+        'use_divergence_bb': use_divergence_bb,
         'sma_exit_signal': _sma_exit_signal,
         'sar_exit_signal': sar_exit_signal,
         'macd_exit_signal': macd_exit_signal.astype(bool),
@@ -547,25 +552,36 @@ def create_entry_exit_conditions(df, signals):
     # Crossover: close crosses above upper band
     crossover_upper = upper_band.lt(close, axis=0) & prev_upper.ge(prev_close, axis=0)
 
-    # T1: T0 (current or previous bar) + crossover + RoC filter
-    T1 = (T0 | T0.shift(1).fillna(False)) & crossover_upper & signals['depassement_roc_signal']
+    # T1: T0 (current or previous bar) + crossover + optional RoC filter
+    _t0_cross = (T0 | T0.shift(1).fillna(False)) & crossover_upper
+    if signals.get('use_roc_filter', True):
+        T1 = _t0_cross & signals['depassement_roc_signal']
+    else:
+        T1 = _t0_cross
 
-    # T2: high breakout + T1 on previous bar + divergence_BB
-    # divergence_BB = upper expanding AND lower expanding (bands diverging)
+    # T2: stop-buy order placed at close of T1 bar, filled on next bar if High breaks out
+    # Setup bar (T1, t-1): divergence_BB must be true on setup bar
+    # Trigger bar (T2, t):  High[t] > High[t-1]  → order fills at High[t-1] + mintick
+    # divergence_BB = upper band expanding AND lower band expanding (bands diverging)
     high = df['High']
     lower_band = signals['lower_band']
     divergence_BB = (upper_band.diff() > 0) & (lower_band.diff() < 0)
 
+    _MINTICK = 0.01  # BTCUSDT mintick (syminfo.mintick in Pine V6)
+
     use_t2 = signals.get('use_t2_signal', True)
+    use_div_bb = signals.get('use_divergence_bb', True)
     if use_t2:
-        T2 = (
-            high.gt(high.shift(1), axis=0) &
-            T1.shift(1).fillna(False) &
-            (divergence_BB | divergence_BB.shift(1).fillna(False))
-        )
+        # divergence_BB evaluated on the T1 (setup) bar, i.e. shift(1) relative to trigger bar
+        _div_on_t1 = divergence_BB.shift(1).fillna(False) | divergence_BB.shift(2).fillna(False)
+        _breakout = high.gt(high.shift(1), axis=0) & T1.shift(1).fillna(False)
+        T2 = (_breakout & _div_on_t1) if use_div_bb else _breakout
         entry_condition = T2.fillna(False).astype(bool)
+        # Entry price = High of T1 bar + mintick (stop-buy fill price)
+        t2_entry_price = high.shift(1) + _MINTICK
     else:
         entry_condition = T1.fillna(False).astype(bool)
+        t2_entry_price = None
     
     # Exit Condition — combine all enabled exits
     exit_condition = (
@@ -580,8 +596,8 @@ def create_entry_exit_conditions(df, signals):
         if sig is not None:
             exit_condition = exit_condition | sig
     exit_condition = exit_condition.fillna(False).astype(bool)
-    
-    return entry_condition, exit_condition
+
+    return entry_condition, exit_condition, t2_entry_price
 
 def run_backtest(df, params, timeframe='5s', return_portfolio=True):
     """
@@ -614,7 +630,7 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
         raise RuntimeError(f"Error in create_signal_generators: {e}")
     
     # Create entry and exit conditions (vectorized)
-    entry_condition, exit_condition = create_entry_exit_conditions(df, signals)
+    entry_condition, exit_condition, t2_entry_price = create_entry_exit_conditions(df, signals)
 
     def _scalar_param(value, default):
         if hasattr(value, "__len__") and not isinstance(value, (str, bytes, dict)):
@@ -640,10 +656,19 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
         size = 1.0
         size_type = 'percent'
 
+    # T2 mode: override execution price to High[t1] + mintick (stop-buy fill)
+    # For T1 mode t2_entry_price is None — VectorBT defaults to Close.
+    if t2_entry_price is not None:
+        exec_price = df['Close'].copy()
+        exec_price[entry_condition] = t2_entry_price[entry_condition]
+    else:
+        exec_price = df['Close']
+
     portfolio = vbt.Portfolio.from_signals(
         close=df['Close'],
         entries=entry_condition,
         exits=exit_condition,
+        price=exec_price,
         size=size,
         size_type=size_type,
         init_cash=10000,
@@ -698,6 +723,8 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
                     return avg_pl
                 except Exception:
                     return 0.0
+            elif name == 'pqs':
+                return calc_pqs(port)
             return 0.0
 
         m1 = get_metric(portfolio, metric1_name)
