@@ -3862,42 +3862,63 @@ def _cached_price_windows_chart(cache_key: str, price_col: str, _df, _window_res
 
 
 @st.cache_data(show_spinner=False)
-def _cached_is_oos_chart(cache_key: str, _oos_data, _is_data):
-    """IS vs OOS return & Sharpe per window (dual-axis bar+line)."""
+def _cached_is_oos_chart(cache_key: str, _oos_data, _is_data, metric1_name: str = 'sharpe_ratio'):
+    """IS vs OOS return % (bars) + selected metric (lines) per window."""
+    # Map config metric name → performance dict key + display label
+    _METRIC_COL = {
+        'sharpe_ratio':       ('sharpe',          'Sharpe'),
+        'total_return':       ('return',           'Return %'),
+        'max_drawdown':       ('max_drawdown',     'Max DD %'),
+        'win_rate':           ('win_rate',         'Win Rate'),
+        'avg_gain_per_trade': ('avg_gain_per_trade','Avg Gain/tr'),
+        'avg_loss_per_trade': ('avg_loss_per_trade','Avg Loss/tr'),
+        'avg_pl_per_trade':   ('avg_pl_per_trade', 'Avg P&L/tr'),
+        'pqs':                ('pqs',              'PQS'),
+        'calmar_ratio':       ('calmar_ratio',     'Calmar'),
+        'sortino_ratio':      ('sortino_ratio',    'Sortino'),
+    }
+    metric_col, metric_label = _METRIC_COL.get(metric1_name, ('sharpe', 'Sharpe'))
+
     oos_df = pd.DataFrame(_oos_data)
-    is_df = pd.DataFrame(_is_data)
+    is_df  = pd.DataFrame(_is_data)
     if not oos_df.empty:
         oos_df['Window'] = oos_df['window'].astype(str)
     if not is_df.empty:
         is_df['Window'] = is_df['window'].astype(str)
     windows = sorted(
         (set(oos_df['Window'].tolist()) if not oos_df.empty else set()) |
-        (set(is_df['Window'].tolist()) if not is_df.empty else set()),
+        (set(is_df['Window'].tolist())  if not is_df.empty  else set()),
         key=lambda x: int(x)
     )
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     if not is_df.empty:
+        _is_idx = is_df.set_index('Window').reindex(windows)
         fig.add_trace(go.Bar(
-            x=windows, y=is_df.set_index('Window').reindex(windows)['return'],
+            x=windows, y=_is_idx['return'],
             name="IS Return %", marker_color='rgb(255, 127, 14)', opacity=0.7
         ), secondary_y=False)
-        fig.add_trace(go.Scatter(
-            x=windows, y=is_df.set_index('Window').reindex(windows)['sharpe'],
-            name="IS Sharpe", mode='lines+markers', line=dict(color='rgb(214, 39, 40)')
-        ), secondary_y=True)
+        if metric_col in _is_idx.columns:
+            fig.add_trace(go.Scatter(
+                x=windows, y=_is_idx[metric_col],
+                name=f"IS {metric_label}", mode='lines+markers',
+                line=dict(color='rgb(214, 39, 40)')
+            ), secondary_y=True)
     if not oos_df.empty:
+        _oos_idx = oos_df.set_index('Window').reindex(windows)
         fig.add_trace(go.Bar(
-            x=windows, y=oos_df.set_index('Window').reindex(windows)['return'],
+            x=windows, y=_oos_idx['return'],
             name="OOS Return %", marker_color='rgb(55, 83, 109)'
         ), secondary_y=False)
-        fig.add_trace(go.Scatter(
-            x=windows, y=oos_df.set_index('Window').reindex(windows)['sharpe'],
-            name="OOS Sharpe", mode='lines+markers', line=dict(color='rgb(26, 118, 255)')
-        ), secondary_y=True)
+        if metric_col in _oos_idx.columns:
+            fig.add_trace(go.Scatter(
+                x=windows, y=_oos_idx[metric_col],
+                name=f"OOS {metric_label}", mode='lines+markers',
+                line=dict(color='rgb(26, 118, 255)')
+            ), secondary_y=True)
     fig.update_layout(height=450, template="plotly_dark", barmode="group",
-                      title_text="Returns & Sharpe Ratio per Window (IS vs OOS)")
+                      title_text=f"Returns & {metric_label} per Window (IS vs OOS)")
     fig.update_yaxes(title_text="Return %", secondary_y=False)
-    fig.update_yaxes(title_text="Sharpe Ratio", secondary_y=True)
+    fig.update_yaxes(title_text=metric_label, secondary_y=True)
     return fig
 
 
@@ -4090,10 +4111,12 @@ if 'wfo_results' in st.session_state:
         # IS + OOS Performance per Window (shared scale)
         if results['out_of_sample_performance'] or results['in_sample_performance']:
             st.subheader("In-Sample vs Out-of-Sample Performance by Window")
+            _metric1_name = current_conf.get('metric1_name', 'sharpe_ratio')
             _fig_perf = _cached_is_oos_chart(
-                _results_cache_key,
+                f"{_results_cache_key}_{_metric1_name}",
                 results['out_of_sample_performance'],
                 results['in_sample_performance'],
+                metric1_name=_metric1_name,
             )
             st.plotly_chart(_fig_perf, use_container_width=True)
 
