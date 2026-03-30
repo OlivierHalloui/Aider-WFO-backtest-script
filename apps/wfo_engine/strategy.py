@@ -656,11 +656,15 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
         size = 1.0
         size_type = 'percent'
 
-    # T2 mode: override execution price to High[t1] + mintick (stop-buy fill)
-    # For T1 mode t2_entry_price is None — VectorBT defaults to Close.
+    # T2 mode: override execution price to High[t1] + mintick (stop-buy fill).
+    # Avoid copying the full Close Series — allocate a numpy array and patch
+    # only the T2 bars (typically <1% of rows), then wrap back as Series.
     if t2_entry_price is not None:
-        exec_price = df['Close'].copy()
-        exec_price[entry_condition] = t2_entry_price[entry_condition]
+        close_vals = df['Close'].values.copy()  # numpy copy — no pandas overhead
+        mask = entry_condition.values if hasattr(entry_condition, 'values') else np.asarray(entry_condition)
+        t2_vals = t2_entry_price.values if hasattr(t2_entry_price, 'values') else np.asarray(t2_entry_price)
+        close_vals[mask] = t2_vals[mask]
+        exec_price = pd.Series(close_vals, index=df['Close'].index)
     else:
         exec_price = df['Close']
 

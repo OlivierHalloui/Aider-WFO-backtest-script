@@ -24,6 +24,46 @@ from domain.serialization import (
 
 
 # ---------------------------------------------------------------------------
+# Metric resolution — single source of truth for all metric name → dict key
+# mappings. Used by _select_best_params_from_results and the window
+# comparison score builder. Add new metrics here only.
+# ---------------------------------------------------------------------------
+
+def _resolve_metric_value(row: dict, name: str):
+    """Return the numeric value for *name* from a performance metrics row.
+
+    Returns None when the row is empty or the key is absent.
+    Metrics where lower is better (max_drawdown, avg_loss_per_trade) are
+    negated so that callers can always maximise the returned value.
+    """
+    if not row:
+        return None
+    if name == 'max_drawdown':
+        v = row.get('max_drawdown')
+        return None if v is None else -v
+    if name == 'sharpe_ratio':
+        return row.get('sharpe')
+    if name == 'total_return':
+        return row.get('return')
+    if name == 'win_rate':
+        return row.get('win_rate')
+    if name == 'avg_gain_per_trade':
+        return row.get('avg_gain_per_trade')
+    if name == 'avg_loss_per_trade':
+        v = row.get('avg_loss_per_trade')
+        return None if v is None else -v
+    if name == 'avg_pl_per_trade':
+        return row.get('avg_pl_per_trade')
+    if name == 'pqs':
+        return row.get('pqs')
+    if name == 'calmar_ratio':
+        return row.get('calmar_ratio')
+    if name == 'sortino_ratio':
+        return row.get('sortino_ratio')
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Parameter selection helpers
 # ---------------------------------------------------------------------------
 
@@ -33,35 +73,12 @@ def _select_best_params_from_results(results, config):
     weight_metric1 = float(config.get('weight_metric1', 1.0))
     weight_metric2 = float(config.get('weight_metric2', 0.0))
 
-    def get_metric_value(row, name):
-        if not row:
-            return None
-        if name == 'max_drawdown':
-            value = row.get('max_drawdown')
-            return None if value is None else -value
-        if name == 'sharpe_ratio':
-            return row.get('sharpe')
-        if name == 'total_return':
-            return row.get('return')
-        if name == 'win_rate':
-            return row.get('win_rate')
-        if name == 'avg_gain_per_trade':
-            return row.get('avg_gain_per_trade')
-        if name == 'avg_loss_per_trade':
-            value = row.get('avg_loss_per_trade')
-            return None if value is None else -value
-        if name == 'avg_pl_per_trade':
-            return row.get('avg_pl_per_trade')
-        if name == 'pqs':
-            return row.get('pqs')
-        return None
-
     def combined_score(row):
         total_weight = weight_metric1 + weight_metric2
         if total_weight == 0:
             return None
-        m1 = get_metric_value(row, metric1_name)
-        m2 = get_metric_value(row, metric2_name)
+        m1 = _resolve_metric_value(row, metric1_name)
+        m2 = _resolve_metric_value(row, metric2_name)
         if weight_metric1 != 0 and m1 is None:
             return None
         if weight_metric2 != 0 and m2 is None:
@@ -505,48 +522,20 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
     st.session_state['final_params_robust_summary'] = robust_summary
 
     def _combined_score_local(row):
-        metric1_name = config.get('metric1_name', 'sharpe_ratio')
-        metric2_name = config.get('metric2_name', 'total_return')
-        weight_metric1 = float(config.get('weight_metric1', 1.0))
-        weight_metric2 = float(config.get('weight_metric2', 0.0))
-
-        def get_metric_value(row, name):
-            if not row:
-                return None
-            if name == 'max_drawdown':
-                value = row.get('max_drawdown')
-                return None if value is None else -value
-            if name == 'sharpe_ratio':
-                return row.get('sharpe')
-            if name == 'total_return':
-                return row.get('return')
-            if name == 'win_rate':
-                return row.get('win_rate')
-            if name == 'avg_gain_per_trade':
-                return row.get('avg_gain_per_trade')
-            if name == 'avg_loss_per_trade':
-                value = row.get('avg_loss_per_trade')
-                return None if value is None else -value
-            if name == 'avg_pl_per_trade':
-                return row.get('avg_pl_per_trade')
-            if name == 'pqs':
-                return row.get('pqs')
-            return None
-
-        total_weight = weight_metric1 + weight_metric2
+        _m1_name = config.get('metric1_name', 'sharpe_ratio')
+        _m2_name = config.get('metric2_name', 'total_return')
+        _w1 = float(config.get('weight_metric1', 1.0))
+        _w2 = float(config.get('weight_metric2', 0.0))
+        total_weight = _w1 + _w2
         if total_weight == 0:
             return None
-        m1 = get_metric_value(row, metric1_name)
-        m2 = get_metric_value(row, metric2_name)
-        if weight_metric1 != 0 and m1 is None:
+        m1 = _resolve_metric_value(row, _m1_name)
+        m2 = _resolve_metric_value(row, _m2_name)
+        if _w1 != 0 and m1 is None:
             return None
-        if weight_metric2 != 0 and m2 is None:
+        if _w2 != 0 and m2 is None:
             return None
-        if m1 is None:
-            m1 = 0.0
-        if m2 is None:
-            m2 = 0.0
-        return (weight_metric1 * m1 + weight_metric2 * m2) / total_weight
+        return (_w1 * (m1 or 0.0) + _w2 * (m2 or 0.0)) / total_weight
 
     st.session_state['final_params_is_score'] = _combined_score_local(best_is_metrics)
     st.session_state['final_params_oos_score'] = _combined_score_local(best_oos_metrics)

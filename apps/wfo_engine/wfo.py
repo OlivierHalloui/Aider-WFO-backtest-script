@@ -215,11 +215,19 @@ def optimize_parameters(
             except Exception as e:
                 if not fallback_used:
                     logger.warning(
-                        "Vectorized grid chunk failed; falling back to per-combination "
-                        "evaluation for robustness."
+                        "Vectorized grid chunk failed at combo %d; switching to per-combination "
+                        "fallback for robustness. First combo in chunk: %s. Error: %s",
+                        chunk_start,
+                        dict(zip(param_keys, chunk_combos[0])) if chunk_combos else "N/A",
+                        e,
                     )
                     fallback_used = True
-                logger.warning("Error during vectorized backtest chunk %d-%d: %s", chunk_start, chunk_start+len(chunk_combos), e)
+                else:
+                    logger.debug(
+                        "Fallback: chunk %d-%d failed (%s). First combo: %s",
+                        chunk_start, chunk_start + len(chunk_combos), e,
+                        dict(zip(param_keys, chunk_combos[0])) if chunk_combos else "N/A",
+                    )
 
                 score_values = []
                 for combo in chunk_combos:
@@ -238,6 +246,12 @@ def optimize_parameters(
                 chunk_df = pd.DataFrame(chunk_combos, columns=param_keys)
                 chunk_df['combined_score'] = score_values
                 result_chunks.append(chunk_df)
+                nan_count = sum(1 for s in score_values if not np.isfinite(s))
+                if nan_count:
+                    logger.warning(
+                        "Fallback chunk %d-%d: %d/%d combos returned non-finite score.",
+                        chunk_start, chunk_start + len(chunk_combos), nan_count, len(chunk_combos),
+                    )
 
             chunk_start += len(chunk_combos)
 
@@ -527,9 +541,42 @@ def walk_forward_optimization(
     nn_guide = NeuralSearchGuide(param_grid, settings) if use_nn_guided else None
     prev_window_best_params = None
 
-    # Run-scoped backtest cache (garbage-collected when run ends)
-    backtest_cache = {}
-    backtest_cache_lock = threading.Lock()
+    # Run-scoped backtest cache — LRU-bounded to prevent unbounded memory growth.
+    # At ~1 KB per entry (param tuple key + float score), 5000 entries ≈ 5 MB max.
+    class _BoundedCache:
+        """Thread-safe dict with a hard eviction limit (FIFO when full)."""
+        def __init__(self, maxsize=5000):
+            self._d = {}
+            self._maxsize = maxsize
+            self._lock = threading.Lock()
+
+        def get(self, key, default=None):
+            with self._lock:
+                return self._d.get(key, default)
+
+        def __getitem__(self, key):
+            with self._lock:
+                return self._d[key]
+
+        def __setitem__(self, key, value):
+            with self._lock:
+                if key in self._d:
+                    return
+                if len(self._d) >= self._maxsize:
+                    # Evict oldest inserted key (Python 3.7+ dict preserves insertion order)
+                    self._d.pop(next(iter(self._d)))
+                self._d[key] = value
+
+        def __contains__(self, key):
+            with self._lock:
+                return key in self._d
+
+        def __len__(self):
+            with self._lock:
+                return len(self._d)
+
+    backtest_cache = _BoundedCache(maxsize=5000)
+    backtest_cache_lock = threading.Lock()  # kept for API compatibility with optimize_parameters
 
     wfo_results = {
         'window_results': [],
