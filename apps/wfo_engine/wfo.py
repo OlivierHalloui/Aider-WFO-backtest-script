@@ -24,6 +24,91 @@ class OptimizationInterrupted(Exception):
 
 
 # ======================================================================
+# GRID EVALUATION HELPERS
+# ======================================================================
+
+def _normalize_scores(raw, n_expected):
+    """Flatten *raw* backtest output to a list of *n_expected* floats."""
+    if np.isscalar(raw):
+        return [float(raw)] * n_expected
+    if hasattr(raw, 'values'):
+        arr = np.asarray(raw.values, dtype=float).reshape(-1)
+    else:
+        arr = np.asarray(raw, dtype=float).reshape(-1)
+    return list(arr)
+
+
+def _eval_chunk_vectorized(combos, param_keys, metrics_info,
+                           in_sample_df, strategy_adapter, timeframe):
+    """Attempt a single vectorized backtest for *combos*.
+
+    Returns a list of floats (one per combo) or raises on failure.
+    """
+    transposed = list(zip(*combos))
+    vparams = {key: np.array(transposed[k]) for k, key in enumerate(param_keys)}
+    vparams.update(metrics_info)
+    raw = strategy_adapter.run_backtest(
+        in_sample_df, vparams, timeframe=timeframe, return_portfolio=False
+    )
+    scores = _normalize_scores(raw, len(combos))
+    if len(scores) != len(combos):
+        raise ValueError(
+            f"Score/combo length mismatch: {len(scores)} scores for {len(combos)} combos"
+        )
+    return scores
+
+
+def _eval_chunk_bisect(combos, param_keys, metrics_info,
+                       in_sample_df, strategy_adapter, timeframe,
+                       evaluate_params_fn, depth=0):
+    """Evaluate *combos* vectorized; bisect recursively on failure.
+
+    For a chunk of N combos where only K fail (K << N), this reduces
+    sequential per-combo fallback from O(N) to O(K · log N) instead of
+    O(N). For K=1, N=1000: ~10 recursive calls vs 1000 sequential calls.
+
+    Returns a flat list of float scores aligned with *combos*.
+    """
+    if not combos:
+        return []
+
+    # --- Happy path: try vectorized on the full (sub-)chunk ---
+    try:
+        return _eval_chunk_vectorized(
+            combos, param_keys, metrics_info,
+            in_sample_df, strategy_adapter, timeframe,
+        )
+    except Exception as e:
+        # --- Base case: single combo must be evaluated sequentially ---
+        if len(combos) == 1:
+            combo_params = dict(zip(param_keys, combos[0]))
+            combo_params.update(metrics_info)
+            try:
+                raw = evaluate_params_fn(combo_params)
+                scores = _normalize_scores(raw, 1)
+                return [scores[0] if scores else float('nan')]
+            except Exception as e2:
+                logger.debug("Single-combo eval failed: %s — params: %s", e2,
+                             combo_params)
+                return [float('nan')]
+
+        # --- Recursive bisection: split and retry each half ---
+        if depth == 0:
+            logger.warning(
+                "Vectorized chunk (%d combos) failed — bisecting to isolate bad combos. "
+                "Error: %s", len(combos), e,
+            )
+        mid = len(combos) // 2
+        left  = _eval_chunk_bisect(combos[:mid], param_keys, metrics_info,
+                                   in_sample_df, strategy_adapter, timeframe,
+                                   evaluate_params_fn, depth + 1)
+        right = _eval_chunk_bisect(combos[mid:], param_keys, metrics_info,
+                                   in_sample_df, strategy_adapter, timeframe,
+                                   evaluate_params_fn, depth + 1)
+        return left + right
+
+
+# ======================================================================
 # WALK-FORWARD OPTIMIZATION FRAMEWORK
 # ======================================================================
 
@@ -162,7 +247,6 @@ def optimize_parameters(
         result_chunks = []
         combos_iter = product(*param_values_list)
         chunk_start = 0
-        fallback_used = False
 
         # Process in chunks
         while True:
@@ -175,83 +259,27 @@ def optimize_parameters(
             if not chunk_combos:
                 break
 
-            # Transpose chunk
-            transposed_chunk = list(zip(*chunk_combos))
+            # Evaluate chunk — vectorized with bisection fallback on failure.
+            # _eval_chunk_bisect tries vectorized first; if it fails, splits the
+            # chunk in half and recurses until the bad combo(s) are isolated and
+            # evaluated sequentially. This preserves vectorization for all good
+            # combos instead of falling back to O(N) sequential evaluation.
+            score_values = _eval_chunk_bisect(
+                chunk_combos, param_keys, metrics_info,
+                in_sample_df, strategy_adapter, timeframe,
+                evaluate_params,
+            )
 
-            vectorized_params = {}
-            for k_idx, key in enumerate(param_keys):
-                vectorized_params[key] = np.array(transposed_chunk[k_idx])
+            chunk_df = pd.DataFrame(chunk_combos, columns=param_keys)
+            chunk_df['combined_score'] = score_values
+            result_chunks.append(chunk_df)
 
-            # Add metrics info
-            vectorized_params.update(metrics_info)
-
-            try:
-                # Run backtest for this chunk
-                chunk_scores = strategy_adapter.run_backtest(
-                    in_sample_df,
-                    vectorized_params,
-                    timeframe=timeframe,
-                    return_portfolio=False,
+            nan_count = sum(1 for s in score_values if not np.isfinite(float(s) if s is not None else float('nan')))
+            if nan_count:
+                logger.warning(
+                    "Chunk %d-%d: %d/%d combos returned non-finite score.",
+                    chunk_start, chunk_start + len(chunk_combos), nan_count, len(chunk_combos),
                 )
-
-                # Normalize result to one score per combination.
-                if np.isscalar(chunk_scores):
-                    score_values = [float(chunk_scores)] * len(chunk_combos)
-                elif hasattr(chunk_scores, 'values'):
-                    score_values = list(np.asarray(chunk_scores.values).reshape(-1))
-                else:
-                    score_values = list(np.asarray(chunk_scores).reshape(-1))
-
-                if len(score_values) != len(chunk_combos):
-                    raise ValueError(
-                        f"Chunk score size mismatch: got {len(score_values)} scores for "
-                        f"{len(chunk_combos)} combinations."
-                    )
-
-                chunk_df = pd.DataFrame(chunk_combos, columns=param_keys)
-                chunk_df['combined_score'] = score_values
-                result_chunks.append(chunk_df)
-
-            except Exception as e:
-                if not fallback_used:
-                    logger.warning(
-                        "Vectorized grid chunk failed at combo %d; switching to per-combination "
-                        "fallback for robustness. First combo in chunk: %s. Error: %s",
-                        chunk_start,
-                        dict(zip(param_keys, chunk_combos[0])) if chunk_combos else "N/A",
-                        e,
-                    )
-                    fallback_used = True
-                else:
-                    logger.debug(
-                        "Fallback: chunk %d-%d failed (%s). First combo: %s",
-                        chunk_start, chunk_start + len(chunk_combos), e,
-                        dict(zip(param_keys, chunk_combos[0])) if chunk_combos else "N/A",
-                    )
-
-                score_values = []
-                for combo in chunk_combos:
-                    combo_params = dict(zip(param_keys, combo))
-                    combo_params.update(metrics_info)
-                    combo_score = evaluate_params(combo_params)
-                    if np.isscalar(combo_score):
-                        score_values.append(float(combo_score))
-                    elif hasattr(combo_score, 'values'):
-                        arr = np.asarray(combo_score.values).reshape(-1)
-                        score_values.append(float(arr[0]) if len(arr) else float('nan'))
-                    else:
-                        arr = np.asarray(combo_score).reshape(-1)
-                        score_values.append(float(arr[0]) if len(arr) else float('nan'))
-
-                chunk_df = pd.DataFrame(chunk_combos, columns=param_keys)
-                chunk_df['combined_score'] = score_values
-                result_chunks.append(chunk_df)
-                nan_count = sum(1 for s in score_values if not np.isfinite(s))
-                if nan_count:
-                    logger.warning(
-                        "Fallback chunk %d-%d: %d/%d combos returned non-finite score.",
-                        chunk_start, chunk_start + len(chunk_combos), nan_count, len(chunk_combos),
-                    )
 
             chunk_start += len(chunk_combos)
 
