@@ -12,6 +12,21 @@ from indicators import (
 )
 
 # ======================================================================
+# Utility helpers
+# ======================================================================
+
+def _bool_fill(s) -> "pd.Series":
+    """Replace NaN with False without triggering pandas FutureWarning.
+
+    pandas ≥ 2.1 warns when silently downcasting object-dtype arrays via
+    .fillna(). Using np.where on the raw array bypasses the pandas
+    downcasting path entirely.
+    """
+    vals = np.where(pd.isna(s), False, np.asarray(s, dtype=bool))
+    return pd.Series(vals, index=s.index if hasattr(s, 'index') else None)
+
+
+# ======================================================================
 # Per-window indicator cache
 # ======================================================================
 # Bollinger Bands and derived rolling statistics (bbw, mmbbw, mediane_bbw) are
@@ -381,16 +396,16 @@ def create_signal_generators(df, **params):
         ) & (
             sar_signal.to_numpy() > close_price_aligned.to_numpy()
         )
-        sar_exit_signal = pd.DataFrame(
+        sar_exit_signal = _bool_fill(pd.DataFrame(
             sar_exit_arr,
             index=sar_signal.index,
             columns=sar_signal.columns
-        ).fillna(False).astype(bool)
+        ))
     else:
-        sar_exit_signal = (
+        sar_exit_signal = _bool_fill(
             (prev_close > prev_sar) &
             (sar_signal > close_price_aligned)
-        ).fillna(False).astype(bool)
+        )
 
     # macd_exit_signal set in MACD cache block above
     if vector_len > 1 and is_array_like(exit_sar_enabled):
@@ -553,7 +568,7 @@ def create_entry_exit_conditions(df, signals):
     crossover_upper = upper_band.lt(close, axis=0) & prev_upper.ge(prev_close, axis=0)
 
     # T1: T0 (current or previous bar) + crossover + optional RoC filter
-    _t0_cross = (T0 | T0.shift(1).fillna(False)) & crossover_upper
+    _t0_cross = (T0 | _bool_fill(T0.shift(1))) & crossover_upper
     if signals.get('use_roc_filter', True):
         T1 = _t0_cross & signals['depassement_roc_signal']
     else:
@@ -573,16 +588,16 @@ def create_entry_exit_conditions(df, signals):
     use_div_bb = signals.get('use_divergence_bb', True)
     if use_t2:
         # divergence_BB evaluated on the T1 (setup) bar, i.e. shift(1) relative to trigger bar
-        _div_on_t1 = divergence_BB.shift(1).fillna(False) | divergence_BB.shift(2).fillna(False)
-        _breakout = high.gt(high.shift(1), axis=0) & T1.shift(1).fillna(False)
+        _div_on_t1 = _bool_fill(divergence_BB.shift(1)) | _bool_fill(divergence_BB.shift(2))
+        _breakout = high.gt(high.shift(1), axis=0) & _bool_fill(T1.shift(1))
         T2 = (_breakout & _div_on_t1) if use_div_bb else _breakout
-        entry_condition = T2.fillna(False).astype(bool)
+        entry_condition = _bool_fill(T2)
         # Entry price = High of T1 bar + mintick (stop-buy fill price)
         t2_entry_price = high.shift(1) + _MINTICK
     else:
-        entry_condition = T1.fillna(False).astype(bool)
+        entry_condition = _bool_fill(T1)
         t2_entry_price = None
-    
+
     # Exit Condition — combine all enabled exits
     exit_condition = (
         signals['sma_exit_signal'] |
@@ -595,7 +610,7 @@ def create_entry_exit_conditions(df, signals):
         sig = signals.get(key)
         if sig is not None:
             exit_condition = exit_condition | sig
-    exit_condition = exit_condition.fillna(False).astype(bool)
+    exit_condition = _bool_fill(exit_condition)
 
     return entry_condition, exit_condition, t2_entry_price
 
