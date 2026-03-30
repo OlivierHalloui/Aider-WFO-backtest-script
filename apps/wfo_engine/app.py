@@ -4080,6 +4080,21 @@ if 'wfo_results' in st.session_state:
     # Stable cache key: changes only when a new results dict is assigned to session state.
     _results_cache_key = str(id(results))
 
+    # Sticky tab bar — injected once when results are displayed.
+    # Targets the Streamlit tab list container and pins it below the top toolbar.
+    st.markdown("""
+        <style>
+        div[data-testid="stTabs"] > div[role="tablist"] {
+            position: sticky;
+            top: 2.875rem;   /* height of Streamlit top toolbar */
+            z-index: 999;
+            background-color: #0e1117;
+            padding-top: 4px;
+            padding-bottom: 2px;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📈 OOS Performance",
         "🔍 Parameters",
