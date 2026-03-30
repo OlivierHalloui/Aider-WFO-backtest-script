@@ -79,6 +79,7 @@ class WFOSettings:
     adaptive_warmup_trials: int = 300           # Minimum historical trials before shrinking the grid
     adaptive_max_cycles: int = 0                # 0 = no cap, otherwise max number of adaptive cycles
     adaptive_oos_weight: float = 2.0            # Additional weight of OOS best score in value stats
+    pqs_n_ref: int = 50                          # PQS confidence factor reference trade count (√(n_trades/n_ref))
     macd_ma_type: str = 'sma'                   # MA type for MACD calculation ('sma' = Pine V6, 'ema' = legacy)
     use_roc_filter: bool = True                 # Enable T1 RoC momentum filter
     use_t2_signal: bool = False                  # Enable T2 cascade (high breakout on next bar after T1)

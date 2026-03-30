@@ -144,11 +144,24 @@ def calc_avg_pl(portfolio):
         return 0.0
 
 
-def calc_pqs(portfolio) -> float:
-    """Profit Quality Score — (Return% / |MaxDD%|) × AvgP&L/tr%.
+def calc_pqs(portfolio, n_ref: int = 50) -> float:
+    """Profit Quality Score with statistical confidence weighting.
 
-    Combines risk-adjusted return (Calmar-like) with per-trade quality.
-    Higher is better. Returns 0.0 when MaxDD or n_trades is zero.
+    Formula:
+        PQS = (Return% / |MaxDD%|) × AvgP&L/tr% × √(n_trades / n_ref)
+
+    The √(n_trades / n_ref) factor rewards strategies with sufficient trade
+    frequency and penalises those with very few trades even if AvgP&L is high,
+    preventing the optimiser from converging on hyper-selective configs.
+
+    Parameters
+    ----------
+    portfolio : VectorBT portfolio object
+    n_ref : int
+        Reference trade count for the confidence factor (default 50).
+        Factor = 1.0 at exactly n_ref trades; < 1.0 below, > 1.0 above.
+
+    Returns 0.0 when MaxDD or n_trades is zero.
     """
     try:
         ret = float(to_scalar_score(getattr(portfolio, "total_return", 0.0) * 100))
@@ -157,12 +170,19 @@ def calc_pqs(portfolio) -> float:
         if abs_dd == 0.0:
             return 0.0
         avg_pl = float(to_scalar_score(calc_avg_pl(portfolio)))
-        return (ret / abs_dd) * avg_pl
+        try:
+            n_trades = int(len(portfolio.trades))
+        except Exception:
+            n_trades = 0
+        if n_trades == 0:
+            return 0.0
+        confidence = np.sqrt(max(n_trades, 0) / max(n_ref, 1))
+        return (ret / abs_dd) * avg_pl * confidence
     except Exception:
         return 0.0
 
 
-def portfolio_metrics(portfolio, window_id):
+def portfolio_metrics(portfolio, window_id, n_ref: int = 50):
     """Build a summary dict of key performance metrics for *portfolio*.
 
     Parameters
@@ -186,7 +206,7 @@ def portfolio_metrics(portfolio, window_id):
         "avg_pl_per_trade": float(to_scalar_score(calc_avg_pl(portfolio))),
         "calmar_ratio": float(to_scalar_score(getattr(portfolio, "calmar_ratio", 0.0))),
         "sortino_ratio": float(to_scalar_score(getattr(portfolio, "sortino_ratio", 0.0))),
-        "pqs": calc_pqs(portfolio),
+        "pqs": calc_pqs(portfolio, n_ref=n_ref),
         "n_trades": int(n_trades),
     }
 

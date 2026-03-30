@@ -3111,6 +3111,7 @@ def get_current_config():
         'use_t2_signal': bool(st.session_state.get("use_t2_signal", False)),
         'use_divergence_bb': bool(st.session_state.get("use_divergence_bb", True)),
         'use_divergence_bb_values': st.session_state.get("use_divergence_bb_values"),
+        'pqs_n_ref': int(st.session_state.get("pqs_n_ref", 50)),
         'macd_ma_type': str(st.session_state.get("macd_ma_type", "sma")),
         # Fixed strategy params (Pine V6 defaults — not in optimisation grid)
         'nb_bars_under_bbw_mini': int(st.session_state.get("nb_bars_under_bbw_mini", 4)),
@@ -3750,6 +3751,25 @@ if 'wfo_results' in st.session_state:
                 "- Active `Use Robust Set for Final Backtest` pour tester la robustesse OOS globale.\n"
                 "- Si les fenêtres sont peu nombreuses, garde un fallback classique."
             )
+
+        st.divider()
+
+        # --- PQS settings ---
+        st.markdown("##### PQS — Profit Quality Score")
+        st.number_input(
+            "PQS n_ref (trades de référence)",
+            min_value=1,
+            max_value=500,
+            value=int(st.session_state.get("pqs_n_ref", 50)),
+            step=5,
+            key="pqs_n_ref",
+            help=(
+                "Nombre de trades de référence pour le facteur de confiance PQS : √(n_trades / n_ref).\n\n"
+                "• En dessous de n_ref trades → PQS pénalisé (évite les configs hyper-sélectives).\n"
+                "• Au-dessus → PQS amplifié proportionnellement.\n"
+                "Valeur recommandée : 50 (significativité statistique minimale)."
+            ),
+        )
 
         st.divider()
 
@@ -5437,7 +5457,8 @@ if 'wfo_results' in st.session_state:
             m2.metric("Sharpe Ratio", f"{pf.sharpe_ratio:.2f}")
             m3.metric("Max Drawdown", f"{pf.max_drawdown * 100:.2f}%")
             m4.metric("Win Rate", f"{pf.trades.win_rate * 100:.2f}%")
-            _pqs_val = _calc_pqs(pf)
+            _pqs_n_ref = int(st.session_state.get('pqs_n_ref', 50))
+            _pqs_val = _calc_pqs(pf, n_ref=_pqs_n_ref)
             m5.metric("PQS", f"{_pqs_val:.4f}")
             
             st.markdown("#### Cumulative Returns")

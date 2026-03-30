@@ -568,6 +568,7 @@ def walk_forward_optimization(
     use_prev_best_grid = regime_key == 'prev_best_grid'
     nn_guide = NeuralSearchGuide(param_grid, settings) if use_nn_guided else None
     prev_window_best_params = None
+    _pqs_n_ref = int(getattr(settings, 'pqs_n_ref', 50))
 
     # Run-scoped backtest cache — LRU-bounded to prevent unbounded memory growth.
     # At ~1 KB per entry (param tuple key + float score), 5000 entries ≈ 5 MB max.
@@ -809,7 +810,7 @@ def walk_forward_optimization(
             'avg_pl_per_trade': calc_avg_pl(in_sample_portfolio),
             'calmar_ratio': in_sample_portfolio.calmar_ratio if in_sample_portfolio.max_drawdown > 0 else np.nan,
             'sortino_ratio': in_sample_portfolio.sortino_ratio,
-            'pqs': calc_pqs(in_sample_portfolio),
+            'pqs': calc_pqs(in_sample_portfolio, n_ref=_pqs_n_ref),
             'n_trades': len(in_sample_portfolio.trades)
         }
 
@@ -835,7 +836,7 @@ def walk_forward_optimization(
                 'avg_pl_per_trade': calc_avg_pl(out_sample_portfolio),
                 'calmar_ratio': out_sample_portfolio.calmar_ratio if out_sample_portfolio.max_drawdown > 0 else np.nan,
                 'sortino_ratio': out_sample_portfolio.sortino_ratio,
-                'pqs': calc_pqs(out_sample_portfolio),
+                'pqs': calc_pqs(out_sample_portfolio, n_ref=_pqs_n_ref),
                 'n_trades': len(out_sample_portfolio.trades)
             }
 

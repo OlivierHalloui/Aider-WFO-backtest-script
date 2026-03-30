@@ -728,7 +728,8 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
                 except Exception:
                     return 0.0
             elif name == 'pqs':
-                return calc_pqs(port)
+                _n_ref = int(_scalar_param(params.get('pqs_n_ref', 50), 50))
+                return calc_pqs(port, n_ref=_n_ref)
             return 0.0
 
         m1 = get_metric(portfolio, metric1_name)

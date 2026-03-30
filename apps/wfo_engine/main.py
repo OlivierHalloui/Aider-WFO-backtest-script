@@ -174,6 +174,7 @@ def get_param_grid(config):
     param_grid['order_sizing_mode'] = [config.get('order_sizing_mode', 'percent_equity')]
     param_grid['order_fixed_cash'] = [float(config.get('order_fixed_cash', 10000.0))]
     param_grid['fees_pct'] = [float(config.get('fees_pct', 0.0))]
+    param_grid['pqs_n_ref'] = [int(config.get('pqs_n_ref', 50))]
     # Entry strictness toggle (kept fixed per run by default)
     param_grid['use_roc_filter'] = [bool(config.get('use_roc_filter', True))]
     param_grid['use_t2_signal'] = [bool(config.get('use_t2_signal', False))]
@@ -338,6 +339,7 @@ def get_wfo_settings(config):
     settings.adaptive_max_cycles = config.get('adaptive_max_cycles', 0)
     settings.adaptive_oos_weight = config.get('adaptive_oos_weight', 2.0)
     settings.use_t2_signal = bool(config.get('use_t2_signal', False))
+    settings.pqs_n_ref = int(config.get('pqs_n_ref', 50))
     settings.exit_sar_enabled = config.get('exit_sar_enabled', True)
     settings.exit_macd_enabled = config.get('exit_macd_enabled', True)
     settings.exit_macd_type_a = config.get('exit_macd_type_a', True)
