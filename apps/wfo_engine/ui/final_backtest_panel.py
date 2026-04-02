@@ -21,6 +21,7 @@ from domain.serialization import (
     sanitize_for_json as _sanitize_for_json,
     to_jsonable as _to_jsonable,
 )
+from ui.data_utils import arrow_safe_df as _arrow_safe_df
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +125,21 @@ def _select_best_params_from_results(results, config):
             best_oos_metrics = oos_row
 
     return best_params, best_score, best_window, best_is_metrics, best_oos_metrics
+
+
+def _get_params_for_window(results, window_id):
+    """Return (best_params, is_metrics, oos_metrics) for a specific WFO window."""
+    is_map  = {row.get('window'): row for row in results.get('in_sample_performance',  [])}
+    oos_map = {row.get('window'): row for row in results.get('out_of_sample_performance', [])}
+    for window in results.get('window_results', []):
+        wid = window.get('window_info', {}).get('window')
+        if wid == window_id:
+            return (
+                (window.get('best_params') or {}).copy(),
+                is_map.get(window_id),
+                oos_map.get(window_id),
+            )
+    return None, None, None
 
 
 def _normalize_vote_value(value):
@@ -378,28 +394,59 @@ def _select_final_params_from_results(results, config):
 # Load best params into sidebar inputs
 # ---------------------------------------------------------------------------
 
-def load_best_params_into_inputs(*, get_current_config):
-    """Load best/robust params from WFO results into sidebar input widgets."""
+def load_best_params_into_inputs(*, get_current_config, window_id=None):
+    """Load best/robust params from WFO results into sidebar input widgets.
+
+    Parameters
+    ----------
+    window_id : int or None
+        If None (default) the global best window (or robust set) is used.
+        If set, the best params of that specific WFO window are loaded.
+    """
     final_params = None
     final_source = None
+    loaded_window = None
+
     if 'wfo_results' in st.session_state:
-        best_params, best_score, best_window, best_is, best_oos, final_source, robust_summary = _select_final_params_from_results(
-            st.session_state['wfo_results'],
-            get_current_config()
-        )
-        if best_params:
-            st.session_state['final_params'] = best_params
-            st.session_state['final_params_score'] = best_score
-            st.session_state['final_params_window'] = best_window
-            st.session_state['final_params_is_metrics'] = best_is
-            st.session_state['final_params_oos_metrics'] = best_oos
-            st.session_state['final_params_source'] = final_source
-            st.session_state['final_params_robust_summary'] = robust_summary
-            final_params = best_params
-            final_source = final_source or "best_window"
+        results = st.session_state['wfo_results']
+
+        if window_id is not None:
+            # Load from a specific window chosen by the user
+            wp, is_m, oos_m = _get_params_for_window(results, window_id)
+            if wp:
+                final_params = wp
+                final_source = f"window_{window_id}"
+                loaded_window = window_id
+                st.session_state['final_params']            = wp
+                st.session_state['final_params_score']      = None
+                st.session_state['final_params_window']     = window_id
+                st.session_state['final_params_is_metrics'] = is_m
+                st.session_state['final_params_oos_metrics']= oos_m
+                st.session_state['final_params_source']     = final_source
+            else:
+                st.sidebar.error(f"Aucun paramètre trouvé pour la fenêtre {window_id}.")
+                return
+        else:
+            # Default: global best window / robust set
+            best_params, best_score, best_window, best_is, best_oos, final_source, robust_summary = (
+                _select_final_params_from_results(results, get_current_config())
+            )
+            if best_params:
+                st.session_state['final_params']              = best_params
+                st.session_state['final_params_score']        = best_score
+                st.session_state['final_params_window']       = best_window
+                st.session_state['final_params_is_metrics']   = best_is
+                st.session_state['final_params_oos_metrics']  = best_oos
+                st.session_state['final_params_source']       = final_source
+                st.session_state['final_params_robust_summary'] = robust_summary
+                final_params = best_params
+                loaded_window = best_window
+                final_source = final_source or "best_window"
+
     if final_params is None:
-        final_params = st.session_state.get("final_params")
-        final_source = st.session_state.get("final_params_source")
+        final_params  = st.session_state.get("final_params")
+        final_source  = st.session_state.get("final_params_source")
+        loaded_window = st.session_state.get("final_params_window")
     if not final_params:
         st.sidebar.error("No final parameters available.")
         return
@@ -426,15 +473,14 @@ def load_best_params_into_inputs(*, get_current_config):
         st.session_state[f"check_{param}"] = True
         st.session_state[f"min_{param}"] = value
         st.session_state[f"max_{param}"] = value
-        st.session_state[f"step_{param}"] = 1 if param in int_params else 0.01
+        # Use the canonical grid step so expanding the range later gives natural increments
+        _d_min, _d_max, _d_step = DEFAULT_PARAM_GRID[param]
+        st.session_state[f"step_{param}"] = _d_step
 
-    window_id = st.session_state.get('final_params_window')
     if str(final_source or "").lower() == "robust_set":
-        st.sidebar.success("Loaded robust-set parameters into input ranges.")
-    elif window_id is not None:
-        st.sidebar.success(f"Loaded best parameters from window {window_id}.")
-    else:
-        st.sidebar.success("Loaded best parameters.")
+        st.sidebar.success("Paramètres robust-set chargés dans les inputs.")
+    elif loaded_window is not None:
+        st.sidebar.success(f"Paramètres de la fenêtre {loaded_window} chargés.")
 
 
 # ---------------------------------------------------------------------------
@@ -707,11 +753,26 @@ def _render_best_window_chart(pf, df_full: pd.DataFrame, window_id, ref_label: s
             init_cap, init_pr = float(pf_c.iloc[0]), float(pr_c.iloc[0])
             if np.isfinite(init_cap) and np.isfinite(init_pr) and init_pr != 0:
                 bh = init_cap * (pr_c / init_pr)
+                bh_final_val = float(bh.iloc[-1])
+                bh_return_pct = (bh_final_val / init_cap - 1.0) * 100.0
+                bh_ds = _ds(bh)
                 fig.add_trace(
-                    go.Scatter(x=_ds(bh).index, y=_ds(bh).values,
-                               mode="lines", name="Buy & Hold",
+                    go.Scatter(x=bh_ds.index, y=bh_ds.values,
+                               mode="lines",
+                               name=f"Buy & Hold — final: {bh_final_val:,.0f} ({bh_return_pct:+.1f}%)",
                                line=dict(color="#2ca02c", width=1.5, dash="dash")),
                     secondary_y=False,
+                )
+                fig.add_annotation(
+                    x=bh_ds.index[-1], y=bh_final_val,
+                    text=f"B&H {bh_return_pct:+.1f}%<br>{bh_final_val:,.0f}",
+                    showarrow=True, arrowhead=2, arrowwidth=1,
+                    arrowcolor="#2ca02c",
+                    ax=40, ay=-30,
+                    font=dict(size=9, color="#2ca02c"),
+                    bgcolor="rgba(44,160,44,0.15)",
+                    bordercolor="#2ca02c", borderpad=3, borderwidth=1,
+                    xref="x", yref="y",
                 )
         fig.add_trace(
             go.Scatter(x=_ds(price).index, y=_ds(price).values,
@@ -729,7 +790,7 @@ def _render_best_window_chart(pf, df_full: pd.DataFrame, window_id, ref_label: s
     # Trade stats summary
     try:
         st.markdown("##### Statistiques des trades")
-        st.dataframe(pf.trades.stats())
+        st.dataframe(_arrow_safe_df(pf.trades.stats()))
     except Exception:
         pass
 
@@ -881,7 +942,8 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
         st.session_state["_window_cmp_best_pf"]       = best_pf
         st.session_state["_window_cmp_best_id"]       = best_window_id
         st.session_state["_window_cmp_df_full"]       = df_full
-        cached_rows = rows
+        cached_rows  = rows
+        cached_token = token   # sync local var so the render block fires immediately
 
     # ── Render table ────────────────────────────────────────────────────────
     if cached_rows and cached_token == token:
@@ -938,7 +1000,7 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
                              if k in DEFAULT_PARAM_GRID})
                 param_records.append(rec)
             if param_records:
-                st.dataframe(pd.DataFrame(param_records).set_index("Fenêtre"), use_container_width=True)
+                st.dataframe(_arrow_safe_df(pd.DataFrame(param_records).set_index("Fenêtre")), use_container_width=True)
 
         # ── Charts for best window ────────────────────────────────────────
         best_pf  = st.session_state.get("_window_cmp_best_pf")

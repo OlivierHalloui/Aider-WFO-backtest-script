@@ -110,7 +110,11 @@ def get_param_grid(config):
                 param_grid[param] = list(range(int(min_val), int(max_val) + 1, int(step)))
             else:
                 decimals = max(0, int(round(-np.log10(step)))) if step > 0 else 0
-                values = np.arange(min_val, max_val + step, step)
+                # Use count-based expansion to avoid IEEE 754 floating-point drift
+                # (np.arange(min, max+step, step) can include an extra value when
+                # min==max because 0.8+0.3 = 1.0999… < 1.1, so numpy includes it).
+                count = max(1, int(np.floor((max_val - min_val) / step + 1e-9)) + 1)
+                values = [min_val + step * i for i in range(count)]
                 param_grid[param] = list(np.round(values, decimals))
     
     # 1b. Collapse SAR/MACD params to fixed defaults when their exit is disabled.

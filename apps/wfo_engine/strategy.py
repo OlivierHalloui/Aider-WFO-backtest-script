@@ -690,7 +690,7 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
         price=exec_price,
         size=size,
         size_type=size_type,
-        init_cash=10000,
+        init_cash=order_fixed_cash,
         fees=fees,
         freq=timeframe
     )

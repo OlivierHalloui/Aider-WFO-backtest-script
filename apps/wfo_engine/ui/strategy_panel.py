@@ -295,6 +295,11 @@ def render_strategy_panel() -> None:
                     param_input('sar_increment', 'sar_increment', *DEFAULT_PARAM_GRID['sar_increment'])
                 with c_s3:
                     param_input('sar_maximum', 'sar_maximum', *DEFAULT_PARAM_GRID['sar_maximum'])
+            else:
+                # Widgets not rendered → Streamlit removes their session_state keys.
+                # Re-set to False explicitly so the combo counter stays accurate.
+                for _p in ('sar_start', 'sar_increment', 'sar_maximum'):
+                    st.session_state[f"check_{_p}"] = False
 
             st.divider()
 
@@ -354,6 +359,11 @@ def render_strategy_panel() -> None:
                     param_input('macd_slow_length', 'macd_slow_length', *DEFAULT_PARAM_GRID['macd_slow_length'])
                 with c_sig:
                     param_input('macd_signal_length', 'macd_signal_length', *DEFAULT_PARAM_GRID['macd_signal_length'])
+            else:
+                # Widgets not rendered → Streamlit removes their session_state keys.
+                # Re-set to False explicitly so the combo counter stays accurate.
+                for _p in ('macd_fast_length', 'macd_slow_length', 'macd_signal_length'):
+                    st.session_state[f"check_{_p}"] = False
 
             st.divider()
 

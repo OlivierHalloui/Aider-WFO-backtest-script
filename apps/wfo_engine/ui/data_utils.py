@@ -6,6 +6,57 @@ import numpy as np
 import pandas as pd
 
 
+def _coerce_arrow_value(v):
+    """Convert a single cell value to a type PyArrow can serialize.
+
+    Priority:
+      1. None / NaN-like         → keep as-is (Arrow handles None)
+      2. bool (before int!)      → bool
+      3. numpy integer           → int
+      4. numpy floating          → float  (NaN/Inf → None)
+      5. numpy bool_             → bool
+      6. pd.Timedelta / Timestamp → str
+      7. Any remaining non-native → str
+    """
+    if v is None:
+        return v
+    # numpy bool must come before numpy integer (bool_ is a subclass of integer)
+    if isinstance(v, np.bool_):
+        return bool(v)
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.floating):
+        f = float(v)
+        return None if (np.isnan(f) or np.isinf(f)) else f
+    if isinstance(v, (pd.Timedelta, pd.Timestamp)):
+        return str(v)
+    # Plain Python scalars are fine
+    if isinstance(v, (bool, int, float, str, bytes)):
+        return v
+    # Anything else (complex numpy types, custom objects, …) → str
+    return str(v)
+
+
+def arrow_safe_df(obj):
+    """Return a DataFrame safe for Arrow/Streamlit serialization.
+
+    Normalises every object-dtype column so that PyArrow can serialize it:
+    numpy scalars → Python native, Timedelta/Timestamp → str, unknowns → str.
+
+    When *obj* is a pd.Series (e.g. pf.trades.stats()), it is reshaped into a
+    two-column DataFrame ["Metric", "Value"] first.
+    """
+    if isinstance(obj, pd.Series):
+        df = obj.reset_index()
+        df.columns = ["Metric", "Value"]
+    else:
+        df = obj.copy()
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].apply(_coerce_arrow_value)
+    return df
+
+
 def downsample_series(series, max_points: int = 20000):
     if series is None or len(series) <= max_points:
         return series

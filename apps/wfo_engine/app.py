@@ -59,6 +59,7 @@ from ui.data_utils import (
     downsample_df as _downsample_df,
     get_return_series as _get_return_series,
     compute_trade_pnl_metrics as _compute_trade_pnl_metrics,
+    arrow_safe_df as _arrow_safe_df,
 )
 from ui.expert_report import (
     render_deterministic_alerts as _render_deterministic_alerts,
@@ -512,9 +513,9 @@ from ui.expert_panel import (
     _format_followup_answer_for_display,
 )
 
-def load_best_params_into_inputs():
+def load_best_params_into_inputs(window_id=None):
     from ui.final_backtest_panel import load_best_params_into_inputs as _load_best_params
-    return _load_best_params(get_current_config=get_current_config)
+    return _load_best_params(get_current_config=get_current_config, window_id=window_id)
 
 
 
@@ -878,15 +879,41 @@ with st.sidebar:
     )
 
     has_final_params = 'final_params' in st.session_state or 'wfo_results' in st.session_state
-    st.sidebar.button(
-        "📥 Load Best Params into Inputs",
-        width="stretch",
-        on_click=load_best_params_into_inputs if has_final_params else None,
+    # Build window list for the selector (only when WFO results exist)
+    _wfo_windows = []
+    if 'wfo_results' in st.session_state:
+        _wr = st.session_state['wfo_results']
+        for _w in (_wr.get('window_results') or []):
+            _wid = (_w.get('window_info') or {}).get('window')
+            if _wid is not None:
+                _wfo_windows.append(_wid)
+    # Selector: "Best window (auto)" + one entry per window
+    _window_options = ["Best window (auto)"] + [f"Fenêtre {w}" for w in _wfo_windows]
+    _selected_label = st.sidebar.selectbox(
+        "Source des paramètres",
+        options=_window_options,
+        index=0,
+        key="load_params_window_selector",
         disabled=not has_final_params,
-        help="Charge les meilleurs paramètres trouvés dans les champs Min/Max/Step pour préparer un nouveau run."
+        help="Choisir la fenêtre WFO dont les best params seront chargés dans les inputs.",
+    )
+    # Resolve selected window_id (None = best window auto)
+    _selected_window_id = None
+    if _selected_label != "Best window (auto)" and _wfo_windows:
+        _idx = _window_options.index(_selected_label) - 1  # offset for the "auto" entry
+        if 0 <= _idx < len(_wfo_windows):
+            _selected_window_id = _wfo_windows[_idx]
+
+    st.sidebar.button(
+        "📥 Load Params into Inputs",
+        width="stretch",
+        on_click=load_best_params_into_inputs,
+        kwargs={"window_id": _selected_window_id},
+        disabled=not has_final_params,
+        help="Charge les paramètres de la fenêtre sélectionnée dans les champs Min/Max/Step."
     )
     if not has_final_params:
-        st.sidebar.info("Run the final backtest to enable loading best parameters.")
+        st.sidebar.info("Lancez le WFO pour activer le chargement des paramètres.")
     
     # --- File Uploader for Config ---
     uploaded_config = st.file_uploader(
@@ -2974,7 +3001,17 @@ def get_current_config():
     # ---------------------------------------------------------------------------
     selected_params = []
     config_params = {}
+    # Dead-dimension guard: params whose controlling exit is disabled are never
+    # optimized — exclude them regardless of their check_{param} state.
+    _sar_on  = bool(st.session_state.get("exit_sar_enabled",  True))
+    _macd_on = bool(st.session_state.get("exit_macd_enabled", True))
+    _SAR_PARAMS  = {'sar_start', 'sar_increment', 'sar_maximum'}
+    _MACD_PARAMS = {'macd_fast_length', 'macd_slow_length', 'macd_signal_length'}
     for param in DEFAULT_PARAM_GRID:
+        if param in _SAR_PARAMS  and not _sar_on:
+            continue
+        if param in _MACD_PARAMS and not _macd_on:
+            continue
         if st.session_state.get(f"check_{param}", True):
             selected_params.append(param)
             d_min, d_max, d_step = DEFAULT_PARAM_GRID[param]
@@ -3167,25 +3204,38 @@ def get_current_config():
     config.update(config_params)
     return config
 
+
+
 def calculate_combinations(config):
     """Calculates the total number of parameter combinations."""
     total = 1
     if not config.get('selected_params'):
         return 0
-        
+
+    # Dead-dimension guard: params of disabled exits are excluded from the count
+    # (mirrors the same logic in get_current_config to stay consistent).
+    _sar_on  = bool(config.get("exit_sar_enabled",  True))
+    _macd_on = bool(config.get("exit_macd_enabled", True))
+    _SAR_PARAMS  = {'sar_start', 'sar_increment', 'sar_maximum'}
+    _MACD_PARAMS = {'macd_fast_length', 'macd_slow_length', 'macd_signal_length'}
+
     for param in config['selected_params']:
-        p_min = config.get(f'{param}_min')
-        p_max = config.get(f'{param}_max')
-        p_step = config.get(f'{param}_step')
-        
-        if p_step <= 0:
+        if param in _SAR_PARAMS  and not _sar_on:
             continue
-            
-        # Robust calculation for float steps
-        # Adding a small epsilon to handle floating point errors
+        if param in _MACD_PARAMS and not _macd_on:
+            continue
+
+        p_min  = config.get(f'{param}_min')
+        p_max  = config.get(f'{param}_max')
+        p_step = config.get(f'{param}_step')
+
+        if p_step is None or p_step <= 0:
+            continue
+
+        # Robust calculation for float steps — small epsilon absorbs rounding errors
         count = int(np.floor((p_max - p_min + 1e-10) / p_step)) + 1
         total *= max(1, count)
-        
+
     return total
 
 
@@ -3915,8 +3965,42 @@ def _cached_is_oos_chart(cache_key: str, _oos_data, _is_data, metric1_name: str 
                 name=f"OOS {metric_label}", mode='lines+markers',
                 line=dict(color='rgb(26, 118, 255)')
             ), secondary_y=True)
-    fig.update_layout(height=450, template="plotly_dark", barmode="group",
-                      title_text=f"Returns & {metric_label} per Window (IS vs OOS)")
+
+    # --- Best-window annotations (above chart) ---
+    if not is_df.empty and metric_col in _is_idx.columns:
+        _is_m = _is_idx[metric_col].dropna()
+        if not _is_m.empty:
+            best_is_win = _is_m.idxmax()
+            best_is_val = float(_is_m.max())
+            fig.add_annotation(
+                x=best_is_win, xref="x", y=1.13, yref="paper",
+                text=f"★ IS W{best_is_win} {metric_label}={best_is_val:.2f}",
+                showarrow=False,
+                font=dict(size=10, color="rgb(214, 39, 40)"),
+                align="center",
+                bgcolor="rgba(214, 39, 40, 0.12)",
+                bordercolor="rgb(214, 39, 40)",
+                borderpad=3, borderwidth=1,
+            )
+    if not oos_df.empty and metric_col in _oos_idx.columns:
+        _oos_m = _oos_idx[metric_col].dropna()
+        if not _oos_m.empty:
+            best_oos_win = _oos_m.idxmax()
+            best_oos_val = float(_oos_m.max())
+            fig.add_annotation(
+                x=best_oos_win, xref="x", y=1.04, yref="paper",
+                text=f"★ OOS W{best_oos_win} {metric_label}={best_oos_val:.2f}",
+                showarrow=False,
+                font=dict(size=10, color="rgb(26, 118, 255)"),
+                align="center",
+                bgcolor="rgba(26, 118, 255, 0.12)",
+                bordercolor="rgb(26, 118, 255)",
+                borderpad=3, borderwidth=1,
+            )
+
+    fig.update_layout(height=490, template="plotly_dark", barmode="group",
+                      title_text=f"Returns & {metric_label} per Window (IS vs OOS)",
+                      margin=dict(t=95))
     fig.update_yaxes(title_text="Return %", secondary_y=False)
     fig.update_yaxes(title_text=metric_label, secondary_y=True)
     return fig
@@ -5316,10 +5400,10 @@ if 'wfo_results' in st.session_state:
     with tab6:
         st.subheader("Detailed Results Data")
         st.write("Out-of-Sample Metrics:")
-        st.dataframe(pd.DataFrame(results['out_of_sample_performance']))
-        
+        st.dataframe(_arrow_safe_df(pd.DataFrame(results['out_of_sample_performance'])))
+
         st.write("In-Sample Metrics:")
-        st.dataframe(pd.DataFrame(results['in_sample_performance']))
+        st.dataframe(_arrow_safe_df(pd.DataFrame(results['in_sample_performance'])))
         
         st.write("Full Results Object (JSON):")
         with st.expander("Show JSON"):
@@ -5329,7 +5413,7 @@ if 'wfo_results' in st.session_state:
 
         if st.session_state.get("window_info_df") is not None:
             st.write("Window Info:")
-            st.dataframe(st.session_state["window_info_df"], width="stretch")
+            st.dataframe(_arrow_safe_df(st.session_state["window_info_df"]), width="stretch")
 
         if st.session_state.get("all_trials_df") is not None:
             trials_df = st.session_state["all_trials_df"].copy()
@@ -5411,7 +5495,7 @@ if 'wfo_results' in st.session_state:
                 f"Affichage {start_idx + 1:,}–{min(end_idx, total_filtered):,} / {total_filtered:,} "
                 f"(filtré depuis {len(trials_df):,} lignes)."
             )
-            st.dataframe(page_df, width="stretch")
+            st.dataframe(_arrow_safe_df(page_df), width="stretch")
     
     with tab7:
         st.subheader("🏆 Final Backtest Results")
@@ -5552,16 +5636,31 @@ if 'wfo_results' in st.session_state:
                         initial_price = float(price_common.iloc[0])
                         if np.isfinite(initial_capital) and np.isfinite(initial_price) and initial_price != 0:
                             buy_hold_series = initial_capital * (price_common / initial_price)
+                            bh_final_val = float(buy_hold_series.iloc[-1])
+                            bh_return_pct = (bh_final_val / initial_capital - 1.0) * 100.0
                             buy_hold_series = _downsample_series(buy_hold_series, max_points=max_points)
                             fig_value.add_trace(
                                 go.Scatter(
                                     x=buy_hold_series.index,
                                     y=buy_hold_series.values,
                                     mode="lines",
-                                    name="Buy & Hold (same capital)",
+                                    name=f"Buy & Hold (même capital) — final: {bh_final_val:,.0f} ({bh_return_pct:+.1f}%)",
                                     line=dict(color="#2CA02C", width=1.5, dash="dash")
                                 ),
                                 secondary_y=False
+                            )
+                            # Annotate final B&H value at the end of the line
+                            fig_value.add_annotation(
+                                x=buy_hold_series.index[-1],
+                                y=bh_final_val,
+                                text=f"B&H {bh_return_pct:+.1f}%<br>{bh_final_val:,.0f}",
+                                showarrow=True, arrowhead=2, arrowwidth=1,
+                                arrowcolor="#2CA02C",
+                                ax=40, ay=-30,
+                                font=dict(size=9, color="#2CA02C"),
+                                bgcolor="rgba(44,160,44,0.15)",
+                                bordercolor="#2CA02C", borderpad=3, borderwidth=1,
+                                xref="x", yref="y",
                             )
 
                     price_series = _downsample_series(price_series, max_points=max_points)
@@ -5584,7 +5683,7 @@ if 'wfo_results' in st.session_state:
                 st.warning(f"Plot skipped due to size or data issue: {e}")
             
             st.markdown("#### Trade Stats")
-            st.dataframe(pf.trades.stats())
+            st.dataframe(_arrow_safe_df(pf.trades.stats()))
             trim_pct = st.slider(
                 "Trim % for P&L metrics",
                 min_value=1,
@@ -5747,7 +5846,7 @@ if 'wfo_results' in st.session_state:
                 st.info("Loaded from results ZIP (portfolio object not available).")
                 if stats_df is not None:
                     st.markdown("#### Trade Stats")
-                    st.dataframe(stats_df)
+                    st.dataframe(_arrow_safe_df(stats_df))
                 if trades_df is not None:
                     trim_pct = st.slider(
                         "Trim % for P&L metrics",
@@ -5763,7 +5862,7 @@ if 'wfo_results' in st.session_state:
                         st.markdown("#### Average P&L per Trade (Multiple Methods)")
                         st.dataframe(pnl_metrics_df, width="stretch")
                     st.markdown("#### Trades")
-                    st.dataframe(trades_df)
+                    st.dataframe(_arrow_safe_df(trades_df))
             else:
                 st.info("Run the final backtest or load a results ZIP that includes final backtest data.")
         
