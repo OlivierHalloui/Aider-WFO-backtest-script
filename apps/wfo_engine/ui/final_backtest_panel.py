@@ -802,7 +802,7 @@ def _render_best_window_chart(pf, df_full: pd.DataFrame, window_id, ref_label: s
         fig_ret.add_trace(go.Scatter(
             x=bh_ds.index, y=bh_ds.values,
             mode="lines", name=f"Buy & Hold ({bh_final_pct:+.1f}%)",
-            line=dict(color="#2ca02c", width=1.5, dash="dash")
+            line=dict(color="#2ca02c", width=1.5)
         ))
         fig_ret.add_annotation(
             x=bh_ds.index[-1], y=bh_final_pct,
@@ -938,7 +938,7 @@ def _render_all_windows_chart(all_pfs: dict, df_full, best_id, ref_label: str) -
             x=bh_ds.index, y=bh_ds.values,
             mode="lines",
             name=f"Buy & Hold ({bh_final_pct:+.1f}%)",
-            line=dict(color="#2ca02c", width=1.5, dash="dash"),
+            line=dict(color="#2ca02c", width=1.5),
         ))
         fig.add_annotation(
             x=bh_ds.index[-1], y=bh_final_pct,
