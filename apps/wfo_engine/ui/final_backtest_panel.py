@@ -870,8 +870,8 @@ def _render_all_windows_chart(all_pfs: dict, df_full, best_id, ref_label: str) -
 
     # Palette for non-best windows
     _palette = [
-        "#7b97c0", "#82b496", "#c4a56e", "#a88fc4", "#c47e7e",
-        "#6ec4c0", "#b8b87e", "#c48e6e", "#8ec4a8", "#a8a8c4",
+        "#60a0e0", "#50d0a0", "#f0b040", "#b080e0", "#e08080",
+        "#40d0d0", "#d0d050", "#e0a060", "#60d090", "#a0a0e0",
     ]
 
     fig = go.Figure()
@@ -897,7 +897,7 @@ def _render_all_windows_chart(all_pfs: dict, df_full, best_id, ref_label: str) -
                 mode="lines",
                 name=f"{label} ({final_pct:+.1f}%)",
                 line=dict(color=color, width=1),
-                opacity=0.5,
+                opacity=0.7,
             ))
         except Exception:
             continue
