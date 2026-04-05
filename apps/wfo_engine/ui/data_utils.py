@@ -30,9 +30,11 @@ def _coerce_arrow_value(v):
         return None if (np.isnan(f) or np.isinf(f)) else f
     if isinstance(v, (pd.Timedelta, pd.Timestamp)):
         return str(v)
-    # Plain Python scalars are fine
-    if isinstance(v, (bool, int, float, str, bytes)):
+    # Plain Python scalars are fine (bytes decoded to avoid Arrow binary inference)
+    if isinstance(v, (bool, int, float, str)):
         return v
+    if isinstance(v, bytes):
+        return v.decode('utf-8', errors='replace')
     # Anything else (complex numpy types, custom objects, …) → str
     return str(v)
 
@@ -49,6 +51,12 @@ def arrow_safe_df(obj):
     if isinstance(obj, pd.Series):
         df = obj.reset_index()
         df.columns = ["Metric", "Value"]
+        # Value is always mixed (float, str, int, timedelta…) — force to homogeneous str
+        # so PyArrow never has to infer a common type across incompatible Python scalars.
+        df["Value"] = df["Value"].apply(
+            lambda v: str(_coerce_arrow_value(v)) if v is not None else None
+        )
+        return df
     else:
         df = obj.copy()
     for col in df.columns:

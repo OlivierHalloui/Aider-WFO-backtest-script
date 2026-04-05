@@ -487,8 +487,15 @@ def load_best_params_into_inputs(*, get_current_config, window_id=None):
 # Run final backtest
 # ---------------------------------------------------------------------------
 
-def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_adapter):
-    """Runs the final backtest using averaged parameters."""
+def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_adapter, window_id=None):
+    """Runs the final backtest using averaged parameters.
+
+    Parameters
+    ----------
+    window_id : int or None
+        If set, forces the use of that specific WFO window's best params.
+        If None, the global best window (or robust set) is selected automatically.
+    """
     if 'wfo_results' not in st.session_state or 'df' not in st.session_state:
         st.error("No WFO results available to run final backtest.")
         return
@@ -521,28 +528,42 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
         return
     st.session_state['final_backtest_df'] = df
 
-    # Use either classic best-window params or robust-set params (if enabled).
-    (
-        chosen_params,
-        best_score,
-        best_window,
-        best_is_metrics,
-        best_oos_metrics,
-        final_source,
-        robust_summary,
-    ) = _select_final_params_from_results(results, config)
-    if not chosen_params:
-        st.error("No valid parameters found for final backtest.")
-        return
-    if (
-        bool(config.get("robust_tests_enabled", False))
-        and bool(config.get("robust_use_for_final_backtest", False))
-        and str(final_source or "").lower() != "robust_set"
-    ):
-        st.warning(
-            "Robust Set demande mais non applicable sur ce run. "
-            "Fallback automatique vers la selection classique best_window."
-        )
+    # When a specific window is requested, bypass the automatic best-window selection.
+    if window_id is not None:
+        wp, is_m, oos_m = _get_params_for_window(results, window_id)
+        if not wp:
+            st.error(f"Aucun paramètre trouvé pour la fenêtre {window_id}.")
+            return
+        chosen_params = wp
+        best_score = None
+        best_window = window_id
+        best_is_metrics = is_m
+        best_oos_metrics = oos_m
+        final_source = f"window_{window_id}"
+        robust_summary = None
+    else:
+        # Use either classic best-window params or robust-set params (if enabled).
+        (
+            chosen_params,
+            best_score,
+            best_window,
+            best_is_metrics,
+            best_oos_metrics,
+            final_source,
+            robust_summary,
+        ) = _select_final_params_from_results(results, config)
+        if not chosen_params:
+            st.error("No valid parameters found for final backtest.")
+            return
+        if (
+            bool(config.get("robust_tests_enabled", False))
+            and bool(config.get("robust_use_for_final_backtest", False))
+            and str(final_source or "").lower() != "robust_set"
+        ):
+            st.warning(
+                "Robust Set demande mais non applicable sur ce run. "
+                "Fallback automatique vers la selection classique best_window."
+            )
 
     # Define integer parameters that should be rounded
     int_params = {
@@ -733,59 +754,86 @@ def _render_best_window_chart(pf, df_full: pd.DataFrame, window_id, ref_label: s
         step = max(1, len(s) // MAX_PTS)
         return s.iloc[::step]
 
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    # Compute portfolio % return from start
+    pf_pct = (value_series / float(value_series.iloc[0]) - 1.0) * 100.0
+    pf_final_pct = float(pf_pct.iloc[-1])
 
-    fig.add_trace(
-        go.Scatter(x=_ds(value_series).index, y=_ds(value_series).values,
-                   mode="lines", name="Valeur portfolio",
-                   line=dict(color="#1f77b4", width=1.5)),
-        secondary_y=False,
-    )
-
-    # Buy & Hold on same capital
+    # Gather price data and compute B&H % return
+    price_series = None
+    bh_pct = None
+    bh_final_pct = None
     if df_full is not None and not df_full.empty:
-        price = df_full["Close"] if "Close" in df_full.columns else df_full.iloc[:, 0]
-        price = pd.to_numeric(price, errors="coerce").dropna()
-        aligned = price.reindex(value_series.index).ffill().bfill().dropna()
+        price_series = df_full["Close"] if "Close" in df_full.columns else df_full.iloc[:, 0]
+        price_series = pd.to_numeric(price_series, errors="coerce").dropna()
+        aligned = price_series.reindex(value_series.index).ffill().bfill().dropna()
         common = value_series.index.intersection(aligned.index)
         if len(common) > 1:
-            pf_c, pr_c = value_series.loc[common], aligned.loc[common]
-            init_cap, init_pr = float(pf_c.iloc[0]), float(pr_c.iloc[0])
-            if np.isfinite(init_cap) and np.isfinite(init_pr) and init_pr != 0:
-                bh = init_cap * (pr_c / init_pr)
-                bh_final_val = float(bh.iloc[-1])
-                bh_return_pct = (bh_final_val / init_cap - 1.0) * 100.0
-                bh_ds = _ds(bh)
-                fig.add_trace(
-                    go.Scatter(x=bh_ds.index, y=bh_ds.values,
-                               mode="lines",
-                               name=f"Buy & Hold — final: {bh_final_val:,.0f} ({bh_return_pct:+.1f}%)",
-                               line=dict(color="#2ca02c", width=1.5, dash="dash")),
-                    secondary_y=False,
-                )
-                fig.add_annotation(
-                    x=bh_ds.index[-1], y=bh_final_val,
-                    text=f"B&H {bh_return_pct:+.1f}%<br>{bh_final_val:,.0f}",
-                    showarrow=True, arrowhead=2, arrowwidth=1,
-                    arrowcolor="#2ca02c",
-                    ax=40, ay=-30,
-                    font=dict(size=9, color="#2ca02c"),
-                    bgcolor="rgba(44,160,44,0.15)",
-                    bordercolor="#2ca02c", borderpad=3, borderwidth=1,
-                    xref="x", yref="y",
-                )
-        fig.add_trace(
-            go.Scatter(x=_ds(price).index, y=_ds(price).values,
-                       mode="lines", name="Prix asset",
-                       line=dict(color="#ff7f0e", width=1)),
-            secondary_y=True,
-        )
+            pr_c = aligned.loc[common]
+            init_pr = float(pr_c.iloc[0])
+            if np.isfinite(init_pr) and init_pr != 0:
+                bh_pct = (pr_c / init_pr - 1.0) * 100.0
+                bh_final_pct = float(bh_pct.iloc[-1])
 
-    fig.update_layout(height=420, template="plotly_dark",
-                      title=f"{_wid_label} — Valeur portfolio vs Buy&Hold + Prix")
-    fig.update_yaxes(title_text="Valeur portfolio", secondary_y=False)
-    fig.update_yaxes(title_text="Prix", secondary_y=True)
-    st.plotly_chart(fig, use_container_width=True)
+    # --- Graphique 1 : Prix de l'actif ---
+    fig_price = go.Figure()
+    if price_series is not None and not price_series.empty:
+        fig_price.add_trace(go.Scatter(
+            x=_ds(price_series).index, y=_ds(price_series).values,
+            mode="lines", name="Prix asset",
+            line=dict(color="#ff7f0e", width=1)
+        ))
+    fig_price.update_layout(
+        height=240, template="plotly_dark",
+        title=f"{_wid_label} — Prix de l'actif",
+        yaxis_title="Prix",
+        margin=dict(t=45, b=20)
+    )
+    st.plotly_chart(fig_price, use_container_width=True)
+
+    # --- Graphique 2 : Returns % (portfolio vs B&H) ---
+    fig_ret = go.Figure()
+    fig_ret.add_trace(go.Scatter(
+        x=_ds(pf_pct).index, y=_ds(pf_pct).values,
+        mode="lines", name=f"Portfolio ({pf_final_pct:+.1f}%)",
+        line=dict(color="#1f77b4", width=1.5)
+    ))
+    if bh_pct is not None:
+        bh_ds = _ds(bh_pct)
+        fig_ret.add_trace(go.Scatter(
+            x=bh_ds.index, y=bh_ds.values,
+            mode="lines", name=f"Buy & Hold ({bh_final_pct:+.1f}%)",
+            line=dict(color="#2ca02c", width=1.5, dash="dash")
+        ))
+        fig_ret.add_annotation(
+            x=bh_ds.index[-1], y=bh_final_pct,
+            text=f"B&H {bh_final_pct:+.1f}%",
+            showarrow=True, arrowhead=2, arrowwidth=1,
+            arrowcolor="#2ca02c", ax=45, ay=0,
+            font=dict(size=9, color="#2ca02c"),
+            bgcolor="rgba(44,160,44,0.15)",
+            bordercolor="#2ca02c", borderpad=3, borderwidth=1,
+            xref="x", yref="y",
+        )
+    pf_ds = _ds(pf_pct)
+    fig_ret.add_annotation(
+        x=pf_ds.index[-1], y=pf_final_pct,
+        text=f"Portfolio {pf_final_pct:+.1f}%",
+        showarrow=True, arrowhead=2, arrowwidth=1,
+        arrowcolor="#1f77b4", ax=45, ay=-20,
+        font=dict(size=9, color="#1f77b4"),
+        bgcolor="rgba(31,119,180,0.15)",
+        bordercolor="#1f77b4", borderpad=3, borderwidth=1,
+        xref="x", yref="y",
+    )
+    fig_ret.add_hline(y=0, line_dash="dot",
+                      line_color="rgba(255,255,255,0.25)", line_width=1)
+    fig_ret.update_layout(
+        height=320, template="plotly_dark",
+        title=f"{_wid_label} — Returns (%)",
+        yaxis_title="Return %",
+        margin=dict(t=45, b=20)
+    )
+    st.plotly_chart(fig_ret, use_container_width=True)
 
     # Trade stats summary
     try:

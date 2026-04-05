@@ -164,11 +164,15 @@ def get_param_grid(config):
         exit_macd_type_a_checked = bool(config.get('exit_macd_type_a', True))
         exit_macd_type_b_checked = bool(config.get('exit_macd_type_b', True))
 
-        param_grid['exit_sar_enabled'] = [True, False] if exit_sar_checked else [False]
+        _sar_opt = bool(config.get('optimize_exit_sar_enabled', True))
+        param_grid['exit_sar_enabled'] = [True, False] if (exit_sar_checked and _sar_opt) else [exit_sar_checked]
         if exit_macd_checked:
-            param_grid['exit_macd_enabled'] = [True, False]
-            param_grid['exit_macd_type_a'] = [True, False] if exit_macd_type_a_checked else [False]
-            param_grid['exit_macd_type_b'] = [True, False] if exit_macd_type_b_checked else [False]
+            _macd_opt = bool(config.get('optimize_exit_macd_enabled', True))
+            param_grid['exit_macd_enabled'] = [True, False] if _macd_opt else [True]
+            _ta_opt = bool(config.get('optimize_exit_macd_type_a', True))
+            param_grid['exit_macd_type_a'] = [True, False] if (exit_macd_type_a_checked and _ta_opt) else [exit_macd_type_a_checked]
+            _tb_opt = bool(config.get('optimize_exit_macd_type_b', True))
+            param_grid['exit_macd_type_b'] = [True, False] if (exit_macd_type_b_checked and _tb_opt) else [exit_macd_type_b_checked]
         else:
             param_grid['exit_macd_enabled'] = [False]
             param_grid['exit_macd_type_a'] = [False]
@@ -179,25 +183,33 @@ def get_param_grid(config):
     param_grid['order_fixed_cash'] = [float(config.get('order_fixed_cash', 10000.0))]
     param_grid['fees_pct'] = [float(config.get('fees_pct', 0.0))]
     param_grid['pqs_n_ref'] = [int(config.get('pqs_n_ref', 50))]
-    # Entry strictness toggle (kept fixed per run by default)
-    param_grid['use_roc_filter'] = [bool(config.get('use_roc_filter', True))]
-    param_grid['use_t2_signal'] = [bool(config.get('use_t2_signal', False))]
-    # use_divergence_bb is only meaningful when T2 is active.
-    # When T2 is disabled, collapse to fixed default to avoid a dead dimension.
+    # Entry filter toggles: [True, False] when enabled AND user opted to optimize, else fixed.
+    _roc_enabled = bool(config.get('use_roc_filter', True))
+    _roc_opt = bool(config.get('optimize_use_roc_filter', False))
+    param_grid['use_roc_filter'] = [True, False] if (_roc_enabled and _roc_opt) else [_roc_enabled]
     _t2_active = bool(config.get('use_t2_signal', False))
+    _t2_opt = bool(config.get('optimize_use_t2_signal', False))
+    param_grid['use_t2_signal'] = [True, False] if (_t2_active and _t2_opt) else [_t2_active]
+    # use_divergence_bb: only meaningful when T2 is active.
     if _t2_active:
-        _div_bb_values = config.get('use_divergence_bb_values')
-        if isinstance(_div_bb_values, list) and len(_div_bb_values) > 0:
-            param_grid['use_divergence_bb'] = [bool(v) for v in _div_bb_values]
-        else:
-            param_grid['use_divergence_bb'] = [bool(config.get('use_divergence_bb', True))]
+        _div_bb_enabled = bool(config.get('use_divergence_bb', True))
+        _div_bb_opt = bool(config.get('optimize_use_divergence_bb', False))
+        param_grid['use_divergence_bb'] = [True, False] if (_div_bb_enabled and _div_bb_opt) else [_div_bb_enabled]
     else:
-        param_grid['use_divergence_bb'] = [bool(config.get('use_divergence_bb', True))]
-    # Phase 5 exit toggles (fixed per run — not varied in grid)
-    param_grid['exit_cross_sar_sma_enabled'] = [bool(config.get('exit_cross_sar_sma_enabled', True))]
-    param_grid['exit_retour_bb_enabled'] = [bool(config.get('exit_retour_bb_enabled', False))]
-    param_grid['exit_regline_enabled'] = [bool(config.get('exit_regline_enabled', False))]
-    param_grid['exit_volat_down_enabled'] = [bool(config.get('exit_volat_down_enabled', False))]
+        param_grid['use_divergence_bb'] = [False]
+    # Phase 5 exit toggles: [True, False] when enabled AND user opted to optimize, else fixed.
+    _cross_sar_sma = bool(config.get('exit_cross_sar_sma_enabled', True))
+    _cross_opt = bool(config.get('optimize_exit_cross_sar_sma_enabled', False))
+    param_grid['exit_cross_sar_sma_enabled'] = [True, False] if (_cross_sar_sma and _cross_opt) else [_cross_sar_sma]
+    _retour_bb = bool(config.get('exit_retour_bb_enabled', False))
+    _retour_opt = bool(config.get('optimize_exit_retour_bb_enabled', False))
+    param_grid['exit_retour_bb_enabled'] = [True, False] if (_retour_bb and _retour_opt) else [_retour_bb]
+    _regline = bool(config.get('exit_regline_enabled', False))
+    _regline_opt = bool(config.get('optimize_exit_regline_enabled', False))
+    param_grid['exit_regline_enabled'] = [True, False] if (_regline and _regline_opt) else [_regline]
+    _volat_down = bool(config.get('exit_volat_down_enabled', False))
+    _volat_opt = bool(config.get('optimize_exit_volat_down_enabled', False))
+    param_grid['exit_volat_down_enabled'] = [True, False] if (_volat_down and _volat_opt) else [_volat_down]
     param_grid['macd_ma_type'] = [str(config.get('macd_ma_type', 'sma'))]
     # Fixed T0/T1 strategy params (Pine V6 defaults — not in optimisation grid)
     param_grid['depassement_sma_roc'] = [float(config.get('depassement_sma_roc', 0.01))]

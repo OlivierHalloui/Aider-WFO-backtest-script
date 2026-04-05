@@ -181,16 +181,28 @@ def render_strategy_panel() -> None:
 
             # --- T1: RoC filter ---
             st.markdown("##### 🔶 T1 — Filtre momentum RoC")
-            use_roc = st.checkbox(
-                "Activer filtre RoC",
-                value=bool(st.session_state.get("use_roc_filter", True)),
-                key="use_roc_filter",
-                help=(
-                    "Active le filtre de momentum RoC sur le signal T1. "
-                    "Désactiver supprime la condition RoC du signal d'entrée, "
-                    "ce qui augmente le nombre de trades mais réduit la sélectivité."
-                ),
-            )
+            col_roc_a, col_roc_o = st.columns([0.72, 0.28])
+            with col_roc_a:
+                use_roc = st.checkbox(
+                    "Activer filtre RoC",
+                    value=bool(st.session_state.get("use_roc_filter", True)),
+                    key="use_roc_filter",
+                    help=(
+                        "Active le filtre de momentum RoC sur le signal T1. "
+                        "Désactiver supprime la condition RoC du signal d'entrée, "
+                        "ce qui augmente le nombre de trades mais réduit la sélectivité."
+                    ),
+                )
+            with col_roc_o:
+                if use_roc:
+                    st.checkbox(
+                        "Optimiser on/off",
+                        value=st.session_state.get("optimize_use_roc_filter", False),
+                        key="optimize_use_roc_filter",
+                        help="Si coché, l'optimiseur teste avec et sans filtre RoC [True, False].",
+                    )
+                else:
+                    st.session_state["optimize_use_roc_filter"] = False
             if use_roc:
                 st.caption("Paramètres fixes — valeurs Pine V6 par défaut.")
                 c_roc1, c_roc2 = st.columns(2)
@@ -218,46 +230,60 @@ def render_strategy_panel() -> None:
 
             # --- T2 toggle ---
             st.markdown("##### 🟢 T2 — Signal final (breakout high après T1)")
-            use_t2 = st.checkbox(
-                "Activer signal T2",
-                value=st.session_state.get("use_t2_signal", False),
-                key="use_t2_signal",
-                help=(
-                    "T2 = T1[−1] AND high[t] > high[t−1].\n\n"
-                    "Ordre stop-buy placé au High de la barre T1 + mintick (0.01).\n\n"
-                    "Désactivé : entrée directe sur crossover de la bande supérieure (T1)."
-                ),
-            )
+            col_t2_a, col_t2_o = st.columns([0.72, 0.28])
+            with col_t2_a:
+                use_t2 = st.checkbox(
+                    "Activer signal T2",
+                    value=st.session_state.get("use_t2_signal", False),
+                    key="use_t2_signal",
+                    help=(
+                        "T2 = T1[−1] AND high[t] > high[t−1].\n\n"
+                        "Ordre stop-buy placé au High de la barre T1 + mintick (0.01).\n\n"
+                        "Désactivé : entrée directe sur crossover de la bande supérieure (T1)."
+                    ),
+                )
+            with col_t2_o:
+                if use_t2:
+                    st.checkbox(
+                        "Optimiser on/off",
+                        value=st.session_state.get("optimize_use_t2_signal", False),
+                        key="optimize_use_t2_signal",
+                        help="Si coché, l'optimiseur teste avec et sans signal T2 [True, False].",
+                    )
+                else:
+                    st.session_state["optimize_use_t2_signal"] = False
             if use_t2:
                 st.success(
                     "T2 activé : ordre stop-buy au High T1 + 0.01. "
                     "⚠️ Réduit le nombre de trades."
                 )
                 st.markdown("###### Filtre Divergence BB")
-                st.checkbox(
-                    "Activer filtre Divergence BB",
-                    value=st.session_state.get("use_divergence_bb", True),
-                    key="use_divergence_bb",
-                    help=(
-                        "Divergence BB = upper band ↑ ET lower band ↓ simultanément sur la barre T1.\n\n"
-                        "Filtre supplémentaire : T2 n'est valide que si les bandes sont en expansion "
-                        "sur la barre setup (T1)."
-                    ),
-                )
-                _optimize_div = st.checkbox(
-                    "Optimiser Divergence BB (True / False)",
-                    value=st.session_state.get("check_use_divergence_bb", False),
-                    key="check_use_divergence_bb",
-                    help="Si coché, l'optimiseur teste T2 avec et sans filtre Divergence BB.",
-                )
-                if _optimize_div:
-                    st.session_state["use_divergence_bb_values"] = [True, False]
-                    st.info("Divergence BB sera optimisée : [True, False].")
-                else:
-                    st.session_state["use_divergence_bb_values"] = None
+                col_div_a, col_div_o = st.columns([0.72, 0.28])
+                with col_div_a:
+                    use_div_bb = st.checkbox(
+                        "Activer filtre Divergence BB",
+                        value=st.session_state.get("use_divergence_bb", True),
+                        key="use_divergence_bb",
+                        help=(
+                            "Divergence BB = upper band ↑ ET lower band ↓ simultanément sur la barre T1.\n\n"
+                            "Filtre supplémentaire : T2 n'est valide que si les bandes sont en expansion "
+                            "sur la barre setup (T1)."
+                        ),
+                    )
+                with col_div_o:
+                    if use_div_bb:
+                        st.checkbox(
+                            "Optimiser on/off",
+                            value=st.session_state.get("optimize_use_divergence_bb", False),
+                            key="optimize_use_divergence_bb",
+                            help="Si coché, l'optimiseur teste avec et sans filtre Divergence BB [True, False].",
+                        )
+                    else:
+                        st.session_state["optimize_use_divergence_bb"] = False
             else:
                 st.info("T2 désactivé : entrée directe sur crossover bande supérieure (T1).")
-                st.session_state["use_divergence_bb_values"] = None
+                st.session_state["optimize_use_t2_signal"] = False
+                st.session_state["optimize_use_divergence_bb"] = False
 
         # -----------------------------------------------------------------------
         # TAB 2 — Sorties
@@ -277,7 +303,7 @@ def render_strategy_panel() -> None:
             st.divider()
 
             # --- SAR Exit ---
-            col_sar_hd, col_sar_toggle = st.columns([0.85, 0.15])
+            col_sar_hd, col_sar_toggle, col_sar_opt = st.columns([0.60, 0.18, 0.22])
             with col_sar_hd:
                 st.markdown("##### SAR Exit")
             with col_sar_toggle:
@@ -287,6 +313,16 @@ def render_strategy_panel() -> None:
                     key="exit_sar_enabled",
                     help="Sortie Parabolic SAR : crossunder(low, SAR_persistent) quand SAR > SMA. QTY=50% Pine.",
                 )
+            with col_sar_opt:
+                if sar_on:
+                    st.checkbox(
+                        "Opt.",
+                        value=st.session_state.get("optimize_exit_sar_enabled", True),
+                        key="optimize_exit_sar_enabled",
+                        help="Si coché, l'optimiseur teste SAR exit activé et désactivé [True, False].",
+                    )
+                else:
+                    st.session_state["optimize_exit_sar_enabled"] = False
             if sar_on:
                 c_s1, c_s2, c_s3 = st.columns(3)
                 with c_s1:
@@ -305,20 +341,32 @@ def render_strategy_panel() -> None:
 
             # --- Cross SAR/SMA Exit ---
             st.markdown("##### Cross SAR/SMA Exit")
-            st.checkbox(
-                "Activer cross SAR/SMA",
-                value=st.session_state.get("exit_cross_sar_sma_enabled", True),
-                key="exit_cross_sar_sma_enabled",
-                help=(
-                    "Sortie quand SMA croise sous SAR (SAR passe au-dessus de la SMA). "
-                    "QTY=100% Pine. Défaut Pine V6: activé."
-                ),
-            )
+            col_xss_a, col_xss_o = st.columns([0.72, 0.28])
+            with col_xss_a:
+                xss_on = st.checkbox(
+                    "Activer cross SAR/SMA",
+                    value=st.session_state.get("exit_cross_sar_sma_enabled", True),
+                    key="exit_cross_sar_sma_enabled",
+                    help=(
+                        "Sortie quand SMA croise sous SAR (SAR passe au-dessus de la SMA). "
+                        "QTY=100% Pine. Défaut Pine V6: activé."
+                    ),
+                )
+            with col_xss_o:
+                if xss_on:
+                    st.checkbox(
+                        "Optimiser on/off",
+                        value=st.session_state.get("optimize_exit_cross_sar_sma_enabled", False),
+                        key="optimize_exit_cross_sar_sma_enabled",
+                        help="Si coché, l'optimiseur teste avec et sans cross SAR/SMA [True, False].",
+                    )
+                else:
+                    st.session_state["optimize_exit_cross_sar_sma_enabled"] = False
 
             st.divider()
 
             # --- MACD Exit ---
-            col_macd_hd, col_macd_toggle = st.columns([0.85, 0.15])
+            col_macd_hd, col_macd_toggle, col_macd_opt = st.columns([0.60, 0.18, 0.22])
             with col_macd_hd:
                 st.markdown("##### MACD Exit")
             with col_macd_toggle:
@@ -328,6 +376,16 @@ def render_strategy_panel() -> None:
                     key="exit_macd_enabled",
                     help="Sortie sur croisement baissier MACD. QTY=25% Pine.",
                 )
+            with col_macd_opt:
+                if macd_on:
+                    st.checkbox(
+                        "Opt.",
+                        value=st.session_state.get("optimize_exit_macd_enabled", True),
+                        key="optimize_exit_macd_enabled",
+                        help="Si coché, l'optimiseur teste MACD exit activé et désactivé [True, False].",
+                    )
+                else:
+                    st.session_state["optimize_exit_macd_enabled"] = False
             if macd_on:
                 c_mt, c_ma, c_mb = st.columns(3)
                 with c_mt:
@@ -339,19 +397,40 @@ def render_strategy_panel() -> None:
                         help="SMA = fidèle Pine V6 (fast_ma=ta.sma). EMA = comportement historique Python.",
                     )
                 with c_ma:
-                    st.checkbox(
+                    type_a_on = st.checkbox(
                         "Type A (signal ↓)",
                         value=st.session_state.get("exit_macd_type_a", True),
                         key="exit_macd_type_a",
                         help="Croisement baissier MACD avec ligne signal en baisse (fn_MACD_croisement_type_A_bear).",
                     )
                 with c_mb:
-                    st.checkbox(
+                    type_b_on = st.checkbox(
                         "Type B (simple)",
                         value=st.session_state.get("exit_macd_type_b", True),
                         key="exit_macd_type_b",
                         help="Croisement baissier MACD simple sans condition sur le signal (fn_MACD_croisement_type_B_bear).",
                     )
+                c_oa, c_ob = st.columns(2)
+                with c_oa:
+                    if type_a_on:
+                        st.checkbox(
+                            "Opt. Type A",
+                            value=st.session_state.get("optimize_exit_macd_type_a", True),
+                            key="optimize_exit_macd_type_a",
+                            help="Optimiser Type A on/off [True, False].",
+                        )
+                    else:
+                        st.session_state["optimize_exit_macd_type_a"] = False
+                with c_ob:
+                    if type_b_on:
+                        st.checkbox(
+                            "Opt. Type B",
+                            value=st.session_state.get("optimize_exit_macd_type_b", True),
+                            key="optimize_exit_macd_type_b",
+                            help="Optimiser Type B on/off [True, False].",
+                        )
+                    else:
+                        st.session_state["optimize_exit_macd_type_b"] = False
                 c_f, c_s, c_sig = st.columns(3)
                 with c_f:
                     param_input('macd_fast_length', 'macd_fast_length', *DEFAULT_PARAM_GRID['macd_fast_length'])
@@ -372,15 +451,27 @@ def render_strategy_panel() -> None:
 
             col_ex1, col_ex2 = st.columns(2)
             with col_ex1:
-                st.checkbox(
-                    "Retour BB (pivot bas bande inf.)",
-                    value=st.session_state.get("exit_retour_bb_enabled", False),
-                    key="exit_retour_bb_enabled",
-                    help=(
-                        "Sortie sur pivot bas détecté sur la bande inférieure BB "
-                        "(fn_BB_retournement_lower_BB). QTY=50% Pine. Défaut: désactivé."
-                    ),
-                )
+                col_rbb_a, col_rbb_o = st.columns([0.65, 0.35])
+                with col_rbb_a:
+                    retour_bb_on = st.checkbox(
+                        "Retour BB (pivot bas bande inf.)",
+                        value=st.session_state.get("exit_retour_bb_enabled", False),
+                        key="exit_retour_bb_enabled",
+                        help=(
+                            "Sortie sur pivot bas détecté sur la bande inférieure BB "
+                            "(fn_BB_retournement_lower_BB). QTY=50% Pine. Défaut: désactivé."
+                        ),
+                    )
+                with col_rbb_o:
+                    if retour_bb_on:
+                        st.checkbox(
+                            "Opt.",
+                            value=st.session_state.get("optimize_exit_retour_bb_enabled", False),
+                            key="optimize_exit_retour_bb_enabled",
+                            help="Optimiser Retour BB on/off [True, False].",
+                        )
+                    else:
+                        st.session_state["optimize_exit_retour_bb_enabled"] = False
                 if st.session_state.get("exit_retour_bb_enabled", False):
                     c_pv1, c_pv2 = st.columns(2)
                     with c_pv1:
@@ -400,15 +491,27 @@ def render_strategy_panel() -> None:
                             help="Barres à droite du pivot bas (Bars_right_pivot=2).",
                         )
 
-                st.checkbox(
-                    "Regline Exit (crossunder régression linéaire)",
-                    value=st.session_state.get("exit_regline_enabled", False),
-                    key="exit_regline_enabled",
-                    help=(
-                        "Sortie quand le cours croise sous la droite de régression linéaire "
-                        "(ta.crossunder(close, ta.linreg)). QTY=100% Pine. Défaut: désactivé."
-                    ),
-                )
+                col_rl_a, col_rl_o = st.columns([0.65, 0.35])
+                with col_rl_a:
+                    regline_on = st.checkbox(
+                        "Regline Exit (crossunder régression linéaire)",
+                        value=st.session_state.get("exit_regline_enabled", False),
+                        key="exit_regline_enabled",
+                        help=(
+                            "Sortie quand le cours croise sous la droite de régression linéaire "
+                            "(ta.crossunder(close, ta.linreg)). QTY=100% Pine. Défaut: désactivé."
+                        ),
+                    )
+                with col_rl_o:
+                    if regline_on:
+                        st.checkbox(
+                            "Opt.",
+                            value=st.session_state.get("optimize_exit_regline_enabled", False),
+                            key="optimize_exit_regline_enabled",
+                            help="Optimiser Regline Exit on/off [True, False].",
+                        )
+                    else:
+                        st.session_state["optimize_exit_regline_enabled"] = False
                 if st.session_state.get("exit_regline_enabled", False):
                     c_rl1, c_rl2 = st.columns(2)
                     with c_rl1:
@@ -429,15 +532,27 @@ def render_strategy_panel() -> None:
                         )
 
             with col_ex2:
-                st.checkbox(
-                    "Baisse Volatilité (%BB crossunder)",
-                    value=st.session_state.get("exit_volat_down_enabled", False),
-                    key="exit_volat_down_enabled",
-                    help=(
-                        "Sortie quand BBR = (close−lower)/(upper−lower) croise sous seuil_overbought "
-                        "(BB_baisse_volat_signal_exit). QTY=25% Pine. Défaut: désactivé."
-                    ),
-                )
+                col_vd_a, col_vd_o = st.columns([0.65, 0.35])
+                with col_vd_a:
+                    volat_down_on = st.checkbox(
+                        "Baisse Volatilité (%BB crossunder)",
+                        value=st.session_state.get("exit_volat_down_enabled", False),
+                        key="exit_volat_down_enabled",
+                        help=(
+                            "Sortie quand BBR = (close−lower)/(upper−lower) croise sous seuil_overbought "
+                            "(BB_baisse_volat_signal_exit). QTY=25% Pine. Défaut: désactivé."
+                        ),
+                    )
+                with col_vd_o:
+                    if volat_down_on:
+                        st.checkbox(
+                            "Opt.",
+                            value=st.session_state.get("optimize_exit_volat_down_enabled", False),
+                            key="optimize_exit_volat_down_enabled",
+                            help="Optimiser Baisse Volatilité on/off [True, False].",
+                        )
+                    else:
+                        st.session_state["optimize_exit_volat_down_enabled"] = False
                 if st.session_state.get("exit_volat_down_enabled", False):
                     st.number_input(
                         "Seuil overbought BB",

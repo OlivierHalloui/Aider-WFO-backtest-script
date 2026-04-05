@@ -3148,6 +3148,18 @@ def get_current_config():
         'use_t2_signal': bool(st.session_state.get("use_t2_signal", False)),
         'use_divergence_bb': bool(st.session_state.get("use_divergence_bb", True)),
         'use_divergence_bb_values': st.session_state.get("use_divergence_bb_values"),
+        # Optimize flags: whether each boolean toggle is varied [True, False] in the grid
+        'optimize_exit_sar_enabled': bool(st.session_state.get("optimize_exit_sar_enabled", True)),
+        'optimize_exit_macd_enabled': bool(st.session_state.get("optimize_exit_macd_enabled", True)),
+        'optimize_exit_macd_type_a': bool(st.session_state.get("optimize_exit_macd_type_a", True)),
+        'optimize_exit_macd_type_b': bool(st.session_state.get("optimize_exit_macd_type_b", True)),
+        'optimize_use_roc_filter': bool(st.session_state.get("optimize_use_roc_filter", False)),
+        'optimize_use_t2_signal': bool(st.session_state.get("optimize_use_t2_signal", False)),
+        'optimize_use_divergence_bb': bool(st.session_state.get("optimize_use_divergence_bb", False)),
+        'optimize_exit_cross_sar_sma_enabled': bool(st.session_state.get("optimize_exit_cross_sar_sma_enabled", False)),
+        'optimize_exit_retour_bb_enabled': bool(st.session_state.get("optimize_exit_retour_bb_enabled", False)),
+        'optimize_exit_regline_enabled': bool(st.session_state.get("optimize_exit_regline_enabled", False)),
+        'optimize_exit_volat_down_enabled': bool(st.session_state.get("optimize_exit_volat_down_enabled", False)),
         'pqs_n_ref': int(st.session_state.get("pqs_n_ref", 50)),
         'macd_ma_type': str(st.session_state.get("macd_ma_type", "sma")),
         # Fixed strategy params (Pine V6 defaults — not in optimisation grid)
@@ -3207,13 +3219,15 @@ def get_current_config():
 
 
 def calculate_combinations(config):
-    """Calculates the total number of parameter combinations."""
+    """Calculates the total number of parameter combinations.
+
+    Mirrors get_param_grid() in main.py: numeric ranges + boolean toggle dims.
+    """
     total = 1
     if not config.get('selected_params'):
         return 0
 
-    # Dead-dimension guard: params of disabled exits are excluded from the count
-    # (mirrors the same logic in get_current_config to stay consistent).
+    # Dead-dimension guard: SAR/MACD numeric params excluded when exit disabled.
     _sar_on  = bool(config.get("exit_sar_enabled",  True))
     _macd_on = bool(config.get("exit_macd_enabled", True))
     _SAR_PARAMS  = {'sar_start', 'sar_increment', 'sar_maximum'}
@@ -3232,9 +3246,39 @@ def calculate_combinations(config):
         if p_step is None or p_step <= 0:
             continue
 
-        # Robust calculation for float steps — small epsilon absorbs rounding errors
-        count = int(np.floor((p_max - p_min + 1e-10) / p_step)) + 1
+        # Robust count: same epsilon formula as get_param_grid in main.py
+        count = int(np.floor((p_max - p_min + 1e-9) / p_step)) + 1
         total *= max(1, count)
+
+    # Boolean toggle dimensions — ×2 only when toggle is ON and user chose to optimize it.
+    def _opt(toggle_key, toggle_default, opt_key, opt_default):
+        return bool(config.get(toggle_key, toggle_default)) and bool(config.get(opt_key, opt_default))
+
+    if _opt('exit_sar_enabled', True, 'optimize_exit_sar_enabled', True):
+        total *= 2
+    if _macd_on:
+        if bool(config.get('optimize_exit_macd_enabled', True)):
+            total *= 2
+        if _opt('exit_macd_type_a', True, 'optimize_exit_macd_type_a', True):
+            total *= 2
+        if _opt('exit_macd_type_b', True, 'optimize_exit_macd_type_b', True):
+            total *= 2
+    if _opt('use_roc_filter', True, 'optimize_use_roc_filter', False):
+        total *= 2
+    _t2_active = bool(config.get('use_t2_signal', False))
+    if _t2_active:
+        if bool(config.get('optimize_use_t2_signal', False)):
+            total *= 2
+        if _opt('use_divergence_bb', True, 'optimize_use_divergence_bb', False):
+            total *= 2
+    if _opt('exit_cross_sar_sma_enabled', True, 'optimize_exit_cross_sar_sma_enabled', False):
+        total *= 2
+    if _opt('exit_retour_bb_enabled', False, 'optimize_exit_retour_bb_enabled', False):
+        total *= 2
+    if _opt('exit_regline_enabled', False, 'optimize_exit_regline_enabled', False):
+        total *= 2
+    if _opt('exit_volat_down_enabled', False, 'optimize_exit_volat_down_enabled', False):
+        total *= 2
 
     return total
 
@@ -3314,12 +3358,13 @@ def _build_config_filename(config):
 
     return f"config_wfo_{now_tag}_{period}_{timeframe}_{method}_{windows_label}_{trials_label}_{regime}.json"
 
-def run_final_backtest_logic():
+def run_final_backtest_logic(window_id=None):
     from ui.final_backtest_panel import run_final_backtest_logic as _run_final_backtest
     return _run_final_backtest(
         get_current_config=get_current_config,
         load_data=load_data,
         resolve_strategy_adapter=resolve_strategy_adapter,
+        window_id=window_id,
     )
 
 
@@ -3845,15 +3890,35 @@ if 'wfo_results' in st.session_state:
             key="final_file_path",
             help="Chemin du fichier de données pour le backtest final (si source locale)."
         )
+
+        # --- Window selector for final backtest ---
+        _fb_window_options = ["Meilleure fenêtre (auto)"] + [f"Fenêtre {w}" for w in _wfo_windows]
+        _fb_selected_label = st.selectbox(
+            "Fenêtre des paramètres",
+            options=_fb_window_options,
+            index=0,
+            key="final_backtest_window_selector",
+            disabled=not _wfo_windows,
+            help=(
+                "Sélectionner la fenêtre WFO dont les paramètres seront utilisés pour le final backtest. "
+                "'Meilleure fenêtre (auto)' utilise le score combiné IS+OOS pour choisir automatiquement."
+            ),
+        )
+        _fb_window_id = None
+        if _fb_selected_label != "Meilleure fenêtre (auto)" and _wfo_windows:
+            _fb_idx = _fb_window_options.index(_fb_selected_label) - 1
+            if 0 <= _fb_idx < len(_wfo_windows):
+                _fb_window_id = _wfo_windows[_fb_idx]
+
         if st.button(
             "🏆 Run Final Backtest",
             width="stretch",
             help=(
                 "Exécute un backtest complet avec le jeu de paramètres final. "
-                "Source: best_window ou robust_set selon les options Robust Tests."
+                "Source: fenêtre sélectionnée ou best_window/robust_set selon options."
             )
         ):
-            run_final_backtest_logic()
+            run_final_backtest_logic(window_id=_fb_window_id)
 
 # ==============================================================================
 # CACHED FIGURE BUILDERS
@@ -4255,8 +4320,9 @@ if 'wfo_results' in st.session_state:
 
             # Create a table showing the best parameters for each WFO window
             if not params_df.empty:
-                _fig_table = _cached_params_table(_results_cache_key, params_df)
-                st.plotly_chart(_fig_table, use_container_width=True)
+                _display_df = _arrow_safe_df(params_df.copy())
+                _display_df.insert(0, "Window", range(1, len(_display_df) + 1))
+                st.dataframe(_display_df, use_container_width=True, hide_index=True)
 
             st.subheader("Robust Set (Level 1)")
             robust_summary = results.get("robust_set_summary", {}) if isinstance(results, dict) else {}
@@ -5603,15 +5669,13 @@ if 'wfo_results' in st.session_state:
                 value_series = pd.to_numeric(value_series, errors="coerce").dropna()
                 if value_series.empty:
                     raise ValueError("Portfolio value series is empty after cleaning.")
-                value_series_plot = _downsample_series(value_series, max_points=max_points)
 
-                fig_value = make_subplots(specs=[[{"secondary_y": True}]])
-                fig_value.add_trace(
-                    go.Scatter(x=value_series_plot.index, y=value_series_plot.values, mode="lines", name="Portfolio Value"),
-                    secondary_y=False
-                )
+                # Compute portfolio % return from start
+                pf_pct = (value_series / float(value_series.iloc[0]) - 1.0) * 100.0
+                pf_pct_plot = _downsample_series(pf_pct, max_points=max_points)
+                pf_final_pct = float(pf_pct.iloc[-1])
 
-                # Overlay price on secondary axis if available
+                # Gather price data
                 price_series = None
                 price_df = st.session_state.get('final_backtest_df')
                 if price_df is None or price_df.empty:
@@ -5626,59 +5690,77 @@ if 'wfo_results' in st.session_state:
                         price_series = pd.Series(price_series)
                     price_series = pd.to_numeric(price_series, errors="coerce").dropna()
 
-                    # Buy & Hold benchmark on the same capital base as Portfolio Value.
+                # --- Graphique 1 : Prix de l'actif ---
+                fig_price = go.Figure()
+                if price_series is not None and not price_series.empty:
+                    price_plot = _downsample_series(price_series, max_points=max_points)
+                    fig_price.add_trace(go.Scatter(
+                        x=price_plot.index, y=price_plot.values,
+                        mode="lines", name="Asset Price",
+                        line=dict(color="#FF7F0E", width=1)
+                    ))
+                fig_price.update_layout(
+                    height=260, template="plotly_dark",
+                    title="Prix de l'actif",
+                    yaxis_title="Prix",
+                    margin=dict(t=45, b=20)
+                )
+                st.plotly_chart(fig_price, use_container_width=True)
+
+                # --- Graphique 2 : Returns % (portfolio vs B&H) ---
+                fig_ret = go.Figure()
+                fig_ret.add_trace(go.Scatter(
+                    x=pf_pct_plot.index, y=pf_pct_plot.values,
+                    mode="lines", name=f"Portfolio ({pf_final_pct:+.1f}%)",
+                    line=dict(color="#1f77b4", width=1.5)
+                ))
+                # B&H % return
+                if price_series is not None and not price_series.empty:
                     aligned_price = price_series.reindex(value_series.index).ffill().bfill().dropna()
                     common_index = value_series.index.intersection(aligned_price.index)
                     if len(common_index) > 1:
-                        portfolio_common = value_series.loc[common_index]
                         price_common = aligned_price.loc[common_index]
-                        initial_capital = float(portfolio_common.iloc[0])
                         initial_price = float(price_common.iloc[0])
-                        if np.isfinite(initial_capital) and np.isfinite(initial_price) and initial_price != 0:
-                            buy_hold_series = initial_capital * (price_common / initial_price)
-                            bh_final_val = float(buy_hold_series.iloc[-1])
-                            bh_return_pct = (bh_final_val / initial_capital - 1.0) * 100.0
-                            buy_hold_series = _downsample_series(buy_hold_series, max_points=max_points)
-                            fig_value.add_trace(
-                                go.Scatter(
-                                    x=buy_hold_series.index,
-                                    y=buy_hold_series.values,
-                                    mode="lines",
-                                    name=f"Buy & Hold (même capital) — final: {bh_final_val:,.0f} ({bh_return_pct:+.1f}%)",
-                                    line=dict(color="#2CA02C", width=1.5, dash="dash")
-                                ),
-                                secondary_y=False
-                            )
-                            # Annotate final B&H value at the end of the line
-                            fig_value.add_annotation(
-                                x=buy_hold_series.index[-1],
-                                y=bh_final_val,
-                                text=f"B&H {bh_return_pct:+.1f}%<br>{bh_final_val:,.0f}",
+                        if np.isfinite(initial_price) and initial_price != 0:
+                            bh_pct = (price_common / initial_price - 1.0) * 100.0
+                            bh_final_pct = float(bh_pct.iloc[-1])
+                            bh_pct_plot = _downsample_series(bh_pct, max_points=max_points)
+                            fig_ret.add_trace(go.Scatter(
+                                x=bh_pct_plot.index, y=bh_pct_plot.values,
+                                mode="lines",
+                                name=f"Buy & Hold ({bh_final_pct:+.1f}%)",
+                                line=dict(color="#2CA02C", width=1.5, dash="dash")
+                            ))
+                            fig_ret.add_annotation(
+                                x=bh_pct_plot.index[-1], y=bh_final_pct,
+                                text=f"B&H {bh_final_pct:+.1f}%",
                                 showarrow=True, arrowhead=2, arrowwidth=1,
-                                arrowcolor="#2CA02C",
-                                ax=40, ay=-30,
+                                arrowcolor="#2CA02C", ax=45, ay=0,
                                 font=dict(size=9, color="#2CA02C"),
                                 bgcolor="rgba(44,160,44,0.15)",
                                 bordercolor="#2CA02C", borderpad=3, borderwidth=1,
                                 xref="x", yref="y",
                             )
+                fig_ret.add_annotation(
+                    x=pf_pct_plot.index[-1], y=pf_final_pct,
+                    text=f"Portfolio {pf_final_pct:+.1f}%",
+                    showarrow=True, arrowhead=2, arrowwidth=1,
+                    arrowcolor="#1f77b4", ax=45, ay=-20,
+                    font=dict(size=9, color="#1f77b4"),
+                    bgcolor="rgba(31,119,180,0.15)",
+                    bordercolor="#1f77b4", borderpad=3, borderwidth=1,
+                    xref="x", yref="y",
+                )
+                fig_ret.add_hline(y=0, line_dash="dot",
+                                  line_color="rgba(255,255,255,0.25)", line_width=1)
+                fig_ret.update_layout(
+                    height=340, template="plotly_dark",
+                    title="Returns (%)",
+                    yaxis_title="Return %",
+                    margin=dict(t=45, b=20)
+                )
+                st.plotly_chart(fig_ret, use_container_width=True)
 
-                    price_series = _downsample_series(price_series, max_points=max_points)
-                    fig_value.add_trace(
-                        go.Scatter(
-                            x=price_series.index,
-                            y=price_series.values,
-                            mode="lines",
-                            name="Asset Price",
-                            line=dict(color="#FF7F0E", width=1)
-                        ),
-                        secondary_y=True
-                    )
-
-                fig_value.update_layout(height=400, template="plotly_dark", title="Portfolio Value vs Buy & Hold + Asset Price (Downsampled)")
-                fig_value.update_yaxes(title_text="Portfolio Value", secondary_y=False)
-                fig_value.update_yaxes(title_text="Asset Price", secondary_y=True)
-                st.plotly_chart(fig_value, use_container_width=True)
             except Exception as e:
                 st.warning(f"Plot skipped due to size or data issue: {e}")
             
