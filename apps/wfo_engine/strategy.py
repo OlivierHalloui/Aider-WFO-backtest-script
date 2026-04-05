@@ -504,6 +504,8 @@ def create_signal_generators(df, **params):
     cross_sar_sma_short_signal   = None
     sar_short_exit_signal        = None
     retour_bb_short_exit_signal  = None
+    regline_short_signal         = None
+    volat_up_exit_signal         = None
 
     if strategy_direction in ('short_only', 'both'):
         # --- T1 short entry: bearish RoC filter ---
@@ -520,14 +522,14 @@ def create_signal_generators(df, **params):
             depassement_roc_short_ind.signal).astype(bool)
 
         # --- SMA short exit: close crosses ABOVE SMA ---
+        # SMA exit has no separate enable flag in long mode (always active).
+        # Mirror: always active for short mode too.
         sma_short_ind = SMAShortExit.run(
             close=close_price_aligned,
             user_exit_sma_length=user_exit_sma_length,
             per_column=True
         )
         sma_short_exit_signal = normalize_columns(sma_short_ind.signal).astype(bool)
-        if not bool(exit_sar_enabled):   # reuse same on/off toggle as long SAR
-            sma_short_exit_signal[:] = False
 
         # --- SAR short exit: SAR crosses BELOW close (price recovers) ---
         # sar_signal contains raw SAR values (not boolean)
@@ -606,6 +608,97 @@ def create_signal_generators(df, **params):
             retour_bb_short_exit_signal = normalize_columns(
                 pivot_high_ind.signal).astype(bool)
 
+        # --- Regline short exit: close crosses ABOVE linreg (crossover) ---
+        # Mirror of regline long exit (crossunder). Reuses cached linreg signal series.
+        if bool(exit_regline_enabled) and regline_signal is not None:
+            # linreg_exit_nb detects crossunder (long). For short we need crossover.
+            # Reconstruct the crossover from close and the cached regline series.
+            # We compute it inline to avoid duplicating the expensive linreg calculation.
+            _linreg_key_s = (
+                "linreg",
+                int(nombre_periodes_reglin) if np.isscalar(nombre_periodes_reglin) else None,
+                int(i_bars_back) if np.isscalar(i_bars_back) else None,
+                _df_sig,
+            )
+            # Reuse the same LinregExit indicator but detect crossover instead of crossunder.
+            # We build the crossover signal directly from close and the linreg value series.
+            # Since linreg_exit_nb only returns the crossunder boolean, we need the raw
+            # linreg values — compute them via a second LinregExit run on a reversed series
+            # is too expensive; instead we build an inline pandas crossover:
+            _cl_aligned = close_price_aligned
+            # shift(1) gives previous bar; crossover = prev_close < prev_linreg AND close > linreg
+            # We approximate linreg via the regline_signal to avoid recomputing:
+            # regline_signal[t]=True means close crossed UNDER linreg at t (long exit).
+            # For short exit we need: close crosses OVER linreg. This is NOT simply ~regline_signal.
+            # We use LinregExit re-run on -close to get the crossover (algebraic mirror):
+            _linreg_short_key = (
+                "linreg_short",
+                int(nombre_periodes_reglin) if np.isscalar(nombre_periodes_reglin) else None,
+                int(i_bars_back) if np.isscalar(i_bars_back) else None,
+                _df_sig,
+            )
+            _linreg_short_cached = (
+                _WINDOW_INDICATOR_CACHE.get(_linreg_short_key)
+                if None not in _linreg_short_key else None
+            )
+            if _linreg_short_cached is not None:
+                regline_short_signal = _linreg_short_cached
+            else:
+                # Run LinregExit on negated close — crossunder(-close, linreg(-close))
+                # is equivalent to crossover(close, linreg(close)).
+                _neg_close = -close_price_aligned
+                _linreg_short_ind = LinregExit.run(
+                    close=_neg_close,
+                    length=nombre_periodes_reglin,
+                    offset=i_bars_back,
+                    per_column=True
+                )
+                regline_short_signal = normalize_columns(_linreg_short_ind.signal).astype(bool)
+                if None not in _linreg_short_key:
+                    _WINDOW_INDICATOR_CACHE[_linreg_short_key] = regline_short_signal
+        else:
+            regline_short_signal = None
+
+        # --- Volat up short exit: %BB crosses ABOVE (1 - seuil_overbought) ---
+        # Mirror of volat_down exit (long): price was in lower %BB zone, recovers upward.
+        # Signal = BBR[i-1] < (1-seuil) AND BBR[i] >= (1-seuil).
+        if bool(exit_volat_down_enabled):
+            seuil_oversold = 1.0 - (
+                float(seuil_overbought_bb) if np.isscalar(seuil_overbought_bb)
+                else float(np.asarray(seuil_overbought_bb).flat[0])
+            )
+            # Run VolatDownExit on mirrored %BB: %BB_short = (upper-close)/(upper-lower)
+            # which equals (1 - %BB_long). crossunder(%BB_short, 1-seuil) == crossover(%BB_long, seuil-1+1=seuil)
+            # Simpler: pass seuil_oversold as threshold to VolatDownExit on the mirrored series.
+            _vup_key = (
+                "volat_up",
+                round(float(seuil_overbought_bb) if np.isscalar(seuil_overbought_bb)
+                      else float(np.asarray(seuil_overbought_bb).flat[0]), 6),
+                _df_sig,
+            )
+            _vup_cached = _WINDOW_INDICATOR_CACHE.get(_vup_key) if None not in _vup_key else None
+            if _vup_cached is not None:
+                volat_up_exit_signal = _vup_cached
+            else:
+                # %BB_short = (upper - close) / (upper - lower) = 1 - %BB_long.
+                # crossunder(%BB_short, seuil_oversold) == crossover(%BB_long, 1-seuil_oversold)
+                # Reuse VolatDownExit factory on the flipped series.
+                _upper_a = upper_band
+                _lower_a = lower_band
+                _mirrored_close = _upper_a + _lower_a - close_price_aligned
+                _vup_ind = VolatDownExit.run(
+                    close=_mirrored_close,
+                    upper=_upper_a,
+                    lower=_lower_a,
+                    seuil_overbought=seuil_oversold,
+                    per_column=True
+                )
+                volat_up_exit_signal = normalize_columns(_vup_ind.signal).astype(bool)
+                if None not in _vup_key:
+                    _WINDOW_INDICATOR_CACHE[_vup_key] = volat_up_exit_signal
+        else:
+            volat_up_exit_signal = None
+
     return {
         'upper_band': upper_band,
         'lower_band': lower_band,
@@ -636,6 +729,8 @@ def create_signal_generators(df, **params):
         'macd_short_exit_signal': macd_short_exit_signal_out,
         'cross_sar_sma_short_exit_signal': cross_sar_sma_short_signal,
         'retour_bb_short_exit_signal': retour_bb_short_exit_signal,
+        'regline_short_exit_signal': regline_short_signal,
+        'volat_up_exit_signal': volat_up_exit_signal,
     }
 
 def create_entry_exit_conditions(df, signals):
@@ -782,7 +877,8 @@ def create_entry_exit_conditions(df, signals):
             short_exit_condition = short_exit_condition | _macd_s.astype(bool)
         if _xss_s is not None:
             short_exit_condition = short_exit_condition | _xss_s
-        for key in ('retour_bb_short_exit_signal',):
+        for key in ('retour_bb_short_exit_signal', 'regline_short_exit_signal',
+                    'volat_up_exit_signal'):
             sig = signals.get(key)
             if sig is not None:
                 short_exit_condition = short_exit_condition | sig
