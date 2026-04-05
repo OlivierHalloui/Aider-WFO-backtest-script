@@ -3162,6 +3162,7 @@ def get_current_config():
         'optimize_exit_volat_down_enabled': bool(st.session_state.get("optimize_exit_volat_down_enabled", False)),
         'pqs_n_ref': int(st.session_state.get("pqs_n_ref", 50)),
         'macd_ma_type': str(st.session_state.get("macd_ma_type", "sma")),
+        'strategy_direction': str(st.session_state.get("strategy_direction", "long_only")),
         # Fixed strategy params (Pine V6 defaults — not in optimisation grid)
         'nb_bars_under_bbw_mini': int(st.session_state.get("nb_bars_under_bbw_mini", 4)),
         'nb_bars_entre_bb': int(st.session_state.get("nb_bars_entre_bb", 5)),

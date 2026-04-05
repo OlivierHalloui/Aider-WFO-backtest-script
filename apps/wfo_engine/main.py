@@ -211,6 +211,8 @@ def get_param_grid(config):
     _volat_opt = bool(config.get('optimize_exit_volat_down_enabled', False))
     param_grid['exit_volat_down_enabled'] = [True, False] if (_volat_down and _volat_opt) else [_volat_down]
     param_grid['macd_ma_type'] = [str(config.get('macd_ma_type', 'sma'))]
+    # Strategy direction — fixed per run (optimize long and short separately)
+    param_grid['strategy_direction'] = [str(config.get('strategy_direction', 'long_only'))]
     # Fixed T0/T1 strategy params (Pine V6 defaults — not in optimisation grid)
     param_grid['depassement_sma_roc'] = [float(config.get('depassement_sma_roc', 0.01))]
     param_grid['roc_max_t1'] = [float(config.get('roc_max_t1', 100.0))]

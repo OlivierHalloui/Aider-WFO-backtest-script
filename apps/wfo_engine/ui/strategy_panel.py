@@ -137,6 +137,33 @@ def render_strategy_panel() -> None:
                 "Cochez ✅ pour inclure dans l'optimisation par grille."
             )
 
+            # --- Direction de la stratégie ---
+            st.markdown("##### 🧭 Direction")
+            _dir_labels = {
+                'long_only':  '📈 Long uniquement (défaut)',
+                'short_only': '📉 Short uniquement (vente à découvert)',
+                'both':       '↕️ Long + Short',
+            }
+            _dir_current = st.session_state.get('strategy_direction', 'long_only')
+            _dir_idx = list(_dir_labels.keys()).index(_dir_current) \
+                if _dir_current in _dir_labels else 0
+            st.selectbox(
+                "Direction de la stratégie",
+                options=list(_dir_labels.keys()),
+                format_func=lambda x: _dir_labels[x],
+                index=_dir_idx,
+                key="strategy_direction",
+                help=(
+                    "**Long uniquement** : comportement actuel — entre quand le prix casse "
+                    "au-dessus de la bande supérieure BB (T1/T2).\n\n"
+                    "**Short uniquement** : entre quand le prix casse EN-DESSOUS de la bande "
+                    "inférieure BB. Sorties symétriques (SMA crossover, SAR, MACD inversés).\n\n"
+                    "**Long + Short** : les deux directions actives simultanément. "
+                    "Optimiser long et short séparément en premier pour valider chaque direction."
+                ),
+            )
+            st.divider()
+
             # --- T0: Bollinger Bands ---
             st.markdown("##### 🔷 T0 — Bandes de Bollinger")
             col_bb1, col_bb2 = st.columns(2)

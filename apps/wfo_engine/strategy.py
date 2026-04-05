@@ -6,9 +6,11 @@ from metrics import trade_stat, calc_pqs
 from indicators import (
     EcartBollingerBorne, BollingerHorizontal,
     CrossBBWLowSignal, NbBarsUnderBBW, BBandCrossBarssince,
-    DepassementRoCLong,
-    SMAExit, ParabolicSAR, MACDExit,
-    CrossSARSMAExit, PivotLow, LinregExit, VolatDownExit
+    DepassementRoCLong, DepassementRoCShort,
+    SMAExit, SMAShortExit, ParabolicSAR,
+    MACDExit, MACDShortExit,
+    CrossSARSMAExit, CrossSARSMAShortExit,
+    PivotLow, PivotHigh, LinregExit, VolatDownExit,
 )
 
 # ======================================================================
@@ -89,6 +91,7 @@ def create_signal_generators(df, **params):
         'exit_retour_bb_enabled': False, 'nb_bars_left_pivot': 2, 'nb_bars_right_pivot': 2,
         'exit_regline_enabled': False, 'nombre_periodes_reglin': 15, 'i_bars_back': 1,
         'exit_volat_down_enabled': False, 'seuil_overbought_bb': 0.85,
+        'strategy_direction': 'long_only',
     }
 
     def is_array_like(val):
@@ -181,8 +184,11 @@ def create_signal_generators(df, **params):
     # Pre-expanding price columns together with vectorized params can create cartesian
     # products (N inputs x N params) and break shape alignment.
     close_price = df['Close']
-    high_price = df['High']
-    low_price = df['Low']
+    open_price  = df['Open']
+    high_price  = df['High']
+    low_price   = df['Low']
+
+    strategy_direction = str(p.get('strategy_direction', 'long_only'))
 
     def normalize_columns(obj):
         """Ensure deterministic unique columns to avoid many-to-many label alignment."""
@@ -491,6 +497,115 @@ def create_signal_generators(df, **params):
         )
         volat_down_signal = normalize_columns(volat_down_ind.signal).astype(bool)
 
+    # ── SHORT SIGNALS (generated only when direction requires it) ──────────
+    depassement_roc_short_signal = None
+    sma_short_exit_signal        = None
+    macd_short_exit_signal_out   = None
+    cross_sar_sma_short_signal   = None
+    sar_short_exit_signal        = None
+    retour_bb_short_exit_signal  = None
+
+    if strategy_direction in ('short_only', 'both'):
+        # --- T1 short entry: bearish RoC filter ---
+        depassement_roc_short_ind = DepassementRoCShort.run(
+            close=close_price_aligned,
+            open_=open_price,
+            high=high_price_aligned,
+            low=low_price_aligned,
+            depass_sma_roc=depassement_sma_roc,
+            roc_max=roc_max_t1,
+            per_column=True
+        )
+        depassement_roc_short_signal = normalize_columns(
+            depassement_roc_short_ind.signal).astype(bool)
+
+        # --- SMA short exit: close crosses ABOVE SMA ---
+        sma_short_ind = SMAShortExit.run(
+            close=close_price_aligned,
+            user_exit_sma_length=user_exit_sma_length,
+            per_column=True
+        )
+        sma_short_exit_signal = normalize_columns(sma_short_ind.signal).astype(bool)
+        if not bool(exit_sar_enabled):   # reuse same on/off toggle as long SAR
+            sma_short_exit_signal[:] = False
+
+        # --- SAR short exit: SAR crosses BELOW close (price recovers) ---
+        # sar_signal contains raw SAR values (not boolean)
+        close_price_aligned_s = close_price_aligned
+        prev_sar_s = sar_signal.shift(1)
+        prev_close_s = close_price_aligned_s.shift(1)
+        if hasattr(sar_signal, "columns"):
+            sar_short_arr = (
+                prev_close_s.to_numpy() < prev_sar_s.to_numpy()
+            ) & (
+                close_price_aligned_s.to_numpy() > sar_signal.to_numpy()
+            )
+            sar_short_exit_signal = _bool_fill(pd.DataFrame(
+                sar_short_arr,
+                index=sar_signal.index,
+                columns=sar_signal.columns
+            ))
+        else:
+            sar_short_exit_signal = _bool_fill(
+                (prev_close_s < prev_sar_s) &
+                (close_price_aligned_s > sar_signal)
+            )
+        if not bool(exit_sar_enabled):
+            sar_short_exit_signal[:] = False
+
+        # --- MACD short exit: MACD crosses ABOVE signal line ---
+        if bool(exit_macd_enabled):
+            _macd_short_key = (
+                "macd_short",
+                int(macd_fast_length) if np.isscalar(macd_fast_length) else None,
+                int(macd_slow_length) if np.isscalar(macd_slow_length) else None,
+                int(macd_signal_length) if np.isscalar(macd_signal_length) else None,
+                bool(exit_macd_type_a) if np.isscalar(exit_macd_type_a) else None,
+                bool(exit_macd_type_b) if np.isscalar(exit_macd_type_b) else None,
+                bool(use_sma),
+                _df_sig,
+            )
+            _macd_short_cached = (
+                _WINDOW_INDICATOR_CACHE.get(_macd_short_key)
+                if None not in _macd_short_key else None
+            )
+            if _macd_short_cached is not None:
+                macd_short_exit_signal_out = _macd_short_cached
+            else:
+                _macd_short_ind = MACDShortExit.run(
+                    close=close_price_aligned,
+                    fast_length=macd_fast_length,
+                    slow_length=macd_slow_length,
+                    signal_length=macd_signal_length,
+                    use_type_a=exit_macd_type_a,
+                    use_type_b=exit_macd_type_b,
+                    use_sma=use_sma,
+                    per_column=True
+                )
+                macd_short_exit_signal_out = normalize_columns(_macd_short_ind.signal)
+                if None not in _macd_short_key:
+                    _WINDOW_INDICATOR_CACHE[_macd_short_key] = macd_short_exit_signal_out
+
+        # --- Cross SAR/SMA short exit: SAR crosses BELOW SMA ---
+        if bool(exit_cross_sar_sma_enabled):
+            cross_sar_sma_short_ind = CrossSARSMAShortExit.run(
+                sma=sma_series,
+                sar=sar_signal,
+            )
+            cross_sar_sma_short_signal = normalize_columns(
+                cross_sar_sma_short_ind.signal).astype(bool)
+
+        # --- Retour BB short exit: pivot HIGH on upper band ---
+        if bool(exit_retour_bb_enabled):
+            pivot_high_ind = PivotHigh.run(
+                series=upper_band,
+                left=nb_bars_left_pivot,
+                right=nb_bars_right_pivot,
+                per_column=True
+            )
+            retour_bb_short_exit_signal = normalize_columns(
+                pivot_high_ind.signal).astype(bool)
+
     return {
         'upper_band': upper_band,
         'lower_band': lower_band,
@@ -504,6 +619,8 @@ def create_signal_generators(df, **params):
         'use_roc_filter': use_roc_filter,
         'use_t2_signal': use_t2_signal,
         'use_divergence_bb': use_divergence_bb,
+        'strategy_direction': strategy_direction,
+        # Long exits
         'sma_exit_signal': _sma_exit_signal,
         'sar_exit_signal': sar_exit_signal,
         'macd_exit_signal': macd_exit_signal.astype(bool),
@@ -511,6 +628,14 @@ def create_signal_generators(df, **params):
         'retour_bb_exit_signal': retour_bb_signal,
         'regline_exit_signal': regline_signal,
         'volat_down_exit_signal': volat_down_signal,
+        # Short entry
+        'depassement_roc_short_signal': depassement_roc_short_signal,
+        # Short exits
+        'sma_short_exit_signal': sma_short_exit_signal,
+        'sar_short_exit_signal': sar_short_exit_signal,
+        'macd_short_exit_signal': macd_short_exit_signal_out,
+        'cross_sar_sma_short_exit_signal': cross_sar_sma_short_signal,
+        'retour_bb_short_exit_signal': retour_bb_short_exit_signal,
     }
 
 def create_entry_exit_conditions(df, signals):
@@ -612,7 +737,60 @@ def create_entry_exit_conditions(df, signals):
             exit_condition = exit_condition | sig
     exit_condition = _bool_fill(exit_condition)
 
-    return entry_condition, exit_condition, t2_entry_price
+    # ── SHORT SIGNALS ──────────────────────────────────────────────────────
+    strategy_direction = signals.get('strategy_direction', 'long_only')
+    short_entry_condition = None
+    short_exit_condition  = None
+    t2_short_entry_price  = None
+
+    if strategy_direction in ('short_only', 'both'):
+        lower_band = signals['lower_band']
+        prev_lower = lower_band.shift(1)
+
+        # T1 short: close crosses BELOW lower band
+        crossunder_lower = lower_band.gt(close, axis=0) & prev_lower.le(prev_close, axis=0)
+        _t0_cross_short = (T0 | _bool_fill(T0.shift(1))) & crossunder_lower
+        if signals.get('use_roc_filter', True) and signals.get('depassement_roc_short_signal') is not None:
+            T1_short = _t0_cross_short & signals['depassement_roc_short_signal']
+        else:
+            T1_short = _t0_cross_short
+
+        # T2 short (optional): Low[t] < Low[t-1] after T1_short bar
+        if use_t2:
+            low = df['Low']
+            _breakout_short = low.lt(low.shift(1), axis=0) & _bool_fill(T1_short.shift(1))
+            T2_short = (_breakout_short & _div_on_t1) if use_div_bb else _breakout_short
+            short_entry_condition = _bool_fill(T2_short)
+            t2_short_entry_price  = low.shift(1) - _MINTICK   # stop-sell fill
+        else:
+            short_entry_condition = _bool_fill(T1_short)
+
+        # Short exit: combination of all enabled short exit signals
+        _sma_s   = signals.get('sma_short_exit_signal')
+        _sar_s   = signals.get('sar_short_exit_signal')
+        _macd_s  = signals.get('macd_short_exit_signal')
+        _xss_s   = signals.get('cross_sar_sma_short_exit_signal')
+
+        # Start from a zero baseline
+        _false_base = _bool_fill(close * 0 == 1)   # all-False, same shape as close
+        short_exit_condition = _false_base
+        if _sma_s is not None:
+            short_exit_condition = short_exit_condition | _sma_s
+        if _sar_s is not None:
+            short_exit_condition = short_exit_condition | _sar_s
+        if _macd_s is not None:
+            short_exit_condition = short_exit_condition | _macd_s.astype(bool)
+        if _xss_s is not None:
+            short_exit_condition = short_exit_condition | _xss_s
+        for key in ('retour_bb_short_exit_signal',):
+            sig = signals.get(key)
+            if sig is not None:
+                short_exit_condition = short_exit_condition | sig
+        short_exit_condition = _bool_fill(short_exit_condition)
+
+    return entry_condition, exit_condition, t2_entry_price, \
+           short_entry_condition, short_exit_condition, t2_short_entry_price
+
 
 def run_backtest(df, params, timeframe='5s', return_portfolio=True):
     """
@@ -645,7 +823,9 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
         raise RuntimeError(f"Error in create_signal_generators: {e}")
     
     # Create entry and exit conditions (vectorized)
-    entry_condition, exit_condition, t2_entry_price = create_entry_exit_conditions(df, signals)
+    (entry_condition, exit_condition, t2_entry_price,
+     short_entry_condition, short_exit_condition, t2_short_entry_price) = \
+        create_entry_exit_conditions(df, signals)
 
     def _scalar_param(value, default):
         if hasattr(value, "__len__") and not isinstance(value, (str, bytes, dict)):
@@ -683,17 +863,40 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
     else:
         exec_price = df['Close']
 
-    portfolio = vbt.Portfolio.from_signals(
+    _direction = str(params.get('strategy_direction', 'long_only')).lower()
+
+    # In short_only mode, suppress long entries to avoid accidental longs
+    _entries = entry_condition if _direction in ('long_only', 'both') else \
+        _bool_fill(entry_condition * False)
+    _exits   = exit_condition  if _direction in ('long_only', 'both') else \
+        _bool_fill(exit_condition * False)
+
+    pf_kwargs = dict(
         close=df['Close'],
-        entries=entry_condition,
-        exits=exit_condition,
+        entries=_entries,
+        exits=_exits,
         price=exec_price,
         size=size,
         size_type=size_type,
         init_cash=order_fixed_cash,
         fees=fees,
-        freq=timeframe
+        freq=timeframe,
     )
+
+    if short_entry_condition is not None and short_exit_condition is not None:
+        # Short execution price: Low[t1] - mintick on T2 bars, else Close
+        if t2_short_entry_price is not None:
+            close_vals_s = df['Close'].values.copy()
+            mask_s = short_entry_condition.values \
+                if hasattr(short_entry_condition, 'values') else np.asarray(short_entry_condition)
+            t2s_vals = t2_short_entry_price.values \
+                if hasattr(t2_short_entry_price, 'values') else np.asarray(t2_short_entry_price)
+            close_vals_s[mask_s] = t2s_vals[mask_s]
+            pf_kwargs['short_price'] = pd.Series(close_vals_s, index=df['Close'].index)
+        pf_kwargs['short_entries'] = short_entry_condition
+        pf_kwargs['short_exits']   = short_exit_condition
+
+    portfolio = vbt.Portfolio.from_signals(**pf_kwargs)
     
     if return_portfolio:
         return portfolio

@@ -92,6 +92,7 @@ class WFOSettings:
     exit_retour_bb_enabled: bool = False        # Retour BB exit (pivot low on lower band)
     exit_regline_enabled: bool = False          # Linear regression exit
     exit_volat_down_enabled: bool = False       # Volatility down / %BB exit
+    strategy_direction: str = 'long_only'       # 'long_only' | 'short_only' | 'both'
 
     @classmethod
     def from_config(cls, config: dict) -> "WFOSettings":

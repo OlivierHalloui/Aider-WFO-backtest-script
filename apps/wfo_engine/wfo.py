@@ -644,6 +644,7 @@ def walk_forward_optimization(
             'exit_volat_down_enabled': getattr(settings, 'exit_volat_down_enabled', False),
             'use_t2_signal': getattr(settings, 'use_t2_signal', False),
             'macd_ma_type': getattr(settings, 'macd_ma_type', 'sma'),
+            'strategy_direction': getattr(settings, 'strategy_direction', 'long_only'),
         }
     }
 

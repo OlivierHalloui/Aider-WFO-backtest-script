@@ -186,6 +186,33 @@ def pivot_low_nb(series, left, right):
 
 
 @njit(cache=True)
+def pivot_high_nb(series, left, right):
+    """Detect pivot highs: series[i-j] < series[i] for j in 1..left
+    and series[i+j] < series[i] for j in 1..right.
+    Returns boolean array with True at confirmation bar (i + right).
+    Mirror of pivot_low_nb for short exits."""
+    n = len(series)
+    signal = np.zeros(n, dtype=np.bool_)
+    for i in range(left, n - right):
+        if np.isnan(series[i]):
+            continue
+        is_pivot = True
+        for j in range(1, left + 1):
+            if np.isnan(series[i - j]) or series[i - j] >= series[i]:
+                is_pivot = False
+                break
+        if not is_pivot:
+            continue
+        for j in range(1, right + 1):
+            if np.isnan(series[i + j]) or series[i + j] >= series[i]:
+                is_pivot = False
+                break
+        if is_pivot:
+            signal[i + right] = True
+    return signal
+
+
+@njit(cache=True)
 def linreg_exit_nb(close, length, offset):
     """Linear regression exit: crossunder(close, linreg(close, length, offset)).
     linreg = linear regression forecast value at bar - offset.
@@ -337,6 +364,40 @@ def macd_exit_signal_nb(close, fast_length, slow_length, signal_length, use_type
     return signal
 
 @njit(cache=True)
+def macd_short_exit_signal_nb(close, fast_length, slow_length, signal_length, use_type_a, use_type_b, use_sma=False):
+    """MACD exit for SHORT positions: MACD crosses ABOVE signal line (crossover).
+    Type A short: crossover AND signal_line rising (signal_line[i] > signal_line[i-1]).
+    Type B short: any crossover.
+    Mirror of macd_exit_signal_nb with inverted cross direction."""
+    n = len(close)
+    signal = np.zeros(n, dtype=np.bool_)
+    if n < 2:
+        return signal
+    fast_length = int(fast_length)
+    slow_length = int(slow_length)
+    signal_length = int(signal_length)
+
+    if use_sma:
+        ma_fast = vbt.indicators.nb.ma_1d_nb(close, fast_length)
+        ma_slow = vbt.indicators.nb.ma_1d_nb(close, slow_length)
+        macd = ma_fast - ma_slow
+        macd_signal = vbt.indicators.nb.ma_1d_nb(macd, signal_length)
+    else:
+        ma_fast = ema_nb(close, fast_length)
+        ma_slow = ema_nb(close, slow_length)
+        macd = ma_fast - ma_slow
+        macd_signal = ema_nb(macd, signal_length)
+
+    for i in range(1, n):
+        cross_over = macd[i - 1] < macd_signal[i - 1] and macd[i] > macd_signal[i]  # inverted
+        type_a = cross_over and macd_signal[i] > macd_signal[i - 1]                   # signal rising
+        type_b = cross_over
+        signal[i] = (use_type_a and type_a) or (use_type_b and type_b)
+
+    return signal
+
+
+@njit(cache=True)
 def parabolic_sar_nb(high, low, sar_start, sar_increment, sar_maximum):
     n = len(high)
     sar = np.full(n, np.nan)
@@ -427,6 +488,71 @@ def depassement_roc_long_nb(close, open_, high, low, depass_sma_roc, roc_max):
                 roc[i] <= roc_max * moy_roc[i]):
             signal[i] = True
 
+    return signal
+
+
+@njit(cache=True)
+def depassement_roc_short_nb(close, open_, high, low, depass_sma_roc, roc_max):
+    """RoC filter for T1 SHORT: candle is bearish, RoC is between depass*avg and roc_max*avg.
+    RoC = (high - low) / high * 100
+    moy_RoC = SMA(RoC, 20)
+    signal = (close < open) AND (RoC >= depass * moy_RoC) AND (RoC <= roc_max * moy_RoC)
+    Mirror of depassement_roc_long_nb with inverted candle direction."""
+    n = len(close)
+    signal = np.zeros(n, dtype=np.bool_)
+    if n < 2:
+        return signal
+
+    roc = np.empty(n)
+    for i in range(n):
+        if high[i] == 0.0 or np.isnan(high[i]) or np.isnan(low[i]):
+            roc[i] = np.nan
+        else:
+            roc[i] = (high[i] - low[i]) / high[i] * 100.0
+
+    moy_roc = vbt.indicators.nb.ma_1d_nb(roc, 20)
+
+    for i in range(n):
+        if np.isnan(close[i]) or np.isnan(open_[i]) or np.isnan(moy_roc[i]) or np.isnan(roc[i]):
+            continue
+        if moy_roc[i] == 0.0:
+            continue
+        if (close[i] < open_[i] and                       # bearish candle (inverted)
+                roc[i] >= depass_sma_roc * moy_roc[i] and
+                roc[i] <= roc_max * moy_roc[i]):
+            signal[i] = True
+
+    return signal
+
+
+@njit(cache=True)
+def calculate_exit_sma_short_nb(close, user_exit_sma_length):
+    """SMA exit for SHORT positions: close crosses ABOVE SMA (crossover).
+    Signal fires when close[i-1] < sma[i-1] AND close[i] > sma[i].
+    Mirror of calculate_exit_sma_nb."""
+    n = len(close)
+    sma = vbt.indicators.nb.ma_1d_nb(close, user_exit_sma_length)
+    signal = np.zeros(n, dtype=np.bool_)
+    for i in range(1, n):
+        if (not np.isnan(close[i-1]) and not np.isnan(sma[i-1]) and
+                not np.isnan(close[i]) and not np.isnan(sma[i]) and
+                close[i-1] < sma[i-1] and close[i] > sma[i]):
+            signal[i] = True
+    return signal
+
+
+@njit(cache=True)
+def cross_sar_sma_short_exit_nb(sma, sar):
+    """Cross SAR/SMA exit for SHORT: SAR crosses BELOW SMA.
+    Signal = SAR[i-1] >= SMA[i-1] AND SAR[i] < SMA[i].
+    Mirror of cross_sar_sma_exit_nb."""
+    n = len(sma)
+    signal = np.zeros(n, dtype=np.bool_)
+    for i in range(1, n):
+        if (not np.isnan(sma[i-1]) and not np.isnan(sar[i-1]) and
+                not np.isnan(sma[i]) and not np.isnan(sar[i]) and
+                sar[i-1] >= sma[i-1] and sar[i] < sma[i]):
+            signal[i] = True
     return signal
 
 
@@ -562,6 +688,18 @@ DepassementRoCLong = _safe_if(
     roc_max=100.0
 )
 
+DepassementRoCShort = _safe_if(
+    class_name='DepassementRoCShort',
+    input_names=['close', 'open_', 'high', 'low'],
+    param_names=['depass_sma_roc', 'roc_max'],
+    output_names=['signal']
+).with_apply_func(
+    depassement_roc_short_nb,
+    takes_1d=True,
+    depass_sma_roc=0.01,
+    roc_max=100.0
+)
+
 SMAExit = _safe_if(
     class_name='SMAExit',
     input_names=['close'],
@@ -569,6 +707,17 @@ SMAExit = _safe_if(
     output_names=['signal']
 ).with_apply_func(
     calculate_exit_sma_nb,
+    takes_1d=True,
+    user_exit_sma_length=20
+)
+
+SMAShortExit = _safe_if(
+    class_name='SMAShortExit',
+    input_names=['close'],
+    param_names=['user_exit_sma_length'],
+    output_names=['signal']
+).with_apply_func(
+    calculate_exit_sma_short_nb,
     takes_1d=True,
     user_exit_sma_length=20
 )
@@ -602,6 +751,22 @@ MACDExit = _safe_if(
     use_sma=True
 )
 
+MACDShortExit = _safe_if(
+    class_name='MACDShortExit',
+    input_names=['close'],
+    param_names=['fast_length', 'slow_length', 'signal_length', 'use_type_a', 'use_type_b', 'use_sma'],
+    output_names=['signal']
+).with_apply_func(
+    macd_short_exit_signal_nb,
+    takes_1d=True,
+    fast_length=9,
+    slow_length=19,
+    signal_length=6,
+    use_type_a=True,
+    use_type_b=True,
+    use_sma=True
+)
+
 CrossSARSMAExit = _safe_if(
     class_name='CrossSARSMAExit',
     input_names=['sma', 'sar'],
@@ -612,6 +777,16 @@ CrossSARSMAExit = _safe_if(
     takes_1d=True
 )
 
+CrossSARSMAShortExit = _safe_if(
+    class_name='CrossSARSMAShortExit',
+    input_names=['sma', 'sar'],
+    param_names=[],
+    output_names=['signal']
+).with_apply_func(
+    cross_sar_sma_short_exit_nb,
+    takes_1d=True
+)
+
 PivotLow = _safe_if(
     class_name='PivotLow',
     input_names=['series'],
@@ -619,6 +794,18 @@ PivotLow = _safe_if(
     output_names=['signal']
 ).with_apply_func(
     pivot_low_nb,
+    takes_1d=True,
+    left=2,
+    right=2
+)
+
+PivotHigh = _safe_if(
+    class_name='PivotHigh',
+    input_names=['series'],
+    param_names=['left', 'right'],
+    output_names=['signal']
+).with_apply_func(
+    pivot_high_nb,
     takes_1d=True,
     left=2,
     right=2
