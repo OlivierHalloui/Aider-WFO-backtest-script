@@ -980,15 +980,19 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
     )
 
     if short_entry_condition is not None and short_exit_condition is not None:
-        # Short execution price: Low[t1] - mintick on T2 bars, else Close
+        # Short execution price: patch exec_price on T2-short bars (Low[t1] - mintick).
+        # VBT from_signals() has no 'short_price' arg — both long and short use 'price'.
         if t2_short_entry_price is not None:
-            close_vals_s = df['Close'].values.copy()
+            # exec_price may already be a patched Series (T2 long) or df['Close'].
+            # Work on a numpy copy to avoid mutating the original.
+            exec_vals = exec_price.values.copy() \
+                if hasattr(exec_price, 'values') else np.array(exec_price, dtype=float)
             mask_s = short_entry_condition.values \
                 if hasattr(short_entry_condition, 'values') else np.asarray(short_entry_condition)
             t2s_vals = t2_short_entry_price.values \
                 if hasattr(t2_short_entry_price, 'values') else np.asarray(t2_short_entry_price)
-            close_vals_s[mask_s] = t2s_vals[mask_s]
-            pf_kwargs['short_price'] = pd.Series(close_vals_s, index=df['Close'].index)
+            exec_vals[mask_s] = t2s_vals[mask_s]
+            pf_kwargs['price'] = pd.Series(exec_vals, index=df['Close'].index)
         pf_kwargs['short_entries'] = short_entry_condition
         pf_kwargs['short_exits']   = short_exit_condition
 
