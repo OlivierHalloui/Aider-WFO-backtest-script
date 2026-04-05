@@ -2,6 +2,100 @@
 
 Toutes les évolutions notables de l'application WFO sont documentées ici.
 
+## 2026-04-05
+
+- **Flags `optimize_*` par toggle booléen** : chaque signal d'entrée/sortie activable (SAR, MACD, MACD type A/B, RoC, T2, divergence_BB, cross SAR/SMA, retour BB, linreg, volat_down) dispose désormais d'une case à cocher "Optimiser" dans le panneau stratégie. Quand désactivée, le toggle est fixé à sa valeur courante dans la grille au lieu d'être varié `[True, False]`, ce qui réduit l'espace de recherche.
+- `main.py` : `get_param_grid()` respecte les flags `optimize_*` ; `calculate_combinations()` dans `app.py` est synchronisé pour afficher le bon comptage.
+- **Sélecteur de fenêtre pour le Final Backtest** : un `selectbox` permet de choisir la fenêtre WFO dont les paramètres seront utilisés (ou "Meilleure fenêtre (auto)"). `run_final_backtest_logic()` accepte un `window_id` optionnel.
+- **Charts final backtest scindés en deux figures** : graphique prix de l'actif séparé du graphique returns % (portfolio vs Buy & Hold), avec annotations de performance finale sur chaque courbe.
+- `ui/data_utils.py` : `_coerce_arrow_value` décode les `bytes` en UTF-8 ; `arrow_safe_df` force-convertit les colonnes `Value` des `Series` en `str` homogène pour éviter les erreurs d'inférence PyArrow sur types mixtes.
+- Table des paramètres WFO (onglet résultats) : remplacée par un `st.dataframe` avec numérotation des fenêtres (colonne `Window`), plus lisible que la figure Plotly précédente.
+
+## 2026-04-02
+
+- **Correction grille de paramètres figés** : `np.arange` remplacé par une expansion par comptage dans `main.py` pour éviter le drift IEEE 754 quand `min == max`.
+- **Cohérence Buy & Hold** : `init_cash` hardcodé remplacé par `order_fixed_cash` dans `strategy.py`.
+- `app.py` : import `arrow_safe_df` centralisé depuis `ui/data_utils` (source unique) ; protection de `window_info_df`, `page_df` et `trades_df`.
+- **Badges IS/OOS** sur le chart IS/OOS pour identifier la meilleure fenêtre IS et la meilleure fenêtre OOS.
+- **UX load-params** : le bouton sidebar "Load Best Params" remplacé par un `selectbox` de fenêtre + bouton dédié.
+- `ui/final_backtest_panel.py` : `load_best_params_into_inputs` accepte un `window_id` et expose `_get_params_for_window` ; protection de `param_records` et `pf.trades.stats()` contre les erreurs silencieuses.
+- `ui/strategy_panel.py` : branches `else check=False` pour SAR/MACD désactivés afin d'éviter la restitution involontaire des clés par Streamlit lors du widget cleanup.
+
+## 2026-03-30
+
+- **Barre d'onglets fixe** : injection CSS pour maintenir la barre de tabs en haut de page lors du scroll (`feat: sticky tab bar`).
+- **Suppression FutureWarning `fillna` booléen** : helper `_bool_fill` dans `strategy.py` pour éviter les avertissements pandas sur les colonnes booléennes.
+- **Chart IS/OOS** : utilise désormais la métrique sélectionnée (`metric1`) au lieu du Sharpe ratio codé en dur.
+- **Score PQS — facteur de confiance** : multiplication par `√(n_trades / n_ref)` pour pénaliser les fenêtres avec peu de trades ; `n_ref` configurable dans l'UI (défaut : 50).
+- **Perf Phase B1 — bisection récursive** : remplacement du fallback séquentiel O(N) par une bisection récursive `_eval_chunk_bisect` dans `wfo.py`. Pour K combos défaillants dans un chunk de N, coût réduit à O(K·log N) au lieu de O(N) appels séquentiels.
+- **Perf Phase A** :
+  - Cache backtest borné (`_BoundedCache`, maxsize=5000, éviction FIFO) pour prévenir la croissance mémoire multi-Go sur les longs runs WFO.
+  - `strategy.py` T2 : patch numpy ciblé sur les barres T2 uniquement (supprime ~800 Ko d'allocation par trial).
+  - `_resolve_metric_value()` extrait en fonction de module dans `final_backtest_panel.py` (source unique, dédoublonnage).
+  - Logs fallback chunking enrichis (paramètres du premier combo défaillant, plage, comptage NaN).
+
+## 2026-03-29
+
+- **Signal T2 — prix stop-buy** : prix d'entrée fixé à `High[T1] + 0.01 mintick` via `price=` dans `from_signals`.
+- **`use_divergence_bb`** : filtre évaluable sur la barre T1 (setup), activable/désactivable, collapsé à valeur fixe quand T2 est désactivé.
+- **`use_roc_filter`** : filtre RoC T1 désormais activable/désactivable par l'utilisateur.
+- **Métrique PQS (Profit Quality Score)** : `(Return% / |MaxDD%|) × AvgP&L%` ajoutée à `metrics.py`, `portfolio_metrics`, `wfo.py`, `strategy.py`, `final_backtest_panel.py` et `app.py`. Affichée dans la barre de synthèse WFO, les lignes IS/OOS et les cartes du final backtest.
+- **Sidebar Final Backtest** : nouvel expander consolidant Robust Tests (Level 1), plage de dates et bouton Run (déplacé hors de la section optimisation WFO).
+- `main.py` : paramètres SAR/MACD collapsés à leurs valeurs fixes quand les sorties correspondantes sont désactivées (suppression de dimensions mortes dans la grille GP).
+
+## 2026-03-15
+
+- **Panneau stratégie central** (`ui/strategy_panel.py`) : expander 4 onglets (Signaux Entrée / Sorties / Filtres Croisements / MTF) déplacé de la sidebar vers l'interface centrale. `PARAMETER_HELP` est désormais la source unique dans `strategy_panel.py`, importée par `expert_panel.py`.
+- `app.py` : suppression du dict `PARAMETER_HELP` et des expanders sidebar ; `get_current_config()` lit les clés widget depuis `st.session_state`.
+- Nouveaux flags de config : `use_t2_signal`, `exit_cross_sar_sma_enabled`, `exit_retour_bb_enabled`, `exit_regline_enabled`, `exit_volat_down_enabled`, `macd_ma_type` + 9 paramètres stratégie fixes.
+- `config.py` : `macd_ma_type: str = 'sma'` ajouté à `WFOSettings`.
+- **Correction cast int MACD SMA Numba** : `fast_length`, `slow_length`, `signal_length` castés en `int` dans `macd_exit_signal_nb` (même classe de bug que `9af4f2c`, déclenché uniquement avec `use_sma=True`).
+
+## 2026-02-26
+
+- `.streamlit/config.toml` : `maxMessageSize=2048` ajouté (limite message Streamlit portée à 2 Go).
+- **Répertoire d'upload persistant** (`~/.atdmf/uploads`) : les CSV uploadés ne sont plus stockés dans `/tmp` et survivent aux redémarrages du serveur ; configurable via variable d'environnement `WFOE_UPLOAD_DIR`.
+- `app.py` : détection de chemin de fichier manquant au chargement d'une config (gestion des anciens chemins `/tmp` et fichiers déplacés).
+- **Table paramètres Best Window** adaptée au thème sombre (en-tête bleu marine, lignes alternées sombres, texte clair, bordure accent bleue).
+- **Correction cast float64 → int dans les kernels Numba** : paramètres VBT float64 castés en int pour les longueurs BB, SAR, SMA, MACD.
+- **Correction signe `bb_ecart`** : signe inversé corrigé dans le calcul de l'écart Bollinger Bands.
+
+## 2026-02-21
+
+- **Correctif critique : cache indicateurs par fenêtre** (`c1e9bf3`) : le cache BB/SAR/SMA/MACD/linreg était clé uniquement sur les valeurs de paramètres, pas sur le DataFrame. Les tableaux IS étaient réutilisés silencieusement pour l'OOS (index/longueur différents) → désalignement → signaux NaN → 0 trades OOS dans toutes les fenêtres. Correction : `(len(df), df.index[0])` inclus dans chaque clé de cache.
+- Extension du cache indicateurs à SAR, SMA exit, MACD exit et linreg exit.
+- **Optimisations algorithmiques** :
+  - `linreg_exit_nb` : O(n×length) → O(n) incrémental (accumulateurs somme_x/somme_x² glissants).
+  - `rolling_median` : O(n×w×log w) → O(n×w) via `np.partition` (~7× plus rapide pour window=150).
+  - `trade_stat` stats mis en cache une fois par bloc IS/OOS.
+  - `iterrows` → `to_dict('records')` dans `adaptive_optimization` et `neural_search`.
+  - `argpartition` O(N) pour le top-K dans `build_active_grid` (était O(N log N)).
+  - `lru_cache` sur `_value_token` (~150K appels par run adaptatif).
+- Ajout du **panneau comparaison de campagnes** (`campaign_panel.py`) avec mise en surbrillance et affichage côte-à-côte.
+
+## 2026-02-18
+
+- **Correction** : suppression de `per_column=True` invalide sur `CrossSARSMAExit` dans `strategy.py`.
+
+## 2026-02-17
+
+- **Alignement stratégie native avec Pine V6 (phases 1–5)** :
+  - Phase 1 : MACD configurable SMA/EMA (`macd_ma_type`), défauts 9/19/6.
+  - Phase 2 : Signal T0 complet (`nb_bars_under_bbw` + `bbandcross_barssince`).
+  - Phase 3 : Cascade T1 avec filtre `DepassementRoC`.
+  - Phase 4 : Signal T2 avec `divergence_BB` + dépassement du High.
+  - Phase 5 : Sorties Cross SAR/SMA, pivot_low (retour BB), linreg, volat_down.
+  - Mise à jour des défauts `DEFAULT_PARAM_GRID` pour correspondre aux valeurs Pine V6.
+
+## 2026-02-15
+
+- **Refactoring majeur de l'application** (`6ff48d0`) :
+  - Phase 0 : extraction de `metrics.py` (`trade_stat`, `calc_avg_pl`, `safe_float`, `portfolio_metrics`) et `neural_search.py` (`NeuralSearchGuide`) ; `WFOSettings` converti en `@dataclass` avec `from_config()` ; recherche de voisinage O(n²) → `scipy.spatial.KDTree`.
+  - Phase 1 : 93 tests unitaires ajoutés (`test_metrics`, `test_neural_search`, `test_wfo_unit`) ; migration `print()` → `logging` dans `wfo.py`, `adaptive_optimization.py`, `main.py`.
+  - Phase 2 : `app.py` réduit de 10 907 à ~5 770 lignes (-47%) par extraction de `ui/pine_panel.py` (34 fonctions), `ui/expert_panel.py` (30 fonctions), `ui/export_panel.py` (export ZIP/PDF) et `ui/final_backtest_panel.py` (logique final backtest) ; pattern dependency injection.
+  - Aucune modification des calculs d'indicateurs, de la logique stratégie ou des résultats de backtest.
+  - Limite d'upload Streamlit portée à 2 Go.
+
 ## 2026-02-12
 
 - Runtime transpilation Pine V3 enrichi pour les ordres `short`:
