@@ -843,6 +843,127 @@ def _render_best_window_chart(pf, df_full: pd.DataFrame, window_id, ref_label: s
         pass
 
 
+def _render_all_windows_chart(all_pfs: dict, df_full, best_id, ref_label: str) -> None:
+    """Render overlapping % return curves for all comparison windows.
+
+    Each window is a thin semi-transparent line; the best window is
+    highlighted in red with a thicker line. B&H is overlaid in green dashed.
+    """
+    MAX_PTS = 15_000
+
+    def _ds(s):
+        if len(s) <= MAX_PTS:
+            return s
+        return s.iloc[:: max(1, len(s) // MAX_PTS)]
+
+    # B&H from full-period price
+    bh_pct = None
+    bh_final_pct = None
+    if df_full is not None and not df_full.empty:
+        price_s = df_full["Close"] if "Close" in df_full.columns else df_full.iloc[:, 0]
+        price_s = pd.to_numeric(price_s, errors="coerce").dropna()
+        if len(price_s) > 1:
+            init_pr = float(price_s.iloc[0])
+            if np.isfinite(init_pr) and init_pr != 0:
+                bh_pct = (price_s / init_pr - 1.0) * 100.0
+                bh_final_pct = float(bh_pct.iloc[-1])
+
+    # Palette for non-best windows
+    _palette = [
+        "#7b97c0", "#82b496", "#c4a56e", "#a88fc4", "#c47e7e",
+        "#6ec4c0", "#b8b87e", "#c48e6e", "#8ec4a8", "#a8a8c4",
+    ]
+
+    fig = go.Figure()
+
+    # Non-best windows (drawn first so they appear below)
+    color_idx = 0
+    for wid, pf in all_pfs.items():
+        if wid == best_id:
+            continue
+        try:
+            val = pf.value() if callable(getattr(pf, "value", None)) else pf.value
+            val = pd.to_numeric(pd.Series(val), errors="coerce").dropna()
+            if len(val) < 2:
+                continue
+            pct = (val / float(val.iloc[0]) - 1.0) * 100.0
+            final_pct = float(pct.iloc[-1])
+            label = "Robust Set" if str(wid) == "Robust" else f"W{wid}"
+            color = _palette[color_idx % len(_palette)]
+            color_idx += 1
+            ds = _ds(pct)
+            fig.add_trace(go.Scatter(
+                x=ds.index, y=ds.values,
+                mode="lines",
+                name=f"{label} ({final_pct:+.1f}%)",
+                line=dict(color=color, width=1),
+                opacity=0.5,
+            ))
+        except Exception:
+            continue
+
+    # Best window (red, thicker, on top)
+    if best_id is not None and best_id in all_pfs:
+        try:
+            val = all_pfs[best_id].value() if callable(getattr(all_pfs[best_id], "value", None)) else all_pfs[best_id].value
+            val = pd.to_numeric(pd.Series(val), errors="coerce").dropna()
+            if len(val) >= 2:
+                pct = (val / float(val.iloc[0]) - 1.0) * 100.0
+                final_pct = float(pct.iloc[-1])
+                best_label = "Robust Set" if str(best_id) == "Robust" else f"Fenêtre {best_id}"
+                ds = _ds(pct)
+                fig.add_trace(go.Scatter(
+                    x=ds.index, y=ds.values,
+                    mode="lines",
+                    name=f"{best_label} ★ ({final_pct:+.1f}%)",
+                    line=dict(color="#e63946", width=2.5),
+                ))
+                fig.add_annotation(
+                    x=ds.index[-1], y=final_pct,
+                    text=f"{best_label} {final_pct:+.1f}%",
+                    showarrow=True, arrowhead=2, arrowwidth=1,
+                    arrowcolor="#e63946", ax=50, ay=-20,
+                    font=dict(size=9, color="#e63946"),
+                    bgcolor="rgba(230,57,70,0.15)",
+                    bordercolor="#e63946", borderpad=3, borderwidth=1,
+                    xref="x", yref="y",
+                )
+        except Exception:
+            pass
+
+    # B&H reference
+    if bh_pct is not None:
+        bh_ds = _ds(bh_pct)
+        fig.add_trace(go.Scatter(
+            x=bh_ds.index, y=bh_ds.values,
+            mode="lines",
+            name=f"Buy & Hold ({bh_final_pct:+.1f}%)",
+            line=dict(color="#2ca02c", width=1.5, dash="dash"),
+        ))
+        fig.add_annotation(
+            x=bh_ds.index[-1], y=bh_final_pct,
+            text=f"B&H {bh_final_pct:+.1f}%",
+            showarrow=True, arrowhead=2, arrowwidth=1,
+            arrowcolor="#2ca02c", ax=50, ay=0,
+            font=dict(size=9, color="#2ca02c"),
+            bgcolor="rgba(44,160,44,0.15)",
+            bordercolor="#2ca02c", borderpad=3, borderwidth=1,
+            xref="x", yref="y",
+        )
+
+    best_label = "Robust Set" if str(best_id) == "Robust" else f"Fenêtre {best_id}"
+    fig.add_hline(y=0, line_dash="dot",
+                  line_color="rgba(255,255,255,0.25)", line_width=1)
+    fig.update_layout(
+        height=440, template="plotly_dark",
+        title=f"Returns % — toutes fenêtres (meilleure : {best_label} sur {ref_label})",
+        yaxis_title="Return %",
+        margin=dict(t=50, b=20),
+        legend=dict(orientation="v", x=1.01, y=1, xanchor="left"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render_window_comparison_panel(*, get_current_config, load_data, resolve_strategy_adapter):
     """Run the best params of every WFO window on the full date range and compare results.
 
@@ -908,6 +1029,7 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
 
         window_results = results.get('window_results', [])
         rows: list[dict] = []
+        all_pfs: dict = {}
         best_score: float | None = None
         best_pf = None
         best_window_id: int | None = None
@@ -939,6 +1061,8 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
                 pf = None
 
             rows.append({"window_id": window_id, "params": raw_params, "metrics": metrics})
+            if pf is not None:
+                all_pfs[window_id] = pf
 
             # Track best according to selected metric (evaluated at run time)
             score_val = metrics.get(ref_key)
@@ -977,6 +1101,8 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
                 metrics_robust["error"] = str(e)
                 pf_robust = None
             rows.append({"window_id": "Robust", "params": robust_raw, "metrics": metrics_robust})
+            if pf_robust is not None:
+                all_pfs["Robust"] = pf_robust
             score_val = metrics_robust.get(ref_key)
             if score_val is not None and not (isinstance(score_val, float) and np.isnan(score_val)):
                 score = float(score_val) * (1 if higher_is_better else -1)
@@ -990,6 +1116,7 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
         st.session_state["_window_cmp_best_pf"]       = best_pf
         st.session_state["_window_cmp_best_id"]       = best_window_id
         st.session_state["_window_cmp_df_full"]       = df_full
+        st.session_state["_window_cmp_all_pfs"]       = all_pfs
         cached_rows  = rows
         cached_token = token   # sync local var so the render block fires immediately
 
@@ -1050,38 +1177,20 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
             if param_records:
                 st.dataframe(_arrow_safe_df(pd.DataFrame(param_records).set_index("Fenêtre")), use_container_width=True)
 
-        # ── Charts for best window ────────────────────────────────────────
-        best_pf  = st.session_state.get("_window_cmp_best_pf")
-        best_id  = st.session_state.get("_window_cmp_best_id")
-        df_full  = st.session_state.get("_window_cmp_df_full")
+        # ── Multi-window returns chart ────────────────────────────────────
+        all_pfs = st.session_state.get("_window_cmp_all_pfs", {})
+        df_full = st.session_state.get("_window_cmp_df_full")
 
-        # If reference metric changed after the run, re-find best portfolio by re-running
-        if best_id != best_id_display and best_id_display is not None:
-            config = get_current_config()
-            # Retrieve params for best_id_display from cached rows
-            best_row = next((r for r in cached_rows if r["window_id"] == best_id_display), None)
-            if best_row is not None and df_full is not None and not df_full.empty:
-                params = _cast_params(best_row["params"])
-                params['order_sizing_mode'] = config.get('order_sizing_mode', 'percent_equity')
-                params['order_fixed_cash']  = float(config.get('order_fixed_cash', 10000.0))
-                params['fees_pct']          = float(config.get('fees_pct', 0.0))
-                try:
-                    adapter = resolve_strategy_adapter(
-                        strategy_mode=config.get("strategy_mode"),
-                        strategy_id=config.get("strategy_id"),
-                        config=config,
-                    )
-                    with st.spinner(f"Génération du graphique — fenêtre {best_id_display}…"):
-                        best_pf = adapter.run_backtest(
-                            df_full, params,
-                            config.get('timeframe', DEFAULT_TIMEFRAME),
-                            return_portfolio=True,
-                        )
-                    st.session_state["_window_cmp_best_pf"] = best_pf
-                    st.session_state["_window_cmp_best_id"] = best_id_display
-                except Exception as e:
-                    st.warning(f"Impossible de générer le graphique : {e}")
-                    best_pf = None
+        if all_pfs and best_id_display is not None:
+            _render_all_windows_chart(all_pfs, df_full, best_id_display, ref_label)
 
+        # Trade stats for best window
+        best_pf = all_pfs.get(best_id_display) if all_pfs else None
         if best_pf is not None and best_id_display is not None:
-            _render_best_window_chart(best_pf, df_full, best_id_display, ref_label)
+            _best_label = ("Robust Set" if str(best_id_display) == "Robust"
+                           else f"Fenêtre {best_id_display}")
+            st.markdown(f"##### Statistiques des trades — {_best_label}")
+            try:
+                st.dataframe(_arrow_safe_df(best_pf.trades.stats()))
+            except Exception:
+                pass
