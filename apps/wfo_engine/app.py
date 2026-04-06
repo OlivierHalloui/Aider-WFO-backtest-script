@@ -3877,7 +3877,7 @@ if 'wfo_results' in st.session_state:
 
         st.divider()
 
-        # --- Date range & data file ---
+        # --- Date range, timeframe & data file ---
         st.markdown("##### Plage de données")
         default_final_start = st.session_state.get('opt_start_date', st.session_state.get('start_date', DEFAULT_START_DATE))
         default_final_end = st.session_state.get('opt_end_date', st.session_state.get('end_date', DEFAULT_END_DATE))
@@ -3898,6 +3898,24 @@ if 'wfo_results' in st.session_state:
             value=st.session_state.get('file_path', DEFAULT_DATA_FILE),
             key="final_file_path",
             help="Chemin du fichier de données pour le backtest final (si source locale)."
+        )
+        _tf_options = ['1s', '5s', '10s', '15s', '30s', '1m', '5m', '15m', '30m', '1h', '4h', '1d']
+        _wfo_tf = st.session_state.get('timeframe', DEFAULT_TIMEFRAME)
+        _final_tf_current = st.session_state.get('final_timeframe', _wfo_tf)
+        _final_tf_idx = _tf_options.index(_final_tf_current) if _final_tf_current in _tf_options else \
+                        (_tf_options.index(_wfo_tf) if _wfo_tf in _tf_options else 1)
+        st.selectbox(
+            "Timeframe du backtest final",
+            options=_tf_options,
+            index=_final_tf_idx,
+            key="final_timeframe",
+            help=(
+                "Résolution temporelle utilisée pour le backtest final et comparatif. "
+                "Peut différer du timeframe WFO — permet de tester les best params "
+                "sur 10s, 30s, 1mn… sans relancer l'optimisation.\n\n"
+                "⚠️ Le fichier de données doit contenir le timeframe sélectionné "
+                "(ou une résolution plus fine pour le resampling)."
+            ),
         )
 
         # --- Window selector for final backtest ---

@@ -533,12 +533,13 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
     final_end_date = st.session_state.get('final_end_date', config.get('end_date'))
     final_file_path = st.session_state.get('final_file_path', config.get('file_path'))
 
+    _final_tf = _get_final_timeframe(config)
     with st.spinner("Loading data for final backtest..."):
         if config.get('from_file'):
             df = load_data(
                 final_start_date,
                 final_end_date,
-                config.get('timeframe', DEFAULT_TIMEFRAME),
+                _final_tf,
                 from_file=True,
                 file_path=final_file_path
             )
@@ -546,7 +547,7 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
             df = load_data(
                 final_start_date,
                 final_end_date,
-                config.get('timeframe', DEFAULT_TIMEFRAME),
+                _final_tf,
                 from_file=False
             )
 
@@ -653,7 +654,7 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
             final_portfolio = strategy_adapter.run_backtest(
                 df,
                 chosen_params,
-                config.get('timeframe', DEFAULT_TIMEFRAME),
+                _final_tf,
                 return_portfolio=True
             )
             st.session_state['final_portfolio'] = final_portfolio
@@ -690,12 +691,21 @@ _INT_PARAMS = {
 }
 
 
+def _get_final_timeframe(config):
+    """Return the timeframe to use for the final/comparison backtest.
+
+    Reads 'final_timeframe' from session state (set by the dedicated selectbox).
+    Falls back to the WFO timeframe from config if not set.
+    """
+    return st.session_state.get('final_timeframe') or config.get('timeframe', DEFAULT_TIMEFRAME)
+
+
 def _load_full_df(config, load_data):
     """Load the full date-range dataframe for window comparison backtests."""
     final_start = st.session_state.get('final_start_date', config.get('start_date'))
     final_end   = st.session_state.get('final_end_date',   config.get('end_date'))
     file_path   = st.session_state.get('final_file_path',  config.get('file_path'))
-    tf          = config.get('timeframe', DEFAULT_TIMEFRAME)
+    tf          = _get_final_timeframe(config)
 
     if config.get('from_file'):
         try:
@@ -1058,6 +1068,7 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
             st.error(f"Erreur lors de la résolution de l'adaptateur stratégie : {e}")
             return
 
+        _cmp_tf = _get_final_timeframe(config)
         window_results = results.get('window_results', [])
         rows: list[dict] = []
         all_pfs: dict = {}
@@ -1079,7 +1090,7 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
             try:
                 pf = adapter.run_backtest(
                     df_full, params,
-                    config.get('timeframe', DEFAULT_TIMEFRAME),
+                    _cmp_tf,
                     return_portfolio=True,
                 )
                 metrics = portfolio_metrics(pf, window_id)
@@ -1120,7 +1131,7 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
                 with st.spinner("Backtest Robust Set…"):
                     pf_robust = adapter.run_backtest(
                         df_full, robust_params,
-                        config.get('timeframe', DEFAULT_TIMEFRAME),
+                        _cmp_tf,
                         return_portfolio=True,
                     )
                 metrics_robust = portfolio_metrics(pf_robust, "Robust")
