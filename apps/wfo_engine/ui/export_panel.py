@@ -503,7 +503,7 @@ def _build_results_zip_filename(config, *, build_config_filename):
     """
     Build ZIP filename using the same naming rule components as config export.
     Example:
-    results_wfo_20260210_132530_01m_5s_bayes_05w_tr5000_classic.zip
+    results_wfo_20260210_132530_01m_5s_bayes_05w_tr5000_classic_short.zip
     """
     cfg_name = build_config_filename(config)
     stem = cfg_name.removeprefix("config_wfo_").removesuffix(".json")

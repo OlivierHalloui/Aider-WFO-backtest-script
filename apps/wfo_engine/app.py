@@ -3318,7 +3318,7 @@ def _build_config_filename(config):
     """
     Build an abbreviated, information-rich WFO config filename.
     Example:
-    config_wfo_20260210_132530_01m_5s_bayes_05w_tr5000_classic.json
+    config_wfo_20260210_132530_01m_5s_bayes_05w_tr5000_classic_short.json
     """
     now_tag = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     period = _build_period_label(config.get("start_date"), config.get("end_date"))
@@ -3357,7 +3357,15 @@ def _build_config_filename(config):
     except Exception:
         trials_label = "trna"
 
-    return f"config_wfo_{now_tag}_{period}_{timeframe}_{method}_{windows_label}_{trials_label}_{regime}.json"
+    direction_map = {
+        'long_only':  'long',
+        'short_only': 'short',
+        'both':       'longshort',
+    }
+    direction_raw = str(config.get('strategy_direction', 'long_only')).lower()
+    direction = direction_map.get(direction_raw, _normalize_filename_token(direction_raw, default='long', max_len=10))
+
+    return f"config_wfo_{now_tag}_{period}_{timeframe}_{method}_{windows_label}_{trials_label}_{regime}_{direction}.json"
 
 def run_final_backtest_logic(window_id=None):
     from ui.final_backtest_panel import run_final_backtest_logic as _run_final_backtest
@@ -3763,7 +3771,7 @@ if "wfo_results" in st.session_state:
             help=(
                 "Télécharge l'archive des résultats en mémoire (JSON/CSV/trades selon disponibilité). "
                 "Règle de nommage: "
-                "`results_wfo_<YYYYMMDD_HHMMSS>_<periode>_<timeframe>_<methode>_<nb_fenetres>_<trials>_<regime>.zip`."
+                "`results_wfo_<YYYYMMDD_HHMMSS>_<periode>_<timeframe>_<methode>_<nb_fenetres>_<trials>_<regime>_<direction>.zip`."
             )
         )
     if st.session_state.get("results_pdf_bytes"):
