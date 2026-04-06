@@ -648,6 +648,17 @@ def walk_forward_optimization(
         }
     }
 
+    # Derive optimize_* flags from param_grid: a boolean flag is "optimized" when
+    # its grid contains both True and False (i.e. the optimizer was free to choose).
+    _BOOL_OPT_FLAGS = (
+        'exit_sar_enabled', 'exit_macd_enabled', 'exit_macd_type_a', 'exit_macd_type_b',
+        'use_roc_filter', 'use_t2_signal', 'use_divergence_bb', 'exit_cross_sar_sma_enabled',
+        'exit_retour_bb_enabled', 'exit_regline_enabled', 'exit_volat_down_enabled',
+    )
+    for _flag in _BOOL_OPT_FLAGS:
+        _vals = param_grid.get(_flag, [])
+        wfo_results['settings'][f'optimize_{_flag}'] = len(set(_vals)) > 1
+
     # Calculate total parameter combinations for reporting
     param_combinations = np.prod([len(values) for values in param_grid.values()])
 

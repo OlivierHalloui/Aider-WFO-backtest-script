@@ -477,8 +477,10 @@ def load_best_params_into_inputs(*, get_current_config, window_id=None):
         _d_min, _d_max, _d_step = DEFAULT_PARAM_GRID[param]
         st.session_state[f"step_{param}"] = _d_step
 
-    # Boolean flags: set to the value from best_params, or False if absent.
-    # This ensures that a filter NOT retained by the optimizer is unchecked.
+    # Boolean flags: restore value from best_params (False if absent).
+    # Also restore the optimize_* checkboxes from wfo_results['settings']:
+    #   - True  → the flag was in the search space during the previous run
+    #   - False → the flag was fixed (not optimized)
     _BOOL_FLAGS = (
         'use_roc_filter',
         'use_t2_signal',
@@ -492,8 +494,15 @@ def load_best_params_into_inputs(*, get_current_config, window_id=None):
         'exit_regline_enabled',
         'exit_volat_down_enabled',
     )
+    _run_settings = {}
+    if 'wfo_results' in st.session_state:
+        _run_settings = st.session_state['wfo_results'].get('settings', {})
+
     for flag in _BOOL_FLAGS:
         st.session_state[flag] = bool(final_params.get(flag, False))
+        opt_key = f'optimize_{flag}'
+        if opt_key in _run_settings:
+            st.session_state[opt_key] = bool(_run_settings[opt_key])
 
     if str(final_source or "").lower() == "robust_set":
         st.sidebar.success("Paramètres robust-set chargés dans les inputs.")
