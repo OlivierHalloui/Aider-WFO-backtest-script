@@ -5609,6 +5609,13 @@ if 'wfo_results' in st.session_state:
             exit_sar_enabled = st.session_state.get('exit_sar_enabled')
             exit_macd_enabled = st.session_state.get('exit_macd_enabled')
             
+            _wfo_tf    = st.session_state.get('timeframe', DEFAULT_TIMEFRAME)
+            _final_tf  = st.session_state.get('final_timeframe') or _wfo_tf
+            _tf_note   = f" *(backtest sur **{_final_tf}**)*" if _final_tf != _wfo_tf else ""
+            st.markdown(
+                f"**Timeframe WFO :** `{_wfo_tf}` — "
+                f"**Timeframe backtest final :** `{_final_tf}`{_tf_note}"
+            )
             if best_score is not None:
                 st.markdown(f"**Best Optimization Score (combined_score):** `{best_score:.4f}`")
             if best_window is not None:

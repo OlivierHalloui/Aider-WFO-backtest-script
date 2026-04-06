@@ -1020,8 +1020,12 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
 
     st.markdown("---")
     st.markdown("#### Backtests comparatifs — paramètres IS de chaque fenêtre sur la période complète")
+    _wfo_tf_cmp   = config.get('timeframe', DEFAULT_TIMEFRAME)
+    _final_tf_cmp = _get_final_timeframe(config)
+    _tf_note_cmp  = f" — backtest sur **{_final_tf_cmp}**" if _final_tf_cmp != _wfo_tf_cmp else f" — timeframe **{_final_tf_cmp}**"
     st.caption(
-        "Pour chaque fenêtre WFO, les meilleurs paramètres trouvés en IS sont appliqués "
+        f"Pour chaque fenêtre WFO (optimisé sur `{_wfo_tf_cmp}`{_tf_note_cmp}), "
+        "les meilleurs paramètres trouvés en IS sont appliqués "
         "sur toute la période de backtest définie ci-dessus. Le tableau compare les résultats."
     )
 
