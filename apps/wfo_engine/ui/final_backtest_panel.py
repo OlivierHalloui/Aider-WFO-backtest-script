@@ -634,10 +634,14 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
     st.session_state['final_params_is_score'] = _combined_score_local(best_is_metrics)
     st.session_state['final_params_oos_score'] = _combined_score_local(best_oos_metrics)
 
-    # Inject execution settings into params for the final backtest
+    # Inject execution settings into params for the final backtest.
+    # strategy_direction is taken from the UI (not from best_params) so the user
+    # can run the final backtest in a different direction than the WFO run
+    # (e.g. validate short-optimised BB params in long mode, or vice-versa).
     chosen_params['order_sizing_mode'] = config.get('order_sizing_mode', 'percent_equity')
     chosen_params['order_fixed_cash'] = float(config.get('order_fixed_cash', 10000.0))
     chosen_params['fees_pct'] = float(config.get('fees_pct', 0.0))
+    chosen_params['strategy_direction'] = str(config.get('strategy_direction', 'long_only'))
 
     with st.spinner("Running Final Backtest on Full Dataset..."):
         try:
