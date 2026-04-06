@@ -477,6 +477,24 @@ def load_best_params_into_inputs(*, get_current_config, window_id=None):
         _d_min, _d_max, _d_step = DEFAULT_PARAM_GRID[param]
         st.session_state[f"step_{param}"] = _d_step
 
+    # Boolean flags: set to the value from best_params, or False if absent.
+    # This ensures that a filter NOT retained by the optimizer is unchecked.
+    _BOOL_FLAGS = (
+        'use_roc_filter',
+        'use_t2_signal',
+        'use_divergence_bb',
+        'exit_sar_enabled',
+        'exit_macd_enabled',
+        'exit_macd_type_a',
+        'exit_macd_type_b',
+        'exit_cross_sar_sma_enabled',
+        'exit_retour_bb_enabled',
+        'exit_regline_enabled',
+        'exit_volat_down_enabled',
+    )
+    for flag in _BOOL_FLAGS:
+        st.session_state[flag] = bool(final_params.get(flag, False))
+
     if str(final_source or "").lower() == "robust_set":
         st.sidebar.success("Paramètres robust-set chargés dans les inputs.")
     elif loaded_window is not None:
