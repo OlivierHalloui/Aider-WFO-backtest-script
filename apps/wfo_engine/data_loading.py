@@ -197,9 +197,9 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
             timeframe=base_timeframe,
             client_config=dict(base_endpoint='1'),
         )
-        # Extract DataFrame from the wrapper object
-        df_1s = data_obj.get()
-        
+        # Extract DataFrame from the VBT symbol_dict wrapper
+        df_1s = data_obj.data['BTCUSDT']
+
         # Resample to desired timeframe
         df = df_1s.resample(_to_pandas_freq(timeframe)).agg({
             'Open': 'first',
