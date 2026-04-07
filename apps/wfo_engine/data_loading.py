@@ -200,6 +200,13 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
         # Extract DataFrame from the VBT symbol_dict wrapper
         df_1s = data_obj.data['BTCUSDT']
 
+        # Save raw 1s data immediately — before any resample that could fail
+        base_dir = Path(__file__).resolve().parent
+        raw_folder = base_dir / "Data" / f"Binance_BTCUSDT_OHLCV_B_{start_date}_{end_date}_1s"
+        raw_folder.mkdir(parents=True, exist_ok=True)
+        raw_path = raw_folder / f"Binance_BTCUSDT_OHLCV_B_{start_date}_{end_date}_1s.csv"
+        df_1s.to_csv(raw_path)
+
         # Resample to desired timeframe
         df = df_1s.resample(_to_pandas_freq(timeframe)).agg({
             'Open': 'first',
@@ -208,9 +215,8 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
             'Close': 'last'
         }).dropna()
         df = _apply_date_filter(df, start_date, end_date)
-        # Save data for later use
+        # Save resampled data
         folder_name = f"Binance_BTCUSDT_OHLCV_B_{start_date}_{end_date}_{timeframe}"
-        base_dir = Path(__file__).resolve().parent
         folder_path = base_dir / "Data" / folder_name
         folder_path.mkdir(parents=True, exist_ok=True)
         file_path = folder_path / f"Binance_BTCUSDT_OHLCV_B_{start_date}_{end_date}_{timeframe}.csv"
