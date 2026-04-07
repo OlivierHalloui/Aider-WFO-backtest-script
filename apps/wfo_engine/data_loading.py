@@ -64,6 +64,44 @@ def _apply_date_filter(df, start_date, end_date):
         df = df[df.index <= end_ts]
     return df
 
+def _to_pandas_freq(timeframe: str) -> str:
+    """Convert a VBT/Streamlit timeframe string to a pandas-compatible resample frequency.
+
+    VBT uses TradingView notation ('1m' = 1 minute, '1h' = 1 hour, '1d' = 1 day).
+    pandas 2.x uses different aliases: minutes='min' (not 'm'), days='D' (not 'd').
+    Sub-day timeframes are expressed in seconds to avoid any ambiguity.
+
+    Examples:
+        '5s'  → '5s'
+        '1m'  → '60s'
+        '5m'  → '300s'
+        '15m' → '900s'
+        '30m' → '1800s'
+        '1h'  → '3600s'
+        '4h'  → '14400s'
+        '1d'  → '1D'
+    """
+    tf = str(timeframe).strip().lower()
+    _SECONDS = {'s': 1, 'm': 60, 'h': 3600}
+    for suffix, factor in _SECONDS.items():
+        if tf.endswith(suffix):
+            try:
+                n = int(tf[:-len(suffix)])
+                total_s = n * factor
+                if total_s < 86400:          # less than 1 day → express in seconds
+                    return f'{total_s}s'
+            except ValueError:
+                pass
+    # Day or unknown: let pandas handle it (uppercase D for calendar day)
+    if tf.endswith('d'):
+        try:
+            n = int(tf[:-1])
+            return f'{n}D'
+        except ValueError:
+            pass
+    return timeframe   # fallback: pass through unchanged
+
+
 def get_csv_date_range(file_path):
     """Read a CSV and return min/max date strings detected in its timestamp column."""
     if not file_path or not os.path.exists(file_path):
@@ -139,8 +177,8 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
         df['Open time'] = pd.to_datetime(df['Open time'], errors='coerce')
         df.set_index('Open time', inplace=True)
         df = df[~df.index.isna()]
-        # Resample efficiently
-        df = df.resample(timeframe).agg({
+        # Resample efficiently — convert to pandas-compatible frequency first
+        df = df.resample(_to_pandas_freq(timeframe)).agg({
             'Open': 'first',
             'High': 'max',
             'Low': 'min',
@@ -161,7 +199,7 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
         df_1s = data_obj.get()
         
         # Resample to desired timeframe
-        df = df_1s.resample(timeframe).agg({
+        df = df_1s.resample(_to_pandas_freq(timeframe)).agg({
             'Open': 'first',
             'High': 'max',
             'Low': 'min',
