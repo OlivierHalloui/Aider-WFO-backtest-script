@@ -188,12 +188,14 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
 
     else:
         # Fetch from Binance
+        # api.binance.com may be geo-blocked; use api1.binance.com as fallback.
         base_timeframe = '1s'  # Fetch at 1s resolution
         data_obj = vbt.BinanceData.fetch(
-            ["BTCUSDT"], 
-            start=start_date, 
+            ["BTCUSDT"],
+            start=start_date,
             end=end_date,
-            timeframe=base_timeframe
+            timeframe=base_timeframe,
+            client_config=dict(base_endpoint='1'),
         )
         # Extract DataFrame from the wrapper object
         df_1s = data_obj.get()
