@@ -4217,6 +4217,16 @@ def _cached_drawdown_hist(cache_key: str, _oos_df):
 render_strategy_panel()
 
 # ==============================================================================
+# STAGEWISE WFO PANEL
+# ==============================================================================
+with st.expander("🎯 Campagne WFO Stagewise", expanded=False):
+    from ui.stagewise_panel import render_stagewise_panel
+    render_stagewise_panel(
+        get_current_config=get_current_config,
+        load_data=load_data,
+    )
+
+# ==============================================================================
 # RESULTS VISUALIZATION
 # ==============================================================================
 

@@ -427,6 +427,7 @@ def run_stagewise_campaign(
     resume_from_stage: int = 0,
     initial_fixed_params: dict | None = None,
     final_df: pd.DataFrame | None = None,
+    stage_callback=None,
 ) -> dict:
     """
     Run the full stagewise WFO campaign.
@@ -537,6 +538,11 @@ def run_stagewise_campaign(
             }
             stage_reports.append(stage_report)
             _save_stage(output_dir, stage_num, stage_report)
+            if stage_callback is not None:
+                try:
+                    stage_callback(stage_num, stage["name"], "FAILED", stage_report)
+                except Exception:
+                    pass
             continue
 
         elapsed = (datetime.now(timezone.utc) - stage_t0).total_seconds()
@@ -578,6 +584,11 @@ def run_stagewise_campaign(
         }
         stage_reports.append(stage_report)
         _save_stage(output_dir, stage_num, stage_report)
+        if stage_callback is not None:
+            try:
+                stage_callback(stage_num, stage["name"], "OK", stage_report)
+            except Exception:
+                pass
 
     # ── final report ────────────────────────────────────────────────────────
     final_report = {
