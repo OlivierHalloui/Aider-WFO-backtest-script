@@ -914,7 +914,35 @@ with st.sidebar:
     )
     if not has_final_params:
         st.sidebar.info("Lancez le WFO pour activer le chargement des paramètres.")
-    
+
+    # --- Stagewise report import ---
+    st.sidebar.markdown("---")
+    _stagewise_upload = st.sidebar.file_uploader(
+        "📂 Importer rapport stagewise (JSON)",
+        type=["json"],
+        key="stagewise_report_uploader",
+        help="Importe les best params d'une campagne stagewise_optimizer.py "
+             "(stagewise_final_report.json) et les charge dans les inputs.",
+    )
+    if _stagewise_upload is not None:
+        from ui.final_backtest_panel import load_stagewise_params_from_json
+        _sw_file_id = getattr(_stagewise_upload, "file_id",
+                              _stagewise_upload.name + str(_stagewise_upload.size))
+        if st.session_state.get("_stagewise_file_id") != _sw_file_id:
+            st.session_state["_stagewise_file_id"] = _sw_file_id
+            try:
+                _sw_report = json.load(_stagewise_upload)
+                _ok = load_stagewise_params_from_json(_sw_report)
+                if _ok:
+                    _n_stages = _sw_report.get("n_stages", "?")
+                    _direction = _sw_report.get("direction", "")
+                    st.sidebar.success(
+                        f"Params stagewise chargés ({_n_stages} runs, {_direction})."
+                    )
+                    st.rerun()
+            except Exception as _sw_err:
+                st.sidebar.error(f"Erreur import stagewise : {_sw_err}")
+
     # --- File Uploader for Config ---
     uploaded_config = st.file_uploader(
         "📂 Load Config (JSON)",

@@ -353,6 +353,69 @@ def _json_safe(obj):
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5.  MAIN CAMPAIGN RUNNER
 # ═══════════════════════════════════════════════════════════════════════════════
+def run_final_backtest_headless(
+    best_params: dict,
+    df: pd.DataFrame,
+    timeframe: str,
+    direction: str,
+    output_dir: Path,
+) -> dict:
+    """
+    Run a full backtest with the accumulated best params on *df* and save
+    the metrics to ``final_backtest_result.json`` inside *output_dir*.
+
+    Parameters
+    ----------
+    best_params  : complete param dict (all params, not just optimised ones)
+    df           : OHLCV DataFrame for the final backtest period
+    timeframe    : pandas frequency string
+    direction    : 'long_only' | 'short_only' | 'both'
+    output_dir   : directory where the JSON result is written
+
+    Returns
+    -------
+    dict  with keys: start, end, n_bars, timeframe, direction, params, metrics
+    """
+    from strategy import run_backtest
+    from metrics import portfolio_metrics as _portfolio_metrics
+
+    params = {**best_params, "strategy_direction": direction}
+    logger.info("Final backtest: %d bars  [%s → %s]",
+                len(df), df.index.min(), df.index.max())
+
+    try:
+        pf = run_backtest(df, params, timeframe=timeframe, return_portfolio=True)
+        metrics = _portfolio_metrics(pf, window_id="final")
+    except Exception as exc:
+        logger.error("Final backtest failed: %s", exc, exc_info=True)
+        return {"status": "FAILED", "error": str(exc)}
+
+    result = {
+        "status":    "OK",
+        "start":     str(df.index.min()),
+        "end":       str(df.index.max()),
+        "n_bars":    len(df),
+        "timeframe": timeframe,
+        "direction": direction,
+        "params":    _json_safe(best_params),
+        "metrics":   _json_safe(metrics),
+    }
+
+    path = output_dir / "final_backtest_result.json"
+    with path.open("w") as f:
+        json.dump(result, f, indent=2, default=str)
+
+    logger.info("Final backtest saved → %s", path)
+    logger.info(
+        "  Return=%.2f%%  Sharpe=%.3f  MaxDD=%.2f%%  Trades=%d",
+        metrics.get("return", 0),
+        metrics.get("sharpe", 0),
+        metrics.get("max_drawdown", 0),
+        metrics.get("n_trades", 0),
+    )
+    return result
+
+
 def run_stagewise_campaign(
     df: pd.DataFrame,
     timeframe: str = "5s",
@@ -363,6 +426,7 @@ def run_stagewise_campaign(
     output_dir: Path | None = None,
     resume_from_stage: int = 0,
     initial_fixed_params: dict | None = None,
+    final_df: pd.DataFrame | None = None,
 ) -> dict:
     """
     Run the full stagewise WFO campaign.
@@ -378,6 +442,8 @@ def run_stagewise_campaign(
     output_dir          : directory for per-stage JSON files + final report
     resume_from_stage   : skip stages 0…N-1 (load their results from output_dir)
     initial_fixed_params: pre-set param values (e.g. loaded from a previous run)
+    final_df            : if provided, run a full final backtest after stage 7 and
+                          save results to ``final_backtest_result.json``
 
     Returns
     -------
@@ -525,6 +591,20 @@ def run_stagewise_campaign(
         "final_best_params": _json_safe(accumulated_best),
         "stages": stage_reports,
     }
+    # ── optional headless final backtest ────────────────────────────────────
+    if final_df is not None and not final_df.empty:
+        logger.info("=" * 70)
+        logger.info("FINAL BACKTEST with accumulated best params")
+        logger.info("=" * 70)
+        fb_result = run_final_backtest_headless(
+            best_params=accumulated_best,
+            df=final_df,
+            timeframe=timeframe,
+            direction=direction,
+            output_dir=output_dir,
+        )
+        final_report["final_backtest"] = fb_result
+
     final_path = output_dir / "stagewise_final_report.json"
     with final_path.open("w") as f:
         json.dump(final_report, f, indent=2, default=str)
@@ -585,6 +665,18 @@ def main() -> None:
         "--stages", default="",
         help="Comma-separated stage numbers to run (e.g. '1,2,3'). Default: all.",
     )
+    parser.add_argument(
+        "--final-backtest", action="store_true",
+        help="Run a final backtest after stage 7 with the accumulated best params.",
+    )
+    parser.add_argument(
+        "--final-start", default="",
+        help="Start date for final backtest (YYYY-MM-DD). Defaults to --start.",
+    )
+    parser.add_argument(
+        "--final-end", default="",
+        help="End date for final backtest (YYYY-MM-DD). Defaults to --end.",
+    )
     args = parser.parse_args()
 
     df = _load_csv(args.data_file, args.start, args.end)
@@ -602,6 +694,13 @@ def main() -> None:
         plan = [s for i, s in enumerate(STAGE_PLAN, 1) if i in requested]
         logger.info("Running stages: %s", sorted(requested))
 
+    final_df = None
+    if args.final_backtest:
+        fb_start = args.final_start or args.start
+        fb_end   = args.final_end   or args.end
+        final_df = _load_csv(args.data_file, fb_start, fb_end)
+        logger.info("Final backtest period: %s → %s", fb_start, fb_end)
+
     run_stagewise_campaign(
         df=df,
         timeframe=args.timeframe,
@@ -612,6 +711,7 @@ def main() -> None:
         output_dir=Path(args.output),
         resume_from_stage=args.resume_from,
         initial_fixed_params=initial_params or None,
+        final_df=final_df,
     )
 
 

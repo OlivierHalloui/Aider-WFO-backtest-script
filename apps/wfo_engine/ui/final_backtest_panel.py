@@ -1241,3 +1241,74 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
                 st.dataframe(_arrow_safe_df(best_pf.trades.stats()))
             except Exception:
                 pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STAGEWISE IMPORT
+# ═══════════════════════════════════════════════════════════════════════════════
+_STAGEWISE_BOOL_FLAGS = (
+    'use_roc_filter', 'use_t2_signal', 'use_divergence_bb',
+    'exit_sar_enabled', 'exit_macd_enabled',
+    'exit_macd_type_a', 'exit_macd_type_b',
+    'exit_cross_sar_sma_enabled', 'exit_retour_bb_enabled',
+    'exit_regline_enabled', 'exit_volat_down_enabled',
+)
+
+_STAGEWISE_INT_PARAMS = {
+    'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above',
+    'user_exit_sma_length', 'macd_fast_length', 'macd_slow_length',
+    'macd_signal_length', 'nb_bars_under_bbw_mini', 'nb_bars_entre_bb',
+}
+
+
+def load_stagewise_params_from_json(report: dict) -> bool:
+    """
+    Populate Streamlit session state from a ``stagewise_final_report.json``.
+
+    Reads ``final_best_params`` and sets:
+    - ``st.session_state['final_params']``          (raw dict, for final backtest)
+    - ``st.session_state[param]``                   (sidebar numeric widgets)
+    - ``st.session_state[flag]``                    (sidebar bool toggles)
+    - ``st.session_state[f'optimize_{flag}']``      (opt checkboxes — all False)
+    - ``st.session_state['final_params_source']``   = 'stagewise'
+
+    Returns True on success, False if the report has no ``final_best_params``.
+    """
+    best_params = report.get("final_best_params")
+    if not best_params:
+        st.sidebar.error("Le fichier JSON ne contient pas de 'final_best_params'.")
+        return False
+
+    # ── numeric params ──────────────────────────────────────────────────────
+    for param in DEFAULT_PARAM_GRID:
+        if param not in best_params:
+            continue
+        val = best_params[param]
+        # Uncheck optimization (this is a fixed best-params import)
+        st.session_state[f"check_{param}"] = False
+        try:
+            if param in _STAGEWISE_INT_PARAMS:
+                st.session_state[param] = int(round(float(val)))
+            else:
+                st.session_state[param] = float(val)
+        except (TypeError, ValueError):
+            pass
+
+    # ── boolean flags ───────────────────────────────────────────────────────
+    for flag in _STAGEWISE_BOOL_FLAGS:
+        if flag in best_params:
+            st.session_state[flag] = bool(best_params[flag])
+        # Mark all as not optimised (fixed import — user decides later)
+        st.session_state[f"optimize_{flag}"] = False
+
+    # ── session state for final backtest panel ──────────────────────────────
+    st.session_state['final_params']        = dict(best_params)
+    st.session_state['final_params_source'] = 'stagewise'
+    st.session_state['final_params_score']  = None
+    st.session_state['final_params_window'] = None
+
+    # ── strategy direction ──────────────────────────────────────────────────
+    if "direction" in report:
+        st.session_state['strategy_direction'] = report["direction"]
+
+    return True
