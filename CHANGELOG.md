@@ -2,6 +2,18 @@
 
 Toutes les évolutions notables de l'application WFO sont documentées ici.
 
+## 2026-04-18
+
+- **WFO Stagewise — héritage complet de la configuration UI** : le panneau stagewise supprime les champs redondants (direction, timeframe, fenêtres, dates, fichier données). Tous ces paramètres sont lus depuis le panneau latéral (`get_current_config()`). Un bandeau d'information affiche les valeurs héritées. Le fichier de données se pré-remplit automatiquement si "Charger depuis fichier CSV" est actif dans la sidebar.
+- **Sélection des meilleurs paramètres — 3 niveaux configurables** :
+  - **Niveau 1 — intra-fenêtre** (`WFO Engine Settings`) : `SNV` Stabilité Voisinage KDTree (défaut), `SVI` Validation Interne IS₂ (évalue le top-K sur les 30% finaux de IS), `Score brut max`.
+  - **Niveau 2 — cross-fenêtres** (`WFO Engine Settings`) : `Best IS+OOS` moyenne (défaut), `Best OOS seul`, `Robust Set` vote pondéré top-N, `Médiane pondérée OOS` agrégation de toutes les fenêtres.
+  - **Niveau 3 — cross-stages stagewise** (panneau campagne) : `Consensus médiane/mode` (défaut), `Best-window du run` IS+OOS, `Médiane pondérée OOS`.
+- `wfo.py` : ajout de `get_svi_best_params()` — évalue les top-K candidats IS sur une sous-période IS₂ de validation, fallback vers `raw_max` si IS₂ vide ou tous les candidats échouent.
+- `final_backtest_panel.py` : `_select_final_params_from_results()` refactorisé en dispatcher sur `cross_window_method` ; ajout de `_select_best_params_oos_only()`, `_select_weighted_oos_params()`, `_combined_score_from_row()`.
+- `stagewise_optimizer.py` : ajout de `_best_window_consensus()`, `_weighted_oos_median_consensus()`, `_weighted_median_1d()`, `_apply_stage_consensus()` ; `run_stagewise_campaign()` accepte `stage_consensus_method`.
+- `config.py` : `WFOSettings` enrichi de `selection_method`, `svi_top_k`, `svi_is2_fraction`, `cross_window_method`. Rétrocompatibilité : les valeurs par défaut reproduisent exactement le comportement antérieur.
+
 ## 2026-04-05
 
 - **Flags `optimize_*` par toggle booléen** : chaque signal d'entrée/sortie activable (SAR, MACD, MACD type A/B, RoC, T2, divergence_BB, cross SAR/SMA, retour BB, linreg, volat_down) dispose désormais d'une case à cocher "Optimiser" dans le panneau stratégie. Quand désactivée, le toggle est fixé à sa valeur courante dans la grille au lieu d'être varié `[True, False]`, ce qui réduit l'espace de recherche.

@@ -494,6 +494,50 @@ def get_stable_best_params(optimization_results, param_grid, neighbor_count=5, s
     best_row = optimization_results.iloc[best_pos]
     return best_row, smoothed[best_pos]
 
+def get_svi_best_params(optimization_results, is2_df, top_k, strategy_adapter,
+                        timeframe, metrics_info, param_grid):
+    """SVI — Select best params by performance on IS₂ holdout subset.
+
+    Takes top_k candidates from optimization_results (already sorted desc by
+    combined_score), evaluates each on is2_df, returns the row with the best
+    IS₂ combined score.  Falls back to raw_max when IS₂ is empty or all
+    candidates fail.
+    """
+    if optimization_results is None or optimization_results.empty:
+        raise ValueError("optimization_results must be a non-empty DataFrame.")
+    if len(is2_df) == 0:
+        logger.warning("SVI: IS₂ is empty — falling back to raw_max.")
+        return optimization_results.iloc[0], None
+
+    k = min(top_k, len(optimization_results))
+    candidates = optimization_results.head(k)
+    drop_cols = ["combined_score"] + list(metrics_info.keys())
+
+    best_row = None
+    best_score = float("-inf")
+    for _, row in candidates.iterrows():
+        params = row.drop(drop_cols, errors="ignore").to_dict()
+        params.update(metrics_info)
+        try:
+            score = strategy_adapter.run_backtest(
+                is2_df, params, timeframe=timeframe, return_portfolio=False
+            )
+            if score is None or not np.isfinite(float(score)):
+                continue
+            score = float(score)
+            if score > best_score:
+                best_score = score
+                best_row = row
+        except Exception as exc:
+            logger.debug("SVI candidate eval failed: %s", exc)
+
+    if best_row is None:
+        logger.warning("SVI: no valid IS₂ score — falling back to raw_max.")
+        return optimization_results.iloc[0], None
+
+    return best_row, best_score
+
+
 def walk_forward_optimization(
     df,
     param_grid=None,
@@ -787,22 +831,39 @@ def walk_forward_optimization(
         optimization_time = time.time() - optimization_start
         optimization_times.append(optimization_time)
 
-        # Get best parameters using stability selection
+        # Get best parameters — dispatch on Level 1 selection method
+        _sel_method    = getattr(settings, 'selection_method', 'snv')
         neighbor_count = getattr(settings, 'neighbor_count', 5)
-        best_row, stable_score = get_stable_best_params(
-            optimization_results,
-            window_param_grid,
-            neighbor_count=neighbor_count
-        )
+
+        if _sel_method == "raw_max":
+            best_row    = optimization_results.iloc[0]
+            stable_score = None
+            log("Selection L1: raw_max")
+        elif _sel_method == "svi":
+            _svi_frac = float(getattr(settings, 'svi_is2_fraction', 0.30))
+            _svi_k    = int(getattr(settings, 'svi_top_k', 20))
+            _split    = int(len(in_sample_df) * (1.0 - _svi_frac))
+            _is2_df   = in_sample_df.iloc[_split:]
+            log(f"Selection L1: SVI top-{_svi_k} on IS₂ ({len(_is2_df)} bars)")
+            best_row, stable_score = get_svi_best_params(
+                optimization_results, _is2_df, _svi_k,
+                strategy_adapter, timeframe, metrics_info, window_param_grid,
+            )
+        else:
+            best_row, stable_score = get_stable_best_params(
+                optimization_results, window_param_grid, neighbor_count=neighbor_count
+            )
+            log(f"Selection L1: SNV (k={neighbor_count})")
+
         best_params = best_row.drop(
-            ['combined_score', metrics_info['metric1_name'], metrics_info['metric2_name']],
+            ['combined_score'] + list(metrics_info.keys()),
             errors='ignore'
         ).to_dict()
 
         log(f"Best parameters found: {best_params}")
         log(f"Score: {best_row['combined_score']:.4f}")
         if stable_score is not None:
-            log(f"Stable score (neighbor avg): {stable_score:.4f}")
+            log(f"Selection score: {stable_score:.4f}")
         log(f"Optimization time: {timedelta(seconds=int(optimization_time))}")
 
         # Test best parameters on in-sample data

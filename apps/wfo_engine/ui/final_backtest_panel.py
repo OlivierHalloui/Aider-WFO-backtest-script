@@ -142,6 +142,114 @@ def _get_params_for_window(results, window_id):
     return None, None, None
 
 
+def _combined_score_from_row(row, metric1_name, metric2_name, w1, w2):
+    """Compute combined score from a performance row dict. Returns None on missing data."""
+    total_w = w1 + w2
+    if total_w == 0 or row is None:
+        return None
+    m1 = _resolve_metric_value(row, metric1_name)
+    m2 = _resolve_metric_value(row, metric2_name)
+    if w1 != 0 and m1 is None:
+        return None
+    if w2 != 0 and m2 is None:
+        return None
+    return (w1 * (m1 or 0.0) + w2 * (m2 or 0.0)) / total_w
+
+
+def _select_best_params_oos_only(results, config):
+    """Level 2: select window with best OOS combined score (ignores IS)."""
+    m1 = config.get('metric1_name', 'sharpe_ratio')
+    m2 = config.get('metric2_name', 'total_return')
+    w1 = float(config.get('weight_metric1', 1.0))
+    w2 = float(config.get('weight_metric2', 0.0))
+
+    is_map  = {r.get('window'): r for r in results.get('in_sample_performance',  [])}
+    oos_map = {r.get('window'): r for r in results.get('out_of_sample_performance', [])}
+
+    best_params = None
+    best_score  = None
+    best_window = None
+    best_is_metrics  = None
+    best_oos_metrics = None
+
+    for window in results.get('window_results', []):
+        wid = window.get('window_info', {}).get('window')
+        if wid is None:
+            continue
+        oos_row = oos_map.get(wid)
+        score   = _combined_score_from_row(oos_row, m1, m2, w1, w2)
+        if score is None:
+            continue
+        if best_score is None or score > best_score:
+            best_score       = score
+            best_params      = (window.get('best_params') or {}).copy()
+            best_window      = wid
+            best_is_metrics  = is_map.get(wid)
+            best_oos_metrics = oos_row
+
+    return best_params, best_score, best_window, best_is_metrics, best_oos_metrics
+
+
+def _select_weighted_oos_params(results, config):
+    """Level 2: weighted median of all windows' best_params, weighted by OOS score.
+
+    Windows with negative OOS score contribute with weight 0 (clipped).
+    Returns aggregated params as if they came from no specific window.
+    """
+    m1 = config.get('metric1_name', 'sharpe_ratio')
+    m2 = config.get('metric2_name', 'total_return')
+    w1 = float(config.get('weight_metric1', 1.0))
+    w2 = float(config.get('weight_metric2', 0.0))
+
+    oos_map = {r.get('window'): r for r in results.get('out_of_sample_performance', [])}
+
+    param_rows: list[dict] = []
+    weights:    list[float] = []
+
+    for window in results.get('window_results', []):
+        wid = window.get('window_info', {}).get('window')
+        bp  = window.get('best_params')
+        if not bp or wid is None:
+            continue
+        score = _combined_score_from_row(oos_map.get(wid), m1, m2, w1, w2)
+        if score is None or not np.isfinite(score):
+            continue
+        param_rows.append(bp)
+        weights.append(max(score, 0.0))
+
+    if not param_rows:
+        return None, None, None, None, None
+
+    weights = np.array(weights, dtype=float)
+    if weights.sum() == 0:
+        weights = np.ones(len(weights))
+
+    all_keys = set().union(*param_rows)
+    agg: dict = {}
+    for key in all_keys:
+        v_aln, w_aln = [], []
+        for i, r in enumerate(param_rows):
+            v = r.get(key)
+            if v is not None:
+                v_aln.append(v)
+                w_aln.append(weights[i])
+        if not v_aln:
+            continue
+        w_arr = np.array(w_aln, dtype=float)
+        if all(isinstance(v, bool) for v in v_aln):
+            true_w = sum(ww for v, ww in zip(v_aln, w_aln) if v)
+            agg[key] = bool(true_w >= w_arr.sum() / 2)
+        else:
+            agg[key] = _weighted_median(
+                [float(v) for v in v_aln], w_arr.tolist()
+            )
+            # Round to int when all source values were integers
+            if all(float(v) == int(float(v)) for v in v_aln if v == v):
+                agg[key] = int(round(float(agg[key])))
+
+    return agg, None, None, None, None
+
+
 def _normalize_vote_value(value):
     """Normalize heterogeneous trial values for robust voting/aggregation."""
     if isinstance(value, (bool, np.bool_)):
@@ -361,33 +469,42 @@ def _build_robust_set_summary(results, config):
 
 
 def _select_final_params_from_results(results, config):
-    """Select final params using classic best-window or robust-set mode with safe fallback."""
-    best_params, best_score, best_window, best_is_metrics, best_oos_metrics = _select_best_params_from_results(results, config)
-    robust_summary = _build_robust_set_summary(results, config)
-    use_robust = bool(config.get("robust_tests_enabled", False)) and bool(
-        config.get("robust_use_for_final_backtest", False)
-    )
-    robust_params = robust_summary.get("robust_params") if isinstance(robust_summary, dict) else None
+    """Select final params — dispatches on config['cross_window_method'] (Level 2).
 
-    if use_robust and isinstance(robust_params, dict) and robust_params and robust_summary.get("status") == "ok":
-        return (
-            robust_params.copy(),
-            None,
-            None,
-            None,
-            None,
-            "robust_set",
-            robust_summary,
-        )
-    return (
-        best_params,
-        best_score,
-        best_window,
-        best_is_metrics,
-        best_oos_metrics,
-        "best_window",
-        robust_summary,
-    )
+    Methods:
+      best_is_oos  — window with best avg(IS, OOS) combined score  [default]
+      best_oos     — window with best OOS combined score only
+      robust_set   — weighted vote/median across top-N of every window
+      weighted_oos — weighted median of all windows' best_params by OOS score
+    """
+    method = config.get("cross_window_method", "best_is_oos")
+
+    # Backward-compat: honour legacy robust_use_for_final_backtest when method
+    # is still at default but the old toggle is on.
+    if method == "best_is_oos" and bool(config.get("robust_use_for_final_backtest", False)):
+        method = "robust_set"
+
+    robust_summary = _build_robust_set_summary(results, config)
+
+    if method == "robust_set":
+        robust_params = robust_summary.get("robust_params") if isinstance(robust_summary, dict) else None
+        if isinstance(robust_params, dict) and robust_params and robust_summary.get("status") == "ok":
+            return (robust_params.copy(), None, None, None, None, "robust_set", robust_summary)
+        # Fallback if robust set failed
+        bp, sc, bw, is_m, oos_m = _select_best_params_from_results(results, config)
+        return (bp, sc, bw, is_m, oos_m, "best_window", robust_summary)
+
+    if method == "best_oos":
+        bp, sc, bw, is_m, oos_m = _select_best_params_oos_only(results, config)
+        return (bp, sc, bw, is_m, oos_m, "best_oos", robust_summary)
+
+    if method == "weighted_oos":
+        bp, sc, bw, is_m, oos_m = _select_weighted_oos_params(results, config)
+        return (bp, sc, bw, is_m, oos_m, "weighted_oos", robust_summary)
+
+    # Default: best_is_oos
+    bp, sc, bw, is_m, oos_m = _select_best_params_from_results(results, config)
+    return (bp, sc, bw, is_m, oos_m, "best_window", robust_summary)
 
 
 # ---------------------------------------------------------------------------
@@ -523,11 +640,12 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
         If set, forces the use of that specific WFO window's best params.
         If None, the global best window (or robust set) is selected automatically.
     """
-    if 'wfo_results' not in st.session_state or 'df' not in st.session_state:
+    _is_stagewise = st.session_state.get('final_params_source') == 'stagewise'
+
+    if not _is_stagewise and 'wfo_results' not in st.session_state:
         st.error("No WFO results available to run final backtest.")
         return
 
-    results = st.session_state['wfo_results']
     config = get_current_config()
     final_start_date = st.session_state.get('final_start_date', config.get('start_date'))
     final_end_date = st.session_state.get('final_end_date', config.get('end_date'))
@@ -535,7 +653,9 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
 
     _final_tf = _get_final_timeframe(config)
     with st.spinner("Loading data for final backtest..."):
-        if config.get('from_file'):
+        # For stagewise imports, force file loading when a path is provided.
+        _use_file = config.get('from_file') or (_is_stagewise and bool(final_file_path))
+        if _use_file:
             df = load_data(
                 final_start_date,
                 final_end_date,
@@ -556,42 +676,56 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
         return
     st.session_state['final_backtest_df'] = df
 
-    # When a specific window is requested, bypass the automatic best-window selection.
-    if window_id is not None:
-        wp, is_m, oos_m = _get_params_for_window(results, window_id)
-        if not wp:
-            st.error(f"Aucun paramètre trouvé pour la fenêtre {window_id}.")
+    if _is_stagewise:
+        # Stagewise path: use pre-loaded accumulated best params directly.
+        chosen_params = dict(st.session_state.get('final_params', {}))
+        if not chosen_params:
+            st.error("Aucun paramètre stagewise chargé. Lancez ou importez une campagne stagewise.")
             return
-        chosen_params = wp
         best_score = None
-        best_window = window_id
-        best_is_metrics = is_m
-        best_oos_metrics = oos_m
-        final_source = f"window_{window_id}"
+        best_window = None
+        best_is_metrics = None
+        best_oos_metrics = None
+        final_source = 'stagewise'
         robust_summary = None
     else:
-        # Use either classic best-window params or robust-set params (if enabled).
-        (
-            chosen_params,
-            best_score,
-            best_window,
-            best_is_metrics,
-            best_oos_metrics,
-            final_source,
-            robust_summary,
-        ) = _select_final_params_from_results(results, config)
-        if not chosen_params:
-            st.error("No valid parameters found for final backtest.")
-            return
-        if (
-            bool(config.get("robust_tests_enabled", False))
-            and bool(config.get("robust_use_for_final_backtest", False))
-            and str(final_source or "").lower() != "robust_set"
-        ):
-            st.warning(
-                "Robust Set demande mais non applicable sur ce run. "
-                "Fallback automatique vers la selection classique best_window."
-            )
+        results = st.session_state['wfo_results']
+        # When a specific window is requested, bypass the automatic best-window selection.
+        if window_id is not None:
+            wp, is_m, oos_m = _get_params_for_window(results, window_id)
+            if not wp:
+                st.error(f"Aucun paramètre trouvé pour la fenêtre {window_id}.")
+                return
+            chosen_params = wp
+            best_score = None
+            best_window = window_id
+            best_is_metrics = is_m
+            best_oos_metrics = oos_m
+            final_source = f"window_{window_id}"
+            robust_summary = None
+        else:
+            # Use either classic best-window params or robust-set params (if enabled).
+            (
+                chosen_params,
+                best_score,
+                best_window,
+                best_is_metrics,
+                best_oos_metrics,
+                final_source,
+                robust_summary,
+            ) = _select_final_params_from_results(results, config)
+            if not chosen_params:
+                st.error("No valid parameters found for final backtest.")
+                return
+            if (
+                bool(config.get("robust_tests_enabled", False))
+                and bool(config.get("robust_use_for_final_backtest", False))
+                and str(final_source or "").lower() != "robust_set"
+            ):
+                st.warning(
+                    "Robust Set demande mais non applicable sur ce run. "
+                    "Fallback automatique vers la selection classique best_window."
+                )
 
     # Define integer parameters that should be rounded
     int_params = {
@@ -1310,5 +1444,18 @@ def load_stagewise_params_from_json(report: dict) -> bool:
     # ── strategy direction ──────────────────────────────────────────────────
     if "direction" in report:
         st.session_state['strategy_direction'] = report["direction"]
+
+    # ── data file path for the final backtest ───────────────────────────────
+    # Read from report (JSON import) or fall back to _sw_data_file (live run).
+    _file_path = (
+        report.get("data_file_path")
+        or st.session_state.get("_sw_data_file", "")
+    )
+    if _file_path:
+        st.session_state['final_file_path'] = _file_path
+        st.session_state['final_start_date'] = report.get("start_date",
+            st.session_state.get("final_start_date", ""))
+        st.session_state['final_end_date']   = report.get("end_date",
+            st.session_state.get("final_end_date", ""))
 
     return True

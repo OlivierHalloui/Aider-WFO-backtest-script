@@ -313,21 +313,131 @@ def _consensus_params(wfo_results: dict) -> dict:
     return result
 
 
-def _make_wfo_settings(stage: dict, direction: str,
-                        n_windows: int = 6,
-                        train_size: float = 0.75) -> WFOSettings:
+def _weighted_median_1d(values: np.ndarray, weights: np.ndarray) -> float:
+    """Weighted median of a 1-D float array."""
+    sort_idx = np.argsort(values)
+    values  = values[sort_idx]
+    weights = weights[sort_idx]
+    cumw    = np.cumsum(weights)
+    midpoint = cumw[-1] / 2.0
+    idx = int(np.searchsorted(cumw, midpoint))
+    return float(values[min(idx, len(values) - 1)])
+
+
+def _best_window_consensus(wfo_results: dict) -> dict:
+    """Level 3: best_params from the window with highest avg IS+OOS Sharpe."""
+    is_map  = {r.get("window"): r for r in wfo_results.get("in_sample_performance",  [])}
+    oos_map = {r.get("window"): r for r in wfo_results.get("out_of_sample_performance", [])}
+
+    best_params: dict = {}
+    best_score = float("-inf")
+
+    for wr in wfo_results.get("window_results", []):
+        wid = wr.get("window_info", {}).get("window")
+        bp  = wr.get("best_params", {})
+        if not bp or wid is None:
+            continue
+        is_s  = float((is_map.get(wid)  or {}).get("sharpe", np.nan))
+        oos_s = float((oos_map.get(wid) or {}).get("sharpe", np.nan))
+        valid = [s for s in [is_s, oos_s] if np.isfinite(s)]
+        if not valid:
+            continue
+        score = float(np.mean(valid))
+        if score > best_score:
+            best_score  = score
+            best_params = dict(bp)
+
+    return best_params
+
+
+def _weighted_oos_median_consensus(wfo_results: dict) -> dict:
+    """Level 3: weighted median of per-window best_params, weighted by OOS Sharpe."""
+    oos_map = {r.get("window"): r for r in wfo_results.get("out_of_sample_performance", [])}
+
+    param_rows: list[dict]  = []
+    weights:    list[float] = []
+
+    for wr in wfo_results.get("window_results", []):
+        wid = wr.get("window_info", {}).get("window")
+        bp  = wr.get("best_params")
+        if not bp or wid is None:
+            continue
+        oos_s = float((oos_map.get(wid) or {}).get("sharpe", np.nan))
+        if not np.isfinite(oos_s):
+            continue
+        param_rows.append(bp)
+        weights.append(max(oos_s, 0.0))
+
+    if not param_rows:
+        return {}
+
+    w_arr = np.array(weights, dtype=float)
+    if w_arr.sum() == 0:
+        w_arr = np.ones(len(w_arr))
+
+    all_keys = set().union(*param_rows)
+    result: dict = {}
+    for key in all_keys:
+        v_aln, w_aln = [], []
+        for i, r in enumerate(param_rows):
+            v = r.get(key)
+            if v is not None:
+                v_aln.append(v)
+                w_aln.append(w_arr[i])
+        if not v_aln:
+            continue
+        wa = np.array(w_aln, dtype=float)
+        unique = set(v_aln)
+        if unique.issubset({True, False, 0, 1}):
+            true_w = sum(ww for v, ww in zip(v_aln, w_aln) if v)
+            result[key] = bool(true_w >= wa.sum() / 2)
+        else:
+            vals = np.array([float(v) for v in v_aln], dtype=float)
+            med  = _weighted_median_1d(vals, wa)
+            if all(float(v) == int(float(v)) for v in v_aln):
+                result[key] = int(round(med))
+            else:
+                result[key] = med
+
+    return result
+
+
+def _apply_stage_consensus(wfo_results: dict, method: str) -> dict:
+    """Dispatch to the configured Level 3 consensus method."""
+    if method == "best_window":
+        return _best_window_consensus(wfo_results)
+    if method == "weighted_oos_median":
+        return _weighted_oos_median_consensus(wfo_results)
+    return _consensus_params(wfo_results)   # default: median/mode
+
+
+def _make_wfo_settings(
+    stage: dict,
+    direction: str,
+    n_windows: int = 6,
+    train_size: float = 0.75,
+    anchored: bool = False,
+    optimization_metric: str = "sharpe_ratio",
+    secondary_metric: str = "total_return",
+    metric_weights: tuple = (1.0, 0.0),
+    parallel_backend: str = "dask",
+    neighbor_count: int = 5,
+    pqs_n_ref: int = 50,
+) -> WFOSettings:
     return WFOSettings(
         n_windows=n_windows,
         train_size=train_size,
-        anchored=False,
+        anchored=anchored,
         optimization_method=stage["method"],
         max_trials=stage["max_trials"],
         patience_level=stage["patience"],
-        parallel_backend="dask",
-        optimization_metric="sharpe_ratio",
-        secondary_metric="total_return",
-        metric_weights=(1.0, 0.0),
+        parallel_backend=parallel_backend,
+        optimization_metric=optimization_metric,
+        secondary_metric=secondary_metric,
+        metric_weights=metric_weights,
         strategy_direction=direction,
+        neighbor_count=neighbor_count,
+        pqs_n_ref=pqs_n_ref,
     )
 
 
@@ -348,6 +458,78 @@ def _json_safe(obj):
     if isinstance(obj, (list, tuple)):
         return [_json_safe(v) for v in obj]
     return obj
+
+
+def _slim_wfo_results(wfo_results: dict) -> dict:
+    """
+    Remove heavy per-trial data from a wfo_results dict.
+    Keeps window_info, best_params, top-5 optimization_results, and counts.
+    Removes optimization_trials (can be hundreds of rows × N windows).
+    """
+    slimmed = dict(wfo_results)
+    slimmed["window_results"] = [
+        {k: v for k, v in wr.items() if k != "optimization_trials"}
+        for wr in slimmed.get("window_results", [])
+    ]
+    for key in ("robust_set", "robust_set_summary", "nn_guidance"):
+        slimmed.pop(key, None)
+    return slimmed
+
+
+def build_stagewise_wfo_results(final_report: dict) -> dict:
+    """
+    Build a wfo_results-compatible dict from a stagewise final_report.
+
+    Uses the last successful stage's WFO output (stored as
+    ``last_stage_wfo_results``) and reconstructs complete per-window
+    best_params by merging the fixed params from that stage with each
+    window's stage-specific optimised params.
+
+    This dict is compatible with all existing WFO visualisation, ZIP
+    export, and Final Backtest flows.  Returns {} when no WFO data is
+    available (all stages failed).
+    """
+    lswr = final_report.get("last_stage_wfo_results")
+    if not lswr:
+        return {}
+
+    fixed = final_report.get("last_stage_fixed_params", {})
+
+    # Rebuild per-window complete params = fixed(all prior stages) + last-stage window params
+    window_results = []
+    best_params_list = []
+    for wr in lswr.get("window_results", []):
+        partial = wr.get("best_params", {})
+        complete = {**fixed, **partial}
+        window_results.append({**wr, "best_params": complete})
+        best_params_list.append(complete)
+
+    return {
+        "window_results":            window_results,
+        "in_sample_performance":     lswr.get("in_sample_performance", []),
+        "out_of_sample_performance": lswr.get("out_of_sample_performance", []),
+        "best_params":               best_params_list,
+        "settings":                  lswr.get("settings", {}),
+        "timing":                    lswr.get("timing", {}),
+        # Stagewise-specific metadata (underscore-prefixed to avoid conflicts)
+        "_source":            "stagewise",
+        "_n_stages":          final_report.get("n_stages"),
+        "_campaign_start":    final_report.get("campaign_start"),
+        "_campaign_end":      final_report.get("campaign_end"),
+        "_final_best_params": final_report.get("final_best_params", {}),
+        "_stages_summary": [
+            {
+                "stage":          s.get("stage"),
+                "name":           s.get("name"),
+                "status":         s.get("status"),
+                "is_avg_sharpe":  s.get("is_avg_sharpe"),
+                "oos_avg_sharpe": s.get("oos_avg_sharpe"),
+                "is_avg_return":  s.get("is_avg_return"),
+                "oos_avg_return": s.get("oos_avg_return"),
+            }
+            for s in final_report.get("stages", [])
+        ],
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -423,11 +605,20 @@ def run_stagewise_campaign(
     stage_plan: list[dict] | None = None,
     n_windows: int = 6,
     train_size: float = 0.75,
+    anchored: bool = False,
     output_dir: Path | None = None,
     resume_from_stage: int = 0,
     initial_fixed_params: dict | None = None,
     final_df: pd.DataFrame | None = None,
     stage_callback=None,
+    data_file_path: str = "",
+    optimization_metric: str = "sharpe_ratio",
+    secondary_metric: str = "total_return",
+    metric_weights: tuple = (1.0, 0.0),
+    parallel_backend: str = "dask",
+    neighbor_count: int = 5,
+    pqs_n_ref: int = 50,
+    stage_consensus_method: str = "median_mode",
 ) -> dict:
     """
     Run the full stagewise WFO campaign.
@@ -440,11 +631,18 @@ def run_stagewise_campaign(
     stage_plan          : list of stage dicts (defaults to STAGE_PLAN)
     n_windows           : number of WFO windows (identical across all stages)
     train_size          : IS fraction (identical across all stages)
+    anchored            : use anchored (fixed-start) WFO windows
     output_dir          : directory for per-stage JSON files + final report
     resume_from_stage   : skip stages 0…N-1 (load their results from output_dir)
     initial_fixed_params: pre-set param values (e.g. loaded from a previous run)
     final_df            : if provided, run a full final backtest after stage 7 and
                           save results to ``final_backtest_result.json``
+    optimization_metric : primary metric name (from UI Performance Metrics panel)
+    secondary_metric    : secondary metric name
+    metric_weights      : (w1, w2) weights for combined score
+    parallel_backend    : 'dask' | 'joblib' | 'sequential'
+    neighbor_count      : stability neighbor count for get_stable_best_params
+    pqs_n_ref           : PQS reference trade count (√(n_trades/n_ref))
 
     Returns
     -------
@@ -479,6 +677,10 @@ def run_stagewise_campaign(
             resume_from_stage = i
             break
 
+    # Track last successful stage WFO results for synthetic wfo_results reconstruction
+    _last_wfo_results: dict | None = None
+    _last_fixed_params: dict = {}
+
     # ── run stages ──────────────────────────────────────────────────────────
     for stage_idx, stage in enumerate(stage_plan):
         if stage_idx < resume_from_stage:
@@ -505,7 +707,16 @@ def run_stagewise_campaign(
 
         # Build adapter + settings
         adapter = _FixedParamAdapter(base_adapter, fixed_for_stage)
-        settings = _make_wfo_settings(stage, direction, n_windows, train_size)
+        settings = _make_wfo_settings(
+            stage, direction, n_windows, train_size,
+            anchored=anchored,
+            optimization_metric=optimization_metric,
+            secondary_metric=secondary_metric,
+            metric_weights=metric_weights,
+            parallel_backend=parallel_backend,
+            neighbor_count=neighbor_count,
+            pqs_n_ref=pqs_n_ref,
+        )
 
         param_grid = _build_stage_param_grid(stage)
         metrics_info = {
@@ -547,21 +758,25 @@ def run_stagewise_campaign(
 
         elapsed = (datetime.now(timezone.utc) - stage_t0).total_seconds()
 
-        # Extract consensus best params across windows
-        consensus = _consensus_params(wfo_results)
+        # Capture last successful stage data (slimmed) for wfo_results reconstruction
+        _last_wfo_results = _slim_wfo_results(wfo_results)
+        _last_fixed_params = dict(fixed_for_stage)
+
+        # Extract consensus best params across windows (Level 3 method)
+        consensus = _apply_stage_consensus(wfo_results, stage_consensus_method)
         accumulated_best.update(consensus)
 
         # Summary metrics
         is_perfs  = wfo_results.get("in_sample_performance", [])
         oos_perfs = wfo_results.get("out_of_sample_performance", [])
-        is_sharpe  = float(np.nanmean([r.get("sharpe_ratio", np.nan) for r in is_perfs]))  if is_perfs  else None
-        oos_sharpe = float(np.nanmean([r.get("sharpe_ratio", np.nan) for r in oos_perfs])) if oos_perfs else None
-        is_ret   = float(np.nanmean([r.get("total_return",  np.nan) for r in is_perfs]))   if is_perfs  else None
-        oos_ret  = float(np.nanmean([r.get("total_return",  np.nan) for r in oos_perfs]))  if oos_perfs else None
+        is_sharpe  = float(np.nanmean([r.get("sharpe", np.nan) for r in is_perfs]))  if is_perfs  else None
+        oos_sharpe = float(np.nanmean([r.get("sharpe", np.nan) for r in oos_perfs])) if oos_perfs else None
+        is_ret   = float(np.nanmean([r.get("return",  np.nan) for r in is_perfs]))   if is_perfs  else None
+        oos_ret  = float(np.nanmean([r.get("return",  np.nan) for r in oos_perfs]))  if oos_perfs else None
 
         logger.info("  Stage %d done in %.0fs", stage_num, elapsed)
-        logger.info("  IS  Sharpe=%.3f  Return=%.2f%%", is_sharpe or 0, (is_ret or 0) * 100)
-        logger.info("  OOS Sharpe=%.3f  Return=%.2f%%", oos_sharpe or 0, (oos_ret or 0) * 100)
+        logger.info("  IS  Sharpe=%.3f  Return=%.2f%%", is_sharpe or 0, is_ret or 0)
+        logger.info("  OOS Sharpe=%.3f  Return=%.2f%%", oos_sharpe or 0, oos_ret or 0)
         logger.info("  Consensus best params: %s", consensus)
 
         stage_report = {
@@ -599,8 +814,13 @@ def run_stagewise_campaign(
         "n_windows":      n_windows,
         "train_size":     train_size,
         "n_stages":       len(stage_plan),
+        "data_file_path": data_file_path,
         "final_best_params": _json_safe(accumulated_best),
         "stages": stage_reports,
+        # Last successful stage WFO data — used by build_stagewise_wfo_results()
+        # to produce a standard wfo_results dict for visualization and ZIP export.
+        "last_stage_wfo_results": _json_safe(_last_wfo_results) if _last_wfo_results else None,
+        "last_stage_fixed_params": _json_safe(_last_fixed_params),
     }
     # ── optional headless final backtest ────────────────────────────────────
     if final_df is not None and not final_df.empty:

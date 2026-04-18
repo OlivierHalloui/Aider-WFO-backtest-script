@@ -59,6 +59,10 @@ class WFOSettings:
     patience_level: str = "Medium"              # Patience for Bayesian/Optuna early stopping
     max_trials: int = 200                       # Maximum number of trials for Bayesian/Optuna optimization
     neighbor_count: int = 5                     # Neighbor count for stability selection
+    selection_method: str = "snv"               # Level 1 intra-window: "snv" | "svi" | "raw_max"
+    svi_top_k: int = 20                         # SVI: top-K candidates evaluated on IS₂
+    svi_is2_fraction: float = 0.30              # SVI: fraction of IS reserved as IS₂ holdout
+    cross_window_method: str = "best_is_oos"    # Level 2 cross-window: "best_is_oos" | "best_oos" | "robust_set" | "weighted_oos"
     nn_min_samples: int = 500                   # Min cumulative trials before enabling NN guidance
     nn_candidate_pool_size: int = 3000          # Random candidates scored by the NN per window
     nn_top_k: int = 250                         # Top candidate count used to build next guided grid

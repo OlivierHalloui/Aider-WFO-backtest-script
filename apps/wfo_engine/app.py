@@ -2646,6 +2646,51 @@ with st.sidebar:
             help="Lissage local utilisé pour sélectionner un meilleur paramètre plus robuste."
         )
 
+        st.markdown("**Sélection intra-fenêtre (Niveau 1)**")
+        _sel_methods = ["snv", "svi", "raw_max"]
+        _sel_labels  = {
+            "snv":     "SNV — Stabilité Voisinage (KDTree)",
+            "svi":     "SVI — Validation Interne IS₂",
+            "raw_max": "Score brut max",
+        }
+        selection_method = st.selectbox(
+            "Méthode sélection intra-fenêtre",
+            options=_sel_methods,
+            format_func=lambda x: _sel_labels[x],
+            index=0,
+            key='selection_method',
+            help="SNV : plateau robuste par voisinage normalisé. SVI : meilleur sur IS₂. raw_max : pic absolu (risque overfit)."
+        )
+        if selection_method == "svi":
+            _col_svi1, _col_svi2 = st.columns(2)
+            _col_svi1.number_input(
+                "SVI Top-K candidats", min_value=5, value=20, step=5,
+                key='svi_top_k',
+                help="Nombre de candidats IS-top évalués sur IS₂."
+            )
+            _col_svi2.slider(
+                "SVI fraction IS₂", 0.10, 0.50, 0.30, 0.05,
+                key='svi_is2_fraction',
+                help="Part de IS réservée comme sous-période de validation."
+            )
+
+        st.markdown("**Sélection cross-fenêtres (Niveau 2)**")
+        _cw_methods = ["best_is_oos", "best_oos", "robust_set", "weighted_oos"]
+        _cw_labels  = {
+            "best_is_oos":  "Best IS+OOS — fenêtre avec meilleure moyenne IS/OOS",
+            "best_oos":     "Best OOS seul — fenêtre avec meilleur score OOS",
+            "robust_set":   "Robust Set — vote pondéré top-N cross-fenêtres",
+            "weighted_oos": "Médiane pondérée OOS — agrégation de toutes les fenêtres",
+        }
+        cross_window_method = st.selectbox(
+            "Méthode sélection cross-fenêtres",
+            options=_cw_methods,
+            format_func=lambda x: _cw_labels[x],
+            index=0,
+            key='cross_window_method',
+            help="Détermine quels paramètres sont utilisés pour le Final Backtest."
+        )
+
         backends = ['thread', 'dask', 'ray', 'pathos']
         parallel_backend = st.selectbox(
             "Parallel Backend",
@@ -3212,6 +3257,10 @@ def get_current_config():
         'patience_level': patience_level,
         'max_trials': max_trials,
         'neighbor_count': neighbor_count,
+        'selection_method': str(st.session_state.get('selection_method', 'snv')),
+        'svi_top_k': int(st.session_state.get('svi_top_k', 20)),
+        'svi_is2_fraction': float(st.session_state.get('svi_is2_fraction', 0.30)),
+        'cross_window_method': str(st.session_state.get('cross_window_method', 'best_is_oos')),
         'robust_tests_enabled': bool(st.session_state.get('robust_tests_enabled', False)),
         'robust_top_n_per_window': int(st.session_state.get('robust_top_n_per_window', 20)),
         'robust_min_windows': int(st.session_state.get('robust_min_windows', 3)),
@@ -3820,71 +3869,80 @@ if "wfo_results" in st.session_state:
 else:
     st.sidebar.info("Run an optimization or load a results ZIP to enable export.")
 
-# Final Backtest section (Conditional — requires a completed WFO run)
-if 'wfo_results' in st.session_state:
+# Final Backtest section — requires WFO results OR stagewise params loaded
+_has_stagewise_params = (
+    st.session_state.get('final_params_source') == 'stagewise'
+    and 'final_params' in st.session_state
+)
+if 'wfo_results' in st.session_state or _has_stagewise_params:
     st.sidebar.divider()
     with st.sidebar.expander("🏆 Final Backtest", expanded=True):
 
-        # --- Robust Tests (Level 1) ---
-        st.markdown("##### Robust Tests (Level 1)")
-        robust_tests_enabled = st.checkbox(
-            "Enable Robust Set (Top-N + vote multi-fenêtres)",
-            value=bool(st.session_state.get("robust_tests_enabled", False)),
-            key="robust_tests_enabled",
-            help=(
-                "Construit un ensemble robuste en prenant les Top-N trials de chaque fenêtre, "
-                "puis en agrégeant les paramètres par vote/médiane pondérés."
-            ),
-        )
-        st.number_input(
-            "Robust Top-N / fenêtre",
-            min_value=3,
-            max_value=500,
-            value=int(st.session_state.get("robust_top_n_per_window", 20)),
-            step=1,
-            key="robust_top_n_per_window",
-            disabled=not robust_tests_enabled,
-            help=(
-                "Nombre de meilleurs trials IS conservés par fenêtre pour construire le pool robuste. "
-                "Plus N est élevé, plus la robustesse augmente, mais la sélection est moins agressive."
-            ),
-        )
-        st.number_input(
-            "Robust min fenêtres requises",
-            min_value=1,
-            max_value=100,
-            value=int(st.session_state.get("robust_min_windows", 3)),
-            step=1,
-            key="robust_min_windows",
-            disabled=not robust_tests_enabled,
-            help=(
-                "Nombre minimal de fenêtres avec trials exploitables pour valider le robust set. "
-                "Si ce seuil n'est pas atteint, l'app revient automatiquement au mode classique."
-            ),
-        )
-        st.checkbox(
-            "Use Robust Set for Final Backtest",
-            value=bool(st.session_state.get("robust_use_for_final_backtest", False)),
-            key="robust_use_for_final_backtest",
-            disabled=not robust_tests_enabled,
-            help=(
-                "Si activé, le backtest final utilise les paramètres robustes. "
-                "Sinon, il conserve le meilleur jeu de paramètres d'une fenêtre."
-            ),
-        )
-        with st.expander("Guide utilisateur - Robust Tests", expanded=False):
-            st.markdown(
-                "Le mode `Robust Set` réduit la dépendance à un optimum local de fenêtre.\n"
-                "- Étape 1: on prend les Top-N trials dans chaque fenêtre.\n"
-                "- Étape 2: on agrège les paramètres via vote pondéré (catégoriels/bool) et médiane pondérée (numériques).\n"
-                "- Étape 3: on obtient un jeu de paramètres plus stable inter-fenêtres.\n\n"
-                "Conseils:\n"
-                "- Commence avec `Top-N=20` et `min fenêtres=3`.\n"
-                "- Active `Use Robust Set for Final Backtest` pour tester la robustesse OOS globale.\n"
-                "- Si les fenêtres sont peu nombreuses, garde un fallback classique."
-            )
+        if _has_stagewise_params and 'wfo_results' not in st.session_state:
+            st.info("Paramètres stagewise chargés — le backtest final utilisera les meilleurs params de la campagne.")
 
-        st.divider()
+        # --- Robust Tests (Level 1) — only available with a WFO run ---
+        robust_tests_enabled = False
+        if 'wfo_results' in st.session_state:
+            st.markdown("##### Robust Tests (Level 1)")
+            robust_tests_enabled = st.checkbox(
+                "Enable Robust Set (Top-N + vote multi-fenêtres)",
+                value=bool(st.session_state.get("robust_tests_enabled", False)),
+                key="robust_tests_enabled",
+                help=(
+                    "Construit un ensemble robuste en prenant les Top-N trials de chaque fenêtre, "
+                    "puis en agrégeant les paramètres par vote/médiane pondérés."
+                ),
+            )
+            st.number_input(
+                "Robust Top-N / fenêtre",
+                min_value=3,
+                max_value=500,
+                value=int(st.session_state.get("robust_top_n_per_window", 20)),
+                step=1,
+                key="robust_top_n_per_window",
+                disabled=not robust_tests_enabled,
+                help=(
+                    "Nombre de meilleurs trials IS conservés par fenêtre pour construire le pool robuste. "
+                    "Plus N est élevé, plus la robustesse augmente, mais la sélection est moins agressive."
+                ),
+            )
+            st.number_input(
+                "Robust min fenêtres requises",
+                min_value=1,
+                max_value=100,
+                value=int(st.session_state.get("robust_min_windows", 3)),
+                step=1,
+                key="robust_min_windows",
+                disabled=not robust_tests_enabled,
+                help=(
+                    "Nombre minimal de fenêtres avec trials exploitables pour valider le robust set. "
+                    "Si ce seuil n'est pas atteint, l'app revient automatiquement au mode classique."
+                ),
+            )
+            st.checkbox(
+                "Use Robust Set for Final Backtest",
+                value=bool(st.session_state.get("robust_use_for_final_backtest", False)),
+                key="robust_use_for_final_backtest",
+                disabled=not robust_tests_enabled,
+                help=(
+                    "Si activé, le backtest final utilise les paramètres robustes. "
+                    "Sinon, il conserve le meilleur jeu de paramètres d'une fenêtre."
+                ),
+            )
+            with st.expander("Guide utilisateur - Robust Tests", expanded=False):
+                st.markdown(
+                    "Le mode `Robust Set` réduit la dépendance à un optimum local de fenêtre.\n"
+                    "- Étape 1: on prend les Top-N trials dans chaque fenêtre.\n"
+                    "- Étape 2: on agrège les paramètres via vote pondéré (catégoriels/bool) et médiane pondérée (numériques).\n"
+                    "- Étape 3: on obtient un jeu de paramètres plus stable inter-fenêtres.\n\n"
+                    "Conseils:\n"
+                    "- Commence avec `Top-N=20` et `min fenêtres=3`.\n"
+                    "- Active `Use Robust Set for Final Backtest` pour tester la robustesse OOS globale.\n"
+                    "- Si les fenêtres sont peu nombreuses, garde un fallback classique."
+                )
+
+            st.divider()
 
         # --- PQS settings ---
         st.markdown("##### PQS — Profit Quality Score")
@@ -4227,6 +4285,50 @@ with st.expander("🎯 Campagne WFO Stagewise", expanded=False):
     )
 
 # ==============================================================================
+# STAGEWISE FINAL BACKTEST RESULTS
+# Shown when a stagewise backtest ran successfully but no WFO campaign exists.
+# ==============================================================================
+if 'final_portfolio' in st.session_state and 'wfo_results' not in st.session_state:
+    _sw_pf     = st.session_state['final_portfolio']
+    _sw_params = st.session_state.get('final_params', {})
+    _sw_src    = st.session_state.get('final_params_source', 'stagewise')
+    st.divider()
+    st.header("🏆 Backtest Final — Résultats")
+    st.caption(f"Source des paramètres : `{_sw_src}`")
+
+    _c1, _c2, _c3, _c4 = st.columns(4)
+    _c1.metric("Total Return",  f"{_sw_pf.total_return * 100:.2f}%")
+    _c2.metric("Sharpe Ratio",  f"{_sw_pf.sharpe_ratio:.3f}")
+    _c3.metric("Max Drawdown",  f"{_sw_pf.max_drawdown * 100:.2f}%")
+    _c4.metric("Trades",        str(len(_sw_pf.trades)))
+
+    _sw_tf = st.session_state.get('final_timeframe') or st.session_state.get('timeframe', DEFAULT_TIMEFRAME)
+    st.caption(f"Timeframe : `{_sw_tf}`")
+
+    with st.expander("Paramètres utilisés", expanded=False):
+        st.json(_sw_params)
+
+    st.markdown("#### Trade Stats")
+    try:
+        st.dataframe(_arrow_safe_df(_sw_pf.trades.stats()))
+    except Exception as _e:
+        st.warning(f"Trade stats non disponibles : {_e}")
+
+    st.markdown("#### Courbe des returns (%)")
+    try:
+        _val = _sw_pf.value
+        _pct = (_val / float(_val.iloc[0]) - 1.0) * 100.0
+        _pct_ds = _downsample_series(_pct, max_points=5000)
+        _fig_sw = go.Figure()
+        _fig_sw.add_trace(go.Scatter(x=_pct_ds.index, y=_pct_ds.values,
+                                     mode="lines", name="Portfolio"))
+        _fig_sw.update_layout(height=300, template="plotly_dark",
+                              yaxis_title="Return %", margin=dict(t=30, b=20))
+        st.plotly_chart(_fig_sw, use_container_width=True)
+    except Exception as _e:
+        st.warning(f"Graphique non disponible : {_e}")
+
+# ==============================================================================
 # RESULTS VISUALIZATION
 # ==============================================================================
 
@@ -4253,9 +4355,28 @@ if 'wfo_results' in st.session_state:
 
     df = st.session_state.get('df')
     traceability = results.get("traceability") or st.session_state.get("wfo_traceability")
-    
+
     st.divider()
-    st.header("📊 Optimization Results")
+    if results.get("_source") == "stagewise":
+        n_stg = results.get("_n_stages", "?")
+        st.header(f"📊 Résultats WFO Stagewise ({n_stg} runs)")
+        _sw_summary = results.get("_stages_summary", [])
+        if _sw_summary:
+            with st.expander("Résumé des runs stagewise", expanded=False):
+                _sw_cols = st.columns(min(len(_sw_summary), 4))
+                for _i, _s in enumerate(_sw_summary):
+                    _col = _sw_cols[_i % len(_sw_cols)]
+                    _icon = "✅" if _s.get("status") == "OK" else "❌"
+                    _is_sh = _s.get("is_avg_sharpe")
+                    _oos_sh = _s.get("oos_avg_sharpe")
+                    _col.markdown(
+                        f"**{_icon} Run {_s.get('stage')}**  \n"
+                        f"{str(_s.get('name', '')).split('—')[-1].strip()}  \n"
+                        f"IS `{f'{_is_sh:.2f}' if isinstance(_is_sh, float) else 'n/a'}`  "
+                        f"OOS `{f'{_oos_sh:.2f}' if isinstance(_oos_sh, float) else 'n/a'}`"
+                    )
+    else:
+        st.header("📊 Optimization Results")
     if traceability:
         with st.expander("🧾 Traçabilité du run", expanded=False):
             run_meta = traceability.get("run", {}) if isinstance(traceability, dict) else {}
