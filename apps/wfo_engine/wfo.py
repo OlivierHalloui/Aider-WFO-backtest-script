@@ -333,7 +333,13 @@ def optimize_parameters(
                 if self.no_improve_steps >= self.patience_steps:
                     study.stop()
 
-        int_params = {'timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length'}
+        int_params = {
+            'timeperiod', 'Nb_bars_above', 'fenetre_lowest', 'longueur_mediane',
+            'nb_bars_under_bbw_mini', 'nb_bars_entre_bb', 'user_exit_sma_length',
+            'macd_fast_length', 'macd_slow_length', 'macd_signal_length',
+            'nb_bars_left_pivot', 'nb_bars_right_pivot', 'nombre_periodes_reglin',
+            'i_bars_back',
+        }
         sampler = optuna.samplers.TPESampler(
             multivariate=True,
             constant_liar=True,
@@ -411,7 +417,13 @@ def optimize_parameters(
                     raise OptimizationInterrupted()
             params = {}
             for param_name, values in tunable_grid.items():
-                if param_name in ['timeperiod', 'fenetre_lowest', 'longueur_mediane', 'Nb_bars_above', 'user_exit_sma_length']:
+                if param_name in {
+                    'timeperiod', 'Nb_bars_above', 'fenetre_lowest', 'longueur_mediane',
+                    'nb_bars_under_bbw_mini', 'nb_bars_entre_bb', 'user_exit_sma_length',
+                    'macd_fast_length', 'macd_slow_length', 'macd_signal_length',
+                    'nb_bars_left_pivot', 'nb_bars_right_pivot', 'nombre_periodes_reglin',
+                    'i_bars_back',
+                }:
                     params[param_name] = int(trial.suggest_categorical(param_name, values))
                 else:
                     params[param_name] = float(trial.suggest_categorical(param_name, values))
