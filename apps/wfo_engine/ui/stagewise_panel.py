@@ -20,15 +20,32 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ct
 
 from stagewise_optimizer import (
     STAGE_PLAN,
+    FULL_PARAM_REGISTRY,
     run_stagewise_campaign,
     build_stagewise_wfo_results,
+    propose_stage_settings,
     _load_csv,
 )
+from config import DEFAULT_PARAM_GRID
+from services.error_log import write_error_log, collect_stagewise_entries
 from ui.final_backtest_panel import load_stagewise_params_from_json
 
 # ── constants ─────────────────────────────────────────────────────────────────
 _DEFAULT_OUTPUT = "reports/stagewise"
 _POLL_SECONDS   = 2        # fragment refresh rate
+
+
+def _param_label(key: str, param_ranges: dict) -> str:
+    """Format a param key as 'key [min→max, ×step]' or 'key [True/False]'."""
+    spec = FULL_PARAM_REGISTRY.get(key)
+    if spec is None:
+        return key
+    if isinstance(spec, list):
+        return f"{key}  [True/False]"
+    min_v, max_v, step = param_ranges.get(key, spec)
+    def _f(v: float) -> str:
+        return str(int(v)) if float(v) == int(float(v)) else f"{v:g}"
+    return f"{key}  [{_f(min_v)}→{_f(max_v)}, ×{_f(step)}]"
 
 
 @st.cache_data(show_spinner=False)
@@ -121,10 +138,7 @@ def _stagewise_worker(
         })
         run_state["current_stage"] = stage_num + 1
 
-    # Build stage plan from selected stage indices
-    selected = cfg.get("selected_stages", list(range(1, len(STAGE_PLAN) + 1)))
-    plan = [s for i, s in enumerate(STAGE_PLAN, 1) if i in selected]
-
+    plan = cfg.get("stage_plan", STAGE_PLAN)
     run_state["n_stages"] = len(plan)
     run_state["current_stage"] = 1
     run_state["status"] = "running"
@@ -160,10 +174,34 @@ def _stagewise_worker(
             neighbor_count=cfg.get("neighbor_count", 5),
             pqs_n_ref=cfg.get("pqs_n_ref", 50),
             stage_consensus_method=cfg.get("stage_consensus_method", "median_mode"),
+            param_ranges=cfg.get("param_ranges"),
         )
         run_state["final_report"] = final_report
+
+        # Write error log — captures FAILED stages + non-positive OOS Sharpe warnings
+        _entries = collect_stagewise_entries(final_report)
+        _failed  = [s for s in final_report.get("stages", []) if s.get("status") == "FAILED"]
+        _log_path = write_error_log(
+            run_type="stagewise",
+            config=cfg,
+            entries=_entries,
+            output_dir=cfg["output_dir"],
+            run_ts=cfg.get("run_ts"),
+            status="FAILED" if _failed else "OK",
+        )
+        run_state["error_log_path"] = _log_path
         run_state["status"] = "done"
     except Exception as exc:
+        _log_path = write_error_log(
+            run_type="stagewise",
+            config=cfg,
+            entries=[{"level": "ERROR", "context": "campaign", "message": str(exc)}],
+            output_dir=cfg.get("output_dir", "reports/error_logs"),
+            run_ts=cfg.get("run_ts"),
+            status="FAILED",
+            fatal_error=str(exc),
+        )
+        run_state["error_log_path"] = _log_path
         run_state["status"] = "error"
         run_state["error"] = str(exc)
 
@@ -181,9 +219,7 @@ def _render_stagewise_progress():
     n_stages      = run_state.get("n_stages", len(STAGE_PLAN))
     current_stage = run_state.get("current_stage", 1)
     completed     = run_state.get("completed", [])
-    selected      = st.session_state.get("_sw_cfg", {}).get(
-        "selected_stages", list(range(1, n_stages + 1))
-    )
+    _plan = st.session_state.get("_sw_cfg", {}).get("stage_plan", STAGE_PLAN)
 
     # ── global progress bar ──────────────────────────────────────────────────
     progress_pct = len(completed) / max(n_stages, 1)
@@ -197,14 +233,12 @@ def _render_stagewise_progress():
     st.progress(progress_pct, text=status_label)
 
     # ── per-stage cards ──────────────────────────────────────────────────────
-    plan_names = [s["name"] for s in STAGE_PLAN]
     cols = st.columns(min(n_stages, 4))
 
-    for i, stage_num in enumerate(selected):
+    for i, stage in enumerate(_plan):
+        stage_num = i + 1
         col = cols[i % len(cols)]
-        plan_idx = stage_num - 1
-        name = plan_names[plan_idx] if plan_idx < len(plan_names) else f"Stage {stage_num}"
-        # Find completed report for this stage
+        name = stage.get("name", f"Run {stage_num}")
         done = next((c for c in completed if c["stage"] == stage_num), None)
 
         with col:
@@ -214,8 +248,7 @@ def _render_stagewise_progress():
                 oos_s = done.get("oos_sharpe")
                 is_r  = done.get("is_return")
                 oos_r = done.get("oos_return")
-                elapsed = done.get("elapsed", 0)
-                # Safe formatting — value may be None (failed stage) or nan (no trades)
+                elapsed = done.get("elapsed") or 0
                 _fs = lambda v: f"{v:.2f}" if isinstance(v, (int, float)) else "n/a"
                 _fr = lambda v: f"{v:+.1f}%" if isinstance(v, (int, float)) else "n/a"
                 st.markdown(
@@ -270,22 +303,45 @@ def _render_stagewise_progress():
             m = fb.get("metrics", {})
             st.markdown("---")
             st.markdown("##### Backtest final (headless)")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Sharpe",  f"{m.get('sharpe', 0):.3f}")
-            c2.metric("Return",  f"{m.get('return', 0):+.2f}%")
-            c3.metric("Max DD",  f"{m.get('max_drawdown', 0):.2f}%")
-            c4.metric("Trades",  str(m.get("n_trades", 0)))
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Sharpe",      f"{m.get('sharpe', 0):.3f}")
+            c2.metric("Return",      f"{m.get('return', 0):+.2f}%")
+            c3.metric("Mean P&L %",  f"{m.get('avg_pl_per_trade', 0):+.4f}%")
+            c4.metric("Max DD",      f"{m.get('max_drawdown', 0):.2f}%")
+            c5.metric("Trades",      str(m.get("n_trades", 0)))
 
         if st.session_state.get("wfo_results", {}).get("_source") == "stagewise":
             _zip_path = st.session_state.get("_sw_zip_path", "")
             _cfg_disp = st.session_state.get("_sw_cfg", {})
+            _log_path = run_state.get("error_log_path", "")
             st.info(
                 f"✅ Résultats WFO chargés — visualisation IS/OOS disponible ci-dessous.  \n"
                 f"📁 Fichiers stage : `{_cfg_disp.get('output_dir', '')}` "
                 f"| 💾 ZIP : `{_zip_path}`"
             )
+            if _log_path:
+                _lp = Path(_log_path)
+                if _lp.exists():
+                    st.download_button(
+                        "📋 Télécharger journal erreurs",
+                        data=_lp.read_text(encoding="utf-8"),
+                        file_name=_lp.name,
+                        mime="application/json",
+                        key="dl_sw_error_log_info",
+                    )
         else:
+            _log_path = run_state.get("error_log_path", "")
             st.success("Params chargés dans les inputs. Tu peux lancer le Final Backtest.")
+            if _log_path:
+                _lp = Path(_log_path)
+                if _lp.exists():
+                    st.download_button(
+                        "📋 Télécharger journal erreurs",
+                        data=_lp.read_text(encoding="utf-8"),
+                        file_name=_lp.name,
+                        mime="application/json",
+                        key="dl_sw_error_log_success",
+                    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -381,17 +437,110 @@ def render_stagewise_panel(*, get_current_config, load_data):
             help="Méthode d'agrégation des best_params de chaque fenêtre WFO pour fixer les paramètres du run suivant.",
         )
 
-        # Stage selection
-        st.markdown("**Stages à exécuter**")
-        stage_cols = st.columns(4)
-        selected_stages = []
-        for i, stage in enumerate(STAGE_PLAN):
-            col = stage_cols[i % 4]
-            label = f"Run {i+1}: {stage['name'].split('—')[-1].strip()}"
-            checked = col.checkbox(label, value=True, key=f"_sw_stage_{i+1}",
-                                   disabled=is_running)
-            if checked:
-                selected_stages.append(i + 1)
+        # ── Dynamic run builder ───────────────────────────────────────────────
+        st.markdown("**Runs à exécuter**")
+
+        # Build effective ranges from sidebar (Strategy Configuration panel)
+        _param_ranges: dict = {}
+        for _p, (_d_min, _d_max, _d_step) in DEFAULT_PARAM_GRID.items():
+            _param_ranges[_p] = (
+                float(st.session_state.get(f"min_{_p}", _d_min)),
+                float(st.session_state.get(f"max_{_p}", _d_max)),
+                float(st.session_state.get(f"step_{_p}", _d_step)),
+            )
+
+        _ALL_PARAM_KEYS = list(FULL_PARAM_REGISTRY.keys())
+
+        # Initialize session_state run list from STAGE_PLAN defaults once
+        if "_sw_runs" not in st.session_state or not st.session_state["_sw_runs"]:
+            st.session_state["_sw_runs"] = [
+                {"id": i + 1, "name": s["name"]}
+                for i, s in enumerate(STAGE_PLAN)
+            ]
+            st.session_state["_sw_run_id_counter"] = len(STAGE_PLAN) + 1
+            for i, s in enumerate(STAGE_PLAN):
+                st.session_state[f"_sw_run_{i+1}_params"] = list(s["optimize"])
+                st.session_state[f"_sw_run_{i+1}_settings_src"] = "algo"
+
+        runs = st.session_state["_sw_runs"]
+
+        # Track which run to delete (do it after rendering to avoid index shift)
+        _delete_id = None
+
+        for run in runs:
+            rid = run["id"]
+            with st.container(border=True):
+                hcol1, hcol2, hcol3 = st.columns([3, 6, 1])
+                run["name"] = hcol1.text_input(
+                    "Nom du run",
+                    value=run.get("name", f"Run {rid}"),
+                    key=f"_sw_run_{rid}_name",
+                    disabled=is_running,
+                    label_visibility="collapsed",
+                )
+                _cur_params = st.session_state.get(
+                    f"_sw_run_{rid}_params",
+                    [k for k in _ALL_PARAM_KEYS[:4]],
+                )
+                selected_params = hcol2.multiselect(
+                    "Paramètres à optimiser",
+                    options=_ALL_PARAM_KEYS,
+                    default=_cur_params,
+                    format_func=lambda k: _param_label(k, _param_ranges),
+                    key=f"_sw_run_{rid}_params",
+                    disabled=is_running,
+                    label_visibility="collapsed",
+                )
+                with hcol3:
+                    if st.button("🗑", key=f"_sw_run_{rid}_del", disabled=is_running,
+                                 help="Supprimer ce run"):
+                        _delete_id = rid
+
+                # Proposed settings from algorithm — uses sidebar ranges for n_combos
+                _proposal = propose_stage_settings(selected_params, _param_ranges)
+                _src_key = f"_sw_run_{rid}_settings_src"
+                st.session_state.setdefault(_src_key, "algo")
+
+                pcol1, pcol2 = st.columns([3, 1])
+                _method_label = {
+                    "grid":     "Grid exhaustif",
+                    "bayesian": "Bayésien",
+                }.get(_proposal["method"], _proposal["method"])
+                pcol1.caption(
+                    f"💡 Algorithme → **{_method_label}** | "
+                    f"Trials : **{_proposal['max_trials']}** | "
+                    f"Patience : **{_proposal['patience']}** | "
+                    f"Stabilité : **{_proposal['stability']}** | "
+                    f"Combinaisons : **{_proposal['n_combos']:,}**"
+                )
+                _src = pcol2.radio(
+                    "Settings source",
+                    options=["algo", "sidebar"],
+                    format_func=lambda x: "Algorithme" if x == "algo" else "Panneau latéral",
+                    index=0 if st.session_state[_src_key] == "algo" else 1,
+                    key=_src_key,
+                    disabled=is_running,
+                    horizontal=True,
+                    label_visibility="collapsed",
+                )
+
+        # Delete run outside the loop
+        if _delete_id is not None:
+            st.session_state["_sw_runs"] = [
+                r for r in runs if r["id"] != _delete_id
+            ]
+            st.rerun()
+
+        if not is_running:
+            if st.button("➕ Ajouter un run", key="_sw_btn_add_run"):
+                new_id = st.session_state["_sw_run_id_counter"]
+                st.session_state["_sw_runs"].append(
+                    {"id": new_id, "name": f"Run {new_id}"}
+                )
+                st.session_state[f"_sw_run_{new_id}_params"] = []
+                st.session_state[f"_sw_run_{new_id}_settings_src"] = "algo"
+                st.session_state["_sw_run_id_counter"] = new_id + 1
+                st.rerun()
 
         # When data file changes, refresh final backtest date defaults from the CSV
         if sw_data_file and sw_data_file != st.session_state.get("_sw_last_data_file"):
@@ -429,7 +578,12 @@ def render_stagewise_panel(*, get_current_config, load_data):
     col_start, col_stop = st.columns(2)
 
     with col_start:
-        start_disabled = is_running or not selected_stages or not sw_data_file
+        _runs_now = st.session_state.get("_sw_runs", [])
+        _has_valid_runs = any(
+            bool(st.session_state.get(f"_sw_run_{r['id']}_params"))
+            for r in _runs_now
+        )
+        start_disabled = is_running or not _has_valid_runs or not sw_data_file
         if st.button(
             "▶ Démarrer la campagne stagewise",
             disabled=start_disabled,
@@ -460,6 +614,38 @@ def render_stagewise_panel(*, get_current_config, load_data):
             _run_ts = time.strftime("%Y%m%d_%H%M%S")
             _run_output = str(Path(sw_output) / _run_ts)
 
+            # Build stage_plan from dynamic run builder widget values
+            _sidebar_method  = config.get("optimization_method", "bayesian")
+            _sidebar_trials  = int(config.get("max_trials", 100))
+            _sidebar_patience = config.get("patience_level", "Low")
+            _stage_plan = []
+            for _r in st.session_state.get("_sw_runs", []):
+                _rid = _r["id"]
+                _params = st.session_state.get(f"_sw_run_{_rid}_params", [])
+                if not _params:
+                    continue
+                _src   = st.session_state.get(f"_sw_run_{_rid}_settings_src", "algo")
+                _prop  = propose_stage_settings(_params)
+                if _src == "algo":
+                    _method   = _prop["method"]
+                    _trials   = _prop["max_trials"]
+                    _patience = _prop["patience"]
+                    _stability = _prop["stability"]
+                else:
+                    _method   = _sidebar_method
+                    _trials   = _sidebar_trials
+                    _patience = _sidebar_patience
+                    _stability = neighbor_count
+                _stage_plan.append({
+                    "name":            st.session_state.get(f"_sw_run_{_rid}_name", _r["name"]),
+                    "optimize":        _params,
+                    "fixed_overrides": {},
+                    "method":          _method,
+                    "max_trials":      _trials,
+                    "patience":        _patience,
+                    "stability":       _stability,
+                })
+
             # Build campaign config — all settings from sidebar UI
             cfg = {
                 "timeframe":           sw_timeframe,
@@ -469,7 +655,7 @@ def render_stagewise_panel(*, get_current_config, load_data):
                 "anchored":            sw_anchored,
                 "output_dir":          _run_output,
                 "run_ts":              _run_ts,
-                "selected_stages":     selected_stages,
+                "stage_plan":          _stage_plan,
                 "data_file":           sw_data_file,
                 "order_sizing_mode":   order_sizing_mode,
                 "order_fixed_cash":    order_fixed_cash,
@@ -481,13 +667,14 @@ def render_stagewise_panel(*, get_current_config, load_data):
                 "neighbor_count":        neighbor_count,
                 "pqs_n_ref":             pqs_n_ref,
                 "stage_consensus_method": st.session_state.get("_sw_stage_consensus", "median_mode"),
+                "param_ranges":          _param_ranges,
             }
             st.session_state["_sw_cfg"] = cfg
 
             # Shared mutable state (thread writes in-place)
             run_state: dict = {
                 "status":        "running",
-                "n_stages":      len(selected_stages),
+                "n_stages":      len(_stage_plan),
                 "current_stage": 1,
                 "completed":     [],
                 "final_report":  None,

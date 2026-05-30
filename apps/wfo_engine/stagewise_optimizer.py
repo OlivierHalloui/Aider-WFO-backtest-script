@@ -54,28 +54,28 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════
 FULL_PARAM_REGISTRY: dict[str, Any] = {
     # ── BB core ──
-    "timeperiod":              (8,   20,  2),
-    "StDev":                   (0.8,  2.0, 0.2),
+    "timeperiod":              (10,   30,   1),
+    "StDev":                   (0.8,   3.0,  0.1),
     # ── BBW compression ──
-    "coeff_medianeBBW":        (0.9,  1.5, 0.1),
-    "nb_bars_under_bbw_mini":  (1,    8,   1),
+    "coeff_medianeBBW":        (0.9,   1.5,  0.1),
+    "nb_bars_under_bbw_mini":  (1,    10,   2),
     # ── BB% filter ──
-    "coef_mediane":            (0.7,  1.1, 0.1),
-    "fenetre_lowest":          (40,   120, 20),
-    "seuil_lowest":            (1.0,  3.5, 0.5),
-    "longueur_mediane":        (50,   150, 50),
-    "Nb_bars_above":           (1,    6,   1),
-    "nb_bars_entre_bb":        (1,    10,  1),
+    "coef_mediane":            (0.6,   1.3,  0.1),
+    "fenetre_lowest":          (20,   200,  10),
+    "seuil_lowest":            (1.0,   4.0,  0.1),
+    "longueur_mediane":        (50,   200,  10),
+    "Nb_bars_above":           (1,     8,   1),
+    "nb_bars_entre_bb":        (1,    10,   2),
     # ── SMA exit ──
-    "user_exit_sma_length":    (8,   20,  2),
+    "user_exit_sma_length":    (6,    30,   1),
     # ── SAR exit ──
-    "sar_start":               (0.02, 0.05, 0.01),
-    "sar_increment":           (0.02, 0.05, 0.01),
-    "sar_maximum":             (0.1,  0.3,  0.05),
+    "sar_start":               (0.02,  0.05, 0.01),
+    "sar_increment":           (0.02,  0.05, 0.01),
+    "sar_maximum":             (0.1,   0.3,  0.05),
     # ── MACD exit ──
-    "macd_fast_length":        (6,   14,  2),
-    "macd_slow_length":        (14,  26,  2),
-    "macd_signal_length":      (4,   10,  2),
+    "macd_fast_length":        (6,    14,   2),
+    "macd_slow_length":        (14,   26,   2),
+    "macd_signal_length":      (4,    10,   2),
     # ── entry filter booleans ──
     "use_t2_signal":           [True, False],
     "use_roc_filter":          [True, False],
@@ -125,57 +125,120 @@ PARAM_DEFAULTS: dict[str, Any] = {
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 2.  STAGE PLAN  (7 stages)
+# 2.  STAGE PLAN  (11 stages)
 #     Each stage defines:
 #       name            – human label
 #       optimize        – params to search (keys from FULL_PARAM_REGISTRY)
 #       fixed_overrides – params to FORCE for this stage (ignore accumulated best)
 #       method          – 'bayesian' | 'grid'
-#       max_trials      – Bayesian trial budget
+#       max_trials      – trial budget (= n_combos for grid; budget for bayesian)
 #       patience        – 'Low' | 'Medium' | 'High'
 #       stability       – neighbor count for get_stable_best_params
+#
+#  Sequencing rationale:
+#    BB geometry → BBW filter → BB% filter → lowest filter → median →
+#    entry count → entry booleans → SMA exit → SAR exit → MACD exit →
+#    exit booleans
+#  Each group calibrated after upstream dependencies are fixed.
+#  No parameter appears in more than one run.
+#
+#  Combo counts (from reference config ranges):
+#    Run 1  : 21×23 =    483  → Bayésien
+#    Run 2  :  7× 5 =     35  → Grid exhaustif
+#    Run 3  :  8× 5 =     40  → Grid exhaustif
+#    Run 4  : 19×31 =    589  → Bayésien
+#    Run 5  :      16         → Grid exhaustif
+#    Run 6  :       8         → Grid exhaustif
+#    Run 7  :  2³  = 8        → Grid exhaustif
+#    Run 8  :      25         → Grid exhaustif
+#    Run 9  : 2×4×4×5 = 160  → Bayésien
+#    Run 10 : 2×4×5×7×4=1120 → Bayésien
+#    Run 11 :  2⁴ = 16        → Grid exhaustif
 # ═══════════════════════════════════════════════════════════════════════════════
 STAGE_PLAN: list[dict] = [
     {
-        "name":     "Run 1 — BB core + BBW compression",
-        "optimize": [
-            "timeperiod", "StDev",
-            "coeff_medianeBBW", "nb_bars_under_bbw_mini",
-        ],
+        # timeperiod + StDev jointly define the BB band geometry.
+        # All other params depend on this geometry — must be first.
+        # 21×23 = 483 combos → Bayésien.
+        "name":     "Run 1 — BB core geometry",
+        "optimize": ["timeperiod", "StDev"],
         "fixed_overrides": {
-            "use_t2_signal":           True,
-            "use_roc_filter":          False,
-            "use_divergence_bb":       False,
-            "exit_sar_enabled":        False,
-            "exit_macd_enabled":       False,
+            # Force all optional features off so the BB signal is evaluated clean.
+            "use_t2_signal":              True,
+            "use_roc_filter":             False,
+            "use_divergence_bb":          False,
+            "exit_sar_enabled":           False,
+            "exit_macd_enabled":          False,
             "exit_cross_sar_sma_enabled": False,
-            "exit_retour_bb_enabled":  False,
-            "exit_regline_enabled":    False,
-            "exit_volat_down_enabled": False,
+            "exit_retour_bb_enabled":     False,
+            "exit_regline_enabled":       False,
+            "exit_volat_down_enabled":    False,
         },
         "method":     "bayesian",
-        "max_trials": 100,
-        "patience":   "Low",
-        "stability":  3,
-    },
-    {
-        "name":     "Run 2 — BB% filter + SMA exit",
-        "optimize": [
-            "coef_mediane", "fenetre_lowest", "seuil_lowest",
-            "longueur_mediane", "Nb_bars_above", "nb_bars_entre_bb",
-            "user_exit_sma_length",
-        ],
-        "fixed_overrides": {},
-        "method":     "bayesian",
-        "max_trials": 150,
+        "max_trials": 150,      # 21×23 = 483 combos
         "patience":   "Medium",
         "stability":  3,
     },
     {
-        "name":     "Run 3 — Entry filter booleans (T2 / RoC / Divergence)",
-        "optimize": [
-            "use_t2_signal", "use_roc_filter", "use_divergence_bb",
-        ],
+        # BBW compression threshold and bar-count depend on the BB width
+        # established in Run 1. 7×5 = 35 combos → Grid exhaustif.
+        "name":     "Run 2 — BBW compression filter",
+        "optimize": ["coeff_medianeBBW", "nb_bars_under_bbw_mini"],
+        "fixed_overrides": {},
+        "method":     "grid",
+        "max_trials": 35,       # 7×5 — exhaustive
+        "patience":   "Low",
+        "stability":  3,
+    },
+    {
+        # coef_mediane (BB% threshold) and nb_bars_entre_bb (price-position
+        # filter) are both positional filters relative to the BB bands.
+        # 8×5 = 40 combos → Grid exhaustif.
+        "name":     "Run 3 — BB% filter + band spacing",
+        "optimize": ["coef_mediane", "nb_bars_entre_bb"],
+        "fixed_overrides": {},
+        "method":     "grid",
+        "max_trials": 40,       # 8×5 — exhaustive
+        "patience":   "Low",
+        "stability":  3,
+    },
+    {
+        # fenetre_lowest and seuil_lowest are tightly coupled (optimal threshold
+        # depends on lookback window). 19×31 = 589 combos → Bayésien.
+        "name":     "Run 4 — Lowest filter (fenêtre + seuil)",
+        "optimize": ["fenetre_lowest", "seuil_lowest"],
+        "fixed_overrides": {},
+        "method":     "bayesian",
+        "max_trials": 150,      # 19×31 = 589 combos
+        "patience":   "Medium",
+        "stability":  3,
+    },
+    {
+        # longueur_mediane separated from Run 4: only 16 values → Grid exhaustif.
+        "name":     "Run 5 — Longueur médiane",
+        "optimize": ["longueur_mediane"],
+        "fixed_overrides": {},
+        "method":     "grid",
+        "max_trials": 16,       # 16 values — exhaustive
+        "patience":   "Low",
+        "stability":  3,
+    },
+    {
+        # Nb_bars_above is a temporal entry filter independent of BB params.
+        # 8 values → Grid exhaustif.
+        "name":     "Run 6 — Entry bar count",
+        "optimize": ["Nb_bars_above"],
+        "fixed_overrides": {},
+        "method":     "grid",
+        "max_trials": 8,        # 8 values — exhaustive
+        "patience":   "Low",
+        "stability":  3,
+    },
+    {
+        # Boolean entry-feature selection after all entry thresholds are fixed.
+        # 2³ = 8 combos → Grid exhaustif.
+        "name":     "Run 7 — Entry filter booleans (T2 / RoC / Divergence)",
+        "optimize": ["use_t2_signal", "use_roc_filter", "use_divergence_bb"],
         "fixed_overrides": {},
         "method":     "grid",
         "max_trials": 8,        # 2³ — exhaustive
@@ -183,19 +246,36 @@ STAGE_PLAN: list[dict] = [
         "stability":  3,
     },
     {
-        "name":     "Run 4 — SAR exit calibration",
+        # SMA cross-exit: simple, independent of SAR/MACD; calibrate first
+        # once all entry signals are fixed. 25 values → Grid exhaustif.
+        "name":     "Run 8 — SMA exit calibration",
+        "optimize": ["user_exit_sma_length"],
+        "fixed_overrides": {},
+        "method":     "grid",
+        "max_trials": 25,       # 25 values — exhaustive
+        "patience":   "Low",
+        "stability":  3,
+    },
+    {
+        # SAR triplet (start/increment/maximum) is internally coupled;
+        # include the enable boolean to avoid biasing the calibration.
+        # 2×4×4×5 = 160 combos → Bayésien.
+        "name":     "Run 9 — SAR exit calibration",
         "optimize": [
             "exit_sar_enabled",
             "sar_start", "sar_increment", "sar_maximum",
         ],
         "fixed_overrides": {},
         "method":     "bayesian",
-        "max_trials": 100,
+        "max_trials": 100,      # 2×4×4×5 = 160 combos
         "patience":   "Low",
         "stability":  3,
     },
     {
-        "name":     "Run 5 — MACD exit calibration",
+        # MACD fast/slow/signal are indissociable; type_a/type_b select the
+        # signal mode and interact directly with the lengths.
+        # 2×2×2×5×7×4 = 1120 combos → Bayésien.
+        "name":     "Run 10 — MACD exit calibration",
         "optimize": [
             "exit_macd_enabled",
             "exit_macd_type_a", "exit_macd_type_b",
@@ -203,12 +283,15 @@ STAGE_PLAN: list[dict] = [
         ],
         "fixed_overrides": {},
         "method":     "bayesian",
-        "max_trials": 150,
+        "max_trials": 200,      # 2×2×2×5×7×4 = 1120 combos
         "patience":   "Medium",
-        "stability":  3,
+        "stability":  5,
     },
     {
-        "name":     "Run 6 — Cross / supplementary exits (booleans)",
+        # Final boolean selection for supplementary exits — all thresholds
+        # already fixed, pure on/off feature selection.
+        # 2⁴ = 16 combos → Grid exhaustif.
+        "name":     "Run 11 — Supplementary exit booleans",
         "optimize": [
             "exit_cross_sar_sma_enabled",
             "exit_retour_bb_enabled",
@@ -220,21 +303,6 @@ STAGE_PLAN: list[dict] = [
         "max_trials": 16,       # 2⁴ — exhaustive
         "patience":   "Low",
         "stability":  3,
-    },
-    {
-        "name":     "Run 7 — Re-calibration signal (BB core + BB% + SMA)",
-        "optimize": [
-            "timeperiod", "StDev",
-            "coeff_medianeBBW", "nb_bars_under_bbw_mini",
-            "coef_mediane", "fenetre_lowest", "seuil_lowest",
-            "longueur_mediane", "Nb_bars_above", "nb_bars_entre_bb",
-            "user_exit_sma_length",
-        ],
-        "fixed_overrides": {},   # exits + filters fixed from Runs 3-6
-        "method":     "bayesian",
-        "max_trials": 200,
-        "patience":   "Medium",
-        "stability":  5,        # final run — higher stability
     },
 ]
 
@@ -275,13 +343,24 @@ class _FixedParamAdapter:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4.  HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
-def _build_stage_param_grid(stage: dict) -> dict:
-    """Return a param_grid dict containing only the params to optimise."""
+def _build_stage_param_grid(stage: dict, param_ranges: dict | None = None) -> dict:
+    """Return a param_grid dict containing only the params to optimise.
+
+    param_ranges overrides FULL_PARAM_REGISTRY for continuous params:
+      {param_name: (min, max, step)}  — sourced from the Strategy panel sidebar.
+    Boolean params ([True, False]) always come from FULL_PARAM_REGISTRY.
+    """
     grid = {}
     for key in stage["optimize"]:
         if key not in FULL_PARAM_REGISTRY:
             raise KeyError(f"Unknown param '{key}' in stage '{stage['name']}'")
-        grid[key] = FULL_PARAM_REGISTRY[key]
+        spec = FULL_PARAM_REGISTRY[key]
+        if isinstance(spec, list):
+            grid[key] = spec  # boolean — no range override
+        elif param_ranges and key in param_ranges:
+            grid[key] = param_ranges[key]  # sidebar range
+        else:
+            grid[key] = spec
     return grid
 
 
@@ -311,6 +390,66 @@ def _consensus_params(wfo_results: dict) -> dict:
         else:
             result[col] = float(series.median())
     return result
+
+
+def propose_stage_settings(param_keys: list[str], param_ranges: dict | None = None) -> dict:
+    """Propose WFO engine settings based on the combinatorial complexity of param_keys.
+
+    param_ranges overrides FULL_PARAM_REGISTRY for continuous params:
+      {param_name: (min, max, step)}  — sourced from the Strategy panel sidebar.
+
+    Algorithm:
+      1. For each param compute its discrete value count:
+           list spec   → len(spec)
+           tuple spec  → round((max - min) / step) + 1
+      2. n_combos = product of all counts
+      3. Map n_combos to method / max_trials / patience / stability via thresholds
+
+    Thresholds (tuned against the hardcoded STAGE_PLAN as reference):
+      n ≤ 32 (or ≤ 64 when all-boolean)  → Grid exhaustif
+      32 < n ≤ 500                        → Bayesian  60 trials  Low   k=3
+      500 < n ≤ 5 000                     → Bayesian 100 trials  Low   k=3
+      5 000 < n ≤ 100 000                 → Bayesian 150 trials  Medium k=3
+      n > 100 000                         → Bayesian 200 trials  Medium k=5
+
+    Returns dict: method, max_trials, patience, stability, n_combos.
+    """
+    if not param_keys:
+        return {"method": "grid", "max_trials": 1, "patience": "Low",
+                "stability": 3, "n_combos": 0}
+
+    n_combos = 1
+    all_bool = True
+    for key in param_keys:
+        spec = FULL_PARAM_REGISTRY.get(key)
+        if spec is None:
+            continue
+        if isinstance(spec, list):
+            n_combos *= len(spec)
+        else:  # (min, max, step) tuple — prefer sidebar range if available
+            if param_ranges and key in param_ranges:
+                min_v, max_v, step = param_ranges[key]
+            else:
+                min_v, max_v, step = spec
+            n_combos *= max(round((max_v - min_v) / step) + 1, 1)
+            all_bool = False
+
+    grid_threshold = 64 if all_bool else 32
+
+    if n_combos <= grid_threshold:
+        return {"method": "grid",     "max_trials": n_combos, "patience": "Low",
+                "stability": 3, "n_combos": n_combos}
+    if n_combos <= 500:
+        return {"method": "bayesian", "max_trials": 60,       "patience": "Low",
+                "stability": 3, "n_combos": n_combos}
+    if n_combos <= 5_000:
+        return {"method": "bayesian", "max_trials": 100,      "patience": "Low",
+                "stability": 3, "n_combos": n_combos}
+    if n_combos <= 100_000:
+        return {"method": "bayesian", "max_trials": 150,      "patience": "Medium",
+                "stability": 3, "n_combos": n_combos}
+    return {"method": "bayesian", "max_trials": 200, "patience": "Medium",
+            "stability": 5, "n_combos": n_combos}
 
 
 def _weighted_median_1d(values: np.ndarray, weights: np.ndarray) -> float:
@@ -436,7 +575,7 @@ def _make_wfo_settings(
         secondary_metric=secondary_metric,
         metric_weights=metric_weights,
         strategy_direction=direction,
-        neighbor_count=neighbor_count,
+        neighbor_count=stage.get("stability", neighbor_count),
         pqs_n_ref=pqs_n_ref,
     )
 
@@ -619,6 +758,7 @@ def run_stagewise_campaign(
     neighbor_count: int = 5,
     pqs_n_ref: int = 50,
     stage_consensus_method: str = "median_mode",
+    param_ranges: dict | None = None,
 ) -> dict:
     """
     Run the full stagewise WFO campaign.
@@ -718,7 +858,7 @@ def run_stagewise_campaign(
             pqs_n_ref=pqs_n_ref,
         )
 
-        param_grid = _build_stage_param_grid(stage)
+        param_grid = _build_stage_param_grid(stage, param_ranges=param_ranges)
         metrics_info = {
             "metric1_name":  settings.optimization_metric,
             "metric2_name":  settings.secondary_metric,
@@ -854,14 +994,20 @@ def _save_stage(output_dir: Path, stage_num: int, report: dict) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 6.  CLI
 # ═══════════════════════════════════════════════════════════════════════════════
+def _normalize_date(s: str) -> str:
+    """Normalize date strings: replace dots/slashes with dashes in the YYYY?MM?DD part."""
+    import re
+    return re.sub(r'(\d{4})[.\-/](\d{2})[.\-/](\d{2})', r'\1-\2-\3', s.strip())
+
+
 def _load_csv(path: str, start: str, end: str) -> pd.DataFrame:
     df = pd.read_csv(path, index_col="Open time", parse_dates=True)
     df.index = pd.to_datetime(df.index, utc=True)
     df = df[["Open", "High", "Low", "Close"]].dropna()
     if start:
-        df = df[df.index >= pd.Timestamp(start, tz="UTC")]
+        df = df[df.index >= pd.Timestamp(_normalize_date(start), tz="UTC")]
     if end:
-        df = df[df.index <= pd.Timestamp(end + " 23:59:59", tz="UTC")]
+        df = df[df.index <= pd.Timestamp(_normalize_date(end) + " 23:59:59", tz="UTC")]
     logger.info("Loaded %d bars  [%s → %s]", len(df), df.index.min(), df.index.max())
     return df
 

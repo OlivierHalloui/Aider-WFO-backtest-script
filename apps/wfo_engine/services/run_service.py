@@ -10,6 +10,7 @@ from adaptive_optimization import adaptive_continuous_optimization
 from config import DEFAULT_STRATEGY_ID, DEFAULT_STRATEGY_MODE
 from data_loading import load_data
 from main import get_metrics_info, get_param_grid, get_wfo_settings
+from services.error_log import write_error_log, collect_classic_wfo_entries
 from strategy_adapters import resolve_strategy_adapter
 from wfo import OptimizationInterrupted, walk_forward_optimization
 
@@ -21,6 +22,8 @@ def run_optimization_job(
     control: Any = None,
     job_state: dict | None = None,
     df=None,
+    run_ts: str | None = None,
+    log_dir: str | None = None,
 ):
     """Run optimization without direct Streamlit calls (thread-safe job state updates).
 
@@ -176,15 +179,48 @@ def run_optimization_job(
         if job_state is not None:
             job_state["progress"] = 1.0
             job_state["message"] = "Optimization complete."
+
+        # Write error log (even on success — captures 0-trade window warnings)
+        _entries = collect_classic_wfo_entries(results)
+        _log_path = write_error_log(
+            run_type="classic",
+            config=config,
+            entries=_entries,
+            output_dir=log_dir or "reports/error_logs",
+            run_ts=run_ts,
+            status="OK",
+        )
+        if job_state is not None:
+            job_state["error_log_path"] = _log_path
+
         return results, df, elapsed
 
     except OptimizationInterrupted:
         if job_state is not None:
             job_state["message"] = "Stop requested. Optimization interrupted."
         logger.info("Run interrupted by stop request.")
+        write_error_log(
+            run_type="classic",
+            config=config,
+            entries=[],
+            output_dir=log_dir or "reports/error_logs",
+            run_ts=run_ts,
+            status="INTERRUPTED",
+        )
         return None, None, None
     except Exception as e:
         if job_state is not None:
             job_state["error"] = str(e)
         logger.error("Run failed: %s", e)
+        _log_path = write_error_log(
+            run_type="classic",
+            config=config,
+            entries=[{"level": "ERROR", "context": "run", "message": str(e)}],
+            output_dir=log_dir or "reports/error_logs",
+            run_ts=run_ts,
+            status="FAILED",
+            fatal_error=str(e),
+        )
+        if job_state is not None:
+            job_state["error_log_path"] = _log_path
         return None, None, None

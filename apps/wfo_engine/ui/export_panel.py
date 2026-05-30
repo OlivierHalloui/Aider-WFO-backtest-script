@@ -495,6 +495,23 @@ def _export_results_zip(
         )
         zf.writestr("replay_manifest.json", json.dumps(replay_manifest, indent=2))
 
+        # Include stagewise campaign report when results come from a stagewise run
+        _sw_stages = (results or {}).get("_stages_summary")
+        _sw_final = (results or {}).get("_final_best_params")
+        if _sw_stages and _sw_final:
+            _sw_report = {
+                "source": "stagewise",
+                "campaign_start": results.get("_campaign_start"),
+                "campaign_end":   results.get("_campaign_end"),
+                "n_stages":       results.get("_n_stages"),
+                "final_best_params": _sw_final,
+                "stages_summary":    _sw_stages,
+            }
+            zf.writestr(
+                "stagewise_campaign_summary.json",
+                json.dumps(_sw_report, indent=2, default=str),
+            )
+
     zip_buffer.seek(0)
     return zip_buffer
 

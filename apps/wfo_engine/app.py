@@ -321,6 +321,7 @@ from metrics import (
     build_trials_dataframe_from_results as _build_trials_dataframe_from_results,
     build_window_info_dataframe as _build_window_info_dataframe,
     calc_pqs as _calc_pqs,
+    calc_avg_pl as _calc_avg_pl,
 )
 
 # NOTE: `_to_jsonable` and `_safe_float_scalar` now come from
@@ -1027,6 +1028,40 @@ with st.sidebar:
                     'robust_use_for_final_backtest': 'robust_use_for_final_backtest',
                     'exit_sar_enabled': 'exit_sar_enabled', 'exit_macd_enabled': 'exit_macd_enabled',
                     'exit_macd_type_a': 'exit_macd_type_a', 'exit_macd_type_b': 'exit_macd_type_b',
+                    'exit_cross_sar_sma_enabled': 'exit_cross_sar_sma_enabled',
+                    'exit_retour_bb_enabled': 'exit_retour_bb_enabled',
+                    'exit_regline_enabled': 'exit_regline_enabled',
+                    'exit_volat_down_enabled': 'exit_volat_down_enabled',
+                    'use_roc_filter': 'use_roc_filter',
+                    'use_t2_signal': 'use_t2_signal',
+                    'use_divergence_bb': 'use_divergence_bb',
+                    'macd_ma_type': 'macd_ma_type',
+                    'strategy_direction': 'strategy_direction',
+                    'pqs_n_ref': 'pqs_n_ref',
+                    'selection_method': 'selection_method',
+                    'svi_top_k': 'svi_top_k',
+                    'svi_is2_fraction': 'svi_is2_fraction',
+                    'cross_window_method': 'cross_window_method',
+                    'optimize_exit_sar_enabled': 'optimize_exit_sar_enabled',
+                    'optimize_exit_macd_enabled': 'optimize_exit_macd_enabled',
+                    'optimize_exit_macd_type_a': 'optimize_exit_macd_type_a',
+                    'optimize_exit_macd_type_b': 'optimize_exit_macd_type_b',
+                    'optimize_use_roc_filter': 'optimize_use_roc_filter',
+                    'optimize_use_t2_signal': 'optimize_use_t2_signal',
+                    'optimize_use_divergence_bb': 'optimize_use_divergence_bb',
+                    'optimize_exit_cross_sar_sma_enabled': 'optimize_exit_cross_sar_sma_enabled',
+                    'optimize_exit_retour_bb_enabled': 'optimize_exit_retour_bb_enabled',
+                    'optimize_exit_regline_enabled': 'optimize_exit_regline_enabled',
+                    'optimize_exit_volat_down_enabled': 'optimize_exit_volat_down_enabled',
+                    'nb_bars_under_bbw_mini': 'nb_bars_under_bbw_mini',
+                    'nb_bars_entre_bb': 'nb_bars_entre_bb',
+                    'depassement_sma_roc': 'depassement_sma_roc',
+                    'roc_max_t1': 'roc_max_t1',
+                    'nb_bars_left_pivot': 'nb_bars_left_pivot',
+                    'nb_bars_right_pivot': 'nb_bars_right_pivot',
+                    'nombre_periodes_reglin': 'nombre_periodes_reglin',
+                    'i_bars_back': 'i_bars_back',
+                    'seuil_overbought_bb': 'seuil_overbought_bb',
                     'order_sizing_mode': 'order_sizing_mode', 'order_fixed_cash': 'order_fixed_cash',
                     'fees_pct': 'fees_pct'
                 }
@@ -3460,7 +3495,12 @@ def run_final_backtest_logic(window_id=None):
 
 def run_wfo(config, control=None, job_state=None):
     """Run WFO via the run service without direct UI calls."""
-    return run_optimization_job(config=config, control=control, job_state=job_state)
+    import time as _time
+    _ts = _time.strftime("%Y%m%d_%H%M%S")
+    return run_optimization_job(
+        config=config, control=control, job_state=job_state,
+        run_ts=_ts, log_dir="reports/error_logs",
+    )
 
 # ---------------------------------------------------------------------------
 # Campaign mode intercept — renders campaign panel and stops further execution
@@ -3530,7 +3570,9 @@ if st.session_state.get('wfo_running'):
             st.session_state['df'] = wfo_job_state['df']
             st.session_state['opt_start_date'] = job_conf.get('start_date')
             st.session_state['opt_end_date'] = job_conf.get('end_date')
+            _log_p = wfo_job_state.get("error_log_path", "")
             st.session_state['wfo_notice'] = ("success", "Optimization finished.")
+            st.session_state['wfo_error_log_path'] = _log_p
         elif status == 'stopped':
             _restore_state_snapshot(st.session_state.get('wfo_prev_state', {}))
             st.session_state['wfo_notice'] = ("warning", "Optimization stopped. Previous state restored.")
@@ -3758,12 +3800,25 @@ with col_save:
 
 if st.session_state.get('wfo_notice'):
     notice_type, notice_msg = st.session_state.pop('wfo_notice')
+    _notice_log_p = st.session_state.pop('wfo_error_log_path', '')
     if notice_type == "success":
         st.success(notice_msg)
     elif notice_type == "warning":
         st.warning(notice_msg)
     else:
         st.error(notice_msg)
+    if _notice_log_p:
+        _notice_lp = os.path.abspath(_notice_log_p)
+        if os.path.exists(_notice_lp):
+            with open(_notice_lp, encoding="utf-8") as _f:
+                _notice_log_data = _f.read()
+            st.download_button(
+                "📋 Télécharger journal erreurs",
+                data=_notice_log_data,
+                file_name=os.path.basename(_notice_lp),
+                mime="application/json",
+                key="dl_classic_error_log",
+            )
 
 st.sidebar.divider()
 st.sidebar.subheader("📤 Export Results")
@@ -4296,11 +4351,12 @@ if 'final_portfolio' in st.session_state and 'wfo_results' not in st.session_sta
     st.header("🏆 Backtest Final — Résultats")
     st.caption(f"Source des paramètres : `{_sw_src}`")
 
-    _c1, _c2, _c3, _c4 = st.columns(4)
+    _c1, _c2, _c3, _c4, _c5 = st.columns(5)
     _c1.metric("Total Return",  f"{_sw_pf.total_return * 100:.2f}%")
     _c2.metric("Sharpe Ratio",  f"{_sw_pf.sharpe_ratio:.3f}")
-    _c3.metric("Max Drawdown",  f"{_sw_pf.max_drawdown * 100:.2f}%")
-    _c4.metric("Trades",        str(len(_sw_pf.trades)))
+    _c3.metric("Mean P&L %",    f"{_calc_avg_pl(_sw_pf):+.4f}%")
+    _c4.metric("Max Drawdown",  f"{_sw_pf.max_drawdown * 100:.2f}%")
+    _c5.metric("Trades",        str(len(_sw_pf.trades)))
 
     _sw_tf = st.session_state.get('final_timeframe') or st.session_state.get('timeframe', DEFAULT_TIMEFRAME)
     st.caption(f"Timeframe : `{_sw_tf}`")
@@ -4403,13 +4459,14 @@ if 'wfo_results' in st.session_state:
     if results['out_of_sample_performance']:
         oos_df = pd.DataFrame(results['out_of_sample_performance'])
         
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("Avg Return", f"{oos_df['return'].mean():.2f}%")
         col2.metric("Avg Sharpe", f"{oos_df['sharpe'].mean():.2f}")
-        col3.metric("Avg Max Drawdown", f"{oos_df['max_drawdown'].mean():.2f}%")
-        col4.metric("Avg Win Rate", f"{oos_df['win_rate'].mean():.2f}%")
+        col3.metric("Avg Mean P&L %", f"{oos_df['avg_pl_per_trade'].mean():+.4f}%" if 'avg_pl_per_trade' in oos_df.columns else "—")
+        col4.metric("Avg Max Drawdown", f"{oos_df['max_drawdown'].mean():.2f}%")
+        col5.metric("Avg Win Rate", f"{oos_df['win_rate'].mean():.2f}%")
         _avg_pqs = oos_df['pqs'].mean() if 'pqs' in oos_df.columns else float('nan')
-        col5.metric("Avg PQS", f"{_avg_pqs:.4f}" if not (isinstance(_avg_pqs, float) and _avg_pqs != _avg_pqs) else "—")
+        col6.metric("Avg PQS", f"{_avg_pqs:.4f}" if not (isinstance(_avg_pqs, float) and _avg_pqs != _avg_pqs) else "—")
     
     # Tabs for different views
     # Stable cache key: changes only when a new results dict is assigned to session state.
@@ -5833,14 +5890,15 @@ if 'wfo_results' in st.session_state:
                 )
             
             # Metrics
-            m1, m2, m3, m4, m5 = st.columns(5)
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
             m1.metric("Total Return", f"{pf.total_return * 100:.2f}%")
             m2.metric("Sharpe Ratio", f"{pf.sharpe_ratio:.2f}")
-            m3.metric("Max Drawdown", f"{pf.max_drawdown * 100:.2f}%")
-            m4.metric("Win Rate", f"{pf.trades.win_rate * 100:.2f}%")
+            m3.metric("Mean P&L %",   f"{_calc_avg_pl(pf):+.4f}%")
+            m4.metric("Max Drawdown", f"{pf.max_drawdown * 100:.2f}%")
+            m5.metric("Win Rate",     f"{pf.trades.win_rate * 100:.2f}%")
             _pqs_n_ref = int(st.session_state.get('pqs_n_ref', 50))
             _pqs_val = _calc_pqs(pf, n_ref=_pqs_n_ref)
-            m5.metric("PQS", f"{_pqs_val:.4f}")
+            m6.metric("PQS", f"{_pqs_val:.4f}")
             
             st.markdown("#### Cumulative Returns")
             max_points = st.slider(
