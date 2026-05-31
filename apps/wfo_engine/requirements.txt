@@ -1,18 +1,21 @@
 # Core application dependencies
-# Versions from vectorbtpro-run conda env (2026-05-30)
-# Note: vectorbtpro and scikit-optimize are installed from local/conda paths — no portable version pin
+# Versions from vectorbtpro-run conda env — stack stable au 2026-05-31
+# Note: vectorbtpro et scikit-optimize installés depuis chemins locaux/conda — pas de pin portable
+# Contrainte clé : numpy < 1.24 (imposée par numba 0.56.4 requis par vectorbtpro)
+# sklearn et scipy doivent être compilés pour numpy 1.x (< 2.0)
 streamlit
 pandas==2.2.3
-numpy==2.2.6
+numpy==1.23.5
 plotly==5.17.0
 vectorbtpro
 tqdm==4.67.1
 optuna==4.5.0
 numba==0.56.4
+llvmlite==0.39.1
 matplotlib==3.10.7
 seaborn==0.13.2
 Pillow
 scikit-optimize
-scikit-learn
-scipy==1.15.3
+scikit-learn==1.3.2
+scipy==1.11.4
 requests
