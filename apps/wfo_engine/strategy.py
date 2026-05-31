@@ -141,24 +141,6 @@ def create_signal_generators(df, **params):
         val = params.get(name, default)
         p[name] = broadcast(val, vector_len) if vector_len > 1 else scalarize(val)
 
-    # Cast integer params to int/int64 to prevent Numba TypingError.
-    # Optimization grids generate float64 values (e.g. 14.0); Numba cannot use
-    # float64 as array indices or loop bounds in nopython mode.
-    _INT_PARAMS = {
-        'timeperiod', 'Nb_bars_above', 'fenetre_lowest', 'longueur_mediane',
-        'nb_bars_under_bbw_mini', 'nb_bars_entre_bb', 'user_exit_sma_length',
-        'macd_fast_length', 'macd_slow_length', 'macd_signal_length',
-        'nb_bars_left_pivot', 'nb_bars_right_pivot', 'nombre_periodes_reglin',
-        'i_bars_back',
-    }
-    for _k in _INT_PARAMS:
-        if _k in p:
-            _v = p[_k]
-            if isinstance(_v, np.ndarray):
-                p[_k] = _v.astype(np.int64)
-            else:
-                p[_k] = int(round(float(_v)))
-
     # Unpack for readability in downstream code.
     timeperiod = p['timeperiod']
     StDev = p['StDev']
