@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import pathlib
 import time
 from typing import Any
 
@@ -15,6 +18,41 @@ from strategy_adapters import resolve_strategy_adapter
 from wfo import OptimizationInterrupted, walk_forward_optimization
 
 logger = logging.getLogger(__name__)
+
+_CHECKPOINT_KEYS = (
+    "status", "progress", "message", "window",
+    "evaluations", "run_id", "started_at_utc", "ended_at_utc",
+)
+
+
+def _checkpoint_job_state(job_state: dict, run_dir: pathlib.Path) -> None:
+    """Write a lightweight checkpoint of job_state to disk (atomic replace)."""
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        snap = {k: job_state.get(k) for k in _CHECKPOINT_KEYS}
+        tmp = run_dir / "checkpoint.json.tmp"
+        tmp.write_text(json.dumps(snap, default=str))
+        os.replace(tmp, run_dir / "checkpoint.json")
+    except Exception:
+        logger.debug("Checkpoint write failed (non-fatal)", exc_info=True)
+
+
+def _write_window_result(window: int, payload: dict, run_dir: pathlib.Path) -> None:
+    """Persist per-window metrics to disk so partial results survive a crash."""
+    try:
+        win_dir = run_dir / "windows"
+        win_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "window": window,
+            "evaluations": payload.get("evaluations"),
+            "speed": payload.get("speed"),
+            "window_metrics": payload.get("window_metrics", {}),
+        }
+        tmp = win_dir / f"window_{window:04d}.json.tmp"
+        tmp.write_text(json.dumps(data, default=str))
+        os.replace(tmp, win_dir / f"window_{window:04d}.json")
+    except Exception:
+        logger.debug("Window result write failed (non-fatal)", exc_info=True)
 
 
 def run_optimization_job(
@@ -110,6 +148,9 @@ def run_optimization_job(
 
         start_time = time.time()
 
+        _run_id = job_state.get("run_id") if job_state else None
+        _run_dir = pathlib.Path("reports") / "runs" / _run_id if _run_id else None
+
         def status_callback(msg):
             if job_state is None:
                 return
@@ -149,6 +190,14 @@ def run_optimization_job(
                 else:
                     w = msg.get("window", 0)
                     job_state["message"] = f"Window {min(w, config['n_windows'])}/{config['n_windows']}"
+
+                # 3.2 — persist per-window metrics to disk
+                if _run_dir is not None and msg.get("window") is not None:
+                    _write_window_result(int(msg["window"]), msg, _run_dir)
+
+            # 3.1 — checkpoint lightweight job_state after every callback
+            if _run_dir is not None:
+                _checkpoint_job_state(job_state, _run_dir)
 
         if regime == "adaptive_continuous":
             results = adaptive_continuous_optimization(
