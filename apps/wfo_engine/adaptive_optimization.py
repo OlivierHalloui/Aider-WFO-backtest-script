@@ -153,23 +153,41 @@ class AdaptiveValueModel:
             self.update_single(record, record.get(score_col), weight=1.0)
 
     def score_candidate_thompson(self, candidate):
-        total = 0.0
-        used = 0
-        for name in self.param_names:
-            token = _value_token(candidate.get(name))
-            idx = self.token_to_index[name].get(token)
-            if idx is None:
+        scores = self.score_candidates_thompson_batch([candidate])
+        return float(scores[0])
+
+    def score_candidates_thompson_batch(self, candidates: list) -> np.ndarray:
+        """Vectorized Thompson scoring — single rng.normal call for all candidates."""
+        n = len(candidates)
+        p = len(self.param_names)
+        means = np.zeros((n, p))
+        sigmas = np.ones((n, p))
+        valid = np.zeros((n, p), dtype=bool)
+
+        for j, name in enumerate(self.param_names):
+            mean_arr, var_arr, count_arr = self._stats_arrays(name)
+            t2i = self.token_to_index[name]
+            # P outer iterations; index lookup stays in Python but no rng calls here
+            indices = np.array(
+                [t2i.get(_value_token(c.get(name)), -1) for c in candidates],
+                dtype=np.intp,
+            )
+            mask = indices >= 0
+            valid[:, j] = mask
+            if not mask.any():
                 continue
-            mean, var, count = self._stats_arrays(name)
-            c = count[idx]
-            m = mean[idx] if c > 0 else 0.0
-            v = var[idx] if c > 0 else 1.0
-            sigma = np.sqrt(max(v, 1e-6) / (c + 1.0))
-            total += float(self.rng.normal(m, sigma))
-            used += 1
-        if used == 0:
-            return 0.0
-        return total / used
+            idx_valid = indices[mask]
+            c_arr = count_arr[idx_valid]
+            means[mask, j] = np.where(c_arr > 0, mean_arr[idx_valid], 0.0)
+            sigmas[mask, j] = np.sqrt(
+                np.maximum(var_arr[idx_valid], 1e-6) / (c_arr + 1.0)
+            )
+
+        # Single vectorized normal sample for the entire (n × p) matrix
+        samples = self.rng.normal(means, sigmas)
+        used_counts = valid.sum(axis=1)
+        totals = np.where(valid, samples, 0.0).sum(axis=1)
+        return np.where(used_counts > 0, totals / np.maximum(used_counts, 1), 0.0)
 
     def parameter_weights(self):
         raw = {}
@@ -391,8 +409,8 @@ def adaptive_continuous_optimization(
             break
 
         # Step 2: rank candidates using stochastic value estimates (Thompson-style).
-        ranked = [(model.score_candidate_thompson(c), c) for c in candidates]
-        ranked.sort(key=lambda x: x[0], reverse=True)
+        scores = model.score_candidates_thompson_batch(candidates)
+        ranked = sorted(zip(scores.tolist(), candidates), key=lambda x: x[0], reverse=True)
 
         explore_trials = int(np.ceil(trials_per_cycle * exploration_ratio))
         exploit_trials = max(1, trials_per_cycle - explore_trials)
