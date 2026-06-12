@@ -29,6 +29,7 @@ class WFOSessionState:
     wfo_thread: Any | None
     wfo_job_config: dict | None
     wfo_error_log_path: str | None
+    wfo_prev_state: dict | None
 
     # Data
     df: Any | None
@@ -62,6 +63,7 @@ class WFOSessionState:
             wfo_thread=_get("wfo_thread"),
             wfo_job_config=_get("wfo_job_config"),
             wfo_error_log_path=_get("wfo_error_log_path"),
+            wfo_prev_state=_get("wfo_prev_state"),
             df=_get("df"),
             final_portfolio=_get("final_portfolio"),
             final_params=_get("final_params"),

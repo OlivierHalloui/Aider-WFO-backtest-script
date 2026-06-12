@@ -16,6 +16,7 @@ Corrections issues de l'audit (`AUDIT_REPORT.md`, plan `IMPLEMENTATION_PLAN.md`)
 - **Thompson sampling vectorisé** (`adaptive_optimization.py`) : un seul appel `rng.normal` pour tous les candidats, équivalence statistique préservée (masquage des params absents).
 - **`data_loading.py` robustifié** : valeurs CSV non numériques converties en NaN avec warning (au lieu de `ValueError`) ; fetch Binance avec message d'erreur actionnable et garde sur données vides.
 - **Cleanup thread stagewise** : l'état `_sw_thread`/`_sw_stop_event` orphelin est purgé après fin ou crash du thread.
+- **Facade `WFOSessionState` câblée** (`app.py`) : les lectures des clés run-resolution (`wfo_running`, `wfo_thread`, `wfo_job_state`, `wfo_prev_state`, `wfo_control`, `wfo_job_config`) et des sections visualisation/backtest stagewise passent par des snapshots typés `WFOSessionState.read()` — un snapshot par zone, pris après les écritures mid-run (import ZIP, panel stagewise). Les écritures restent directes (facade read-only par design).
 - **Tests** : 80 nouveaux tests — services (`run_service`, `serialization`, `data_loading`), smoke engine sans VBT, intégration VBT réelle (backtest, métriques, SVI, adaptive, stagewise).
 
 ## 2026-04-18

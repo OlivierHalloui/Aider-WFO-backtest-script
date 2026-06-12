@@ -639,7 +639,7 @@ pytest apps/wfo_engine/tests/test_run_service.py \
 | IMPL-P2 | 3 | P2 | `adaptive_optimization.py:155–172` | 1j | ✅ DONE |
 | IMPL-P3 | 3 | P3 | `wfo.py:518–533` | 1j | ✅ DONE |
 | IMPL-M1 | 3 | M1 | `wfo.py:497–538` | 0.5j | ✅ DONE |
-| IMPL-R6 | 4 | R6 | `session.py`, `app.py` | 3j (scope réduit) | TODO |
+| IMPL-R6 | 4 | R6 | `session.py`, `app.py` | 3j (scope réduit) | ✅ DONE (scope réduit : run-resolution + résultats/viz ; 614 → 587 accès ; reste = chantier séparé) |
 | IMPL-R9 | 4 | R9 | `stagewise_panel.py` | 0.5j | ✅ DONE |
 | IMPL-R10/R11 | 4 | R10, R11 | `data_loading.py` | 1j | ✅ DONE |
 | IMPL-3.3 | 5 | — | `run_service.py`, `app.py` | 2j (v1 détection seule) | TODO |
