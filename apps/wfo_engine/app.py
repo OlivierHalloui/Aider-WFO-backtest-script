@@ -3550,7 +3550,10 @@ if 'wfo_running' not in st.session_state:
 if st.session_state.get('wfo_running'):
     wfo_thread = st.session_state.get('wfo_thread')
     wfo_job_state = st.session_state.get('wfo_job_state')
-    if wfo_thread is not None and not wfo_thread.is_alive() and wfo_job_state is not None:
+    if (wfo_thread is not None and not wfo_thread.is_alive()
+            and wfo_job_state is not None
+            and not wfo_job_state.get('harvested', False)):
+        wfo_job_state['harvested'] = True
         status = wfo_job_state.get('status')
         job_conf = st.session_state.get('wfo_job_config', {})
         run_metadata = {
@@ -3698,7 +3701,8 @@ with col_run:
                     'started_at_utc': run_started_at,
                     'ended_at_utc': None,
                     'config_sha256': config_sha,
-                    'results_sha256': None
+                    'results_sha256': None,
+                    'harvested': False,
                 }
                 control = WFOControl()
                 st.session_state['wfo_prev_state'] = _capture_state_snapshot()
