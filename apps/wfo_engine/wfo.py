@@ -1,5 +1,6 @@
 # Import necessary libraries for WFO
 import logging
+import os
 import pandas as pd
 import numpy as np
 import vectorbtpro as vbt
@@ -87,6 +88,8 @@ def _eval_chunk_bisect(combos, param_keys, metrics_info,
                 raw = evaluate_params_fn(combo_params)
                 scores = _normalize_scores(raw, 1)
                 return [scores[0] if scores else float('nan')]
+            except MemoryError:
+                raise
             except Exception as e2:
                 logger.debug("Single-combo eval failed: %s — params: %s", e2,
                              combo_params)
@@ -496,12 +499,20 @@ def get_stable_best_params(optimization_results, param_grid, neighbor_count=5, s
 
 def get_svi_best_params(optimization_results, is2_df, top_k, strategy_adapter,
                         timeframe, metrics_info, param_grid):
-    """SVI — Select best params by performance on IS₂ holdout subset.
+    """SVI — Re-ranking on IS recent subset (IS₂).
 
     Takes top_k candidates from optimization_results (already sorted desc by
     combined_score), evaluates each on is2_df, returns the row with the best
     IS₂ combined score.  Falls back to raw_max when IS₂ is empty or all
     candidates fail.
+
+    NOTE: IS₂ is a chronological slice of the IS period on which optimisation
+    already ran — it is NOT an out-of-sample holdout. This function re-ranks
+    the top_k candidates on the most recent IS data, which penalises combos
+    that perform well only at the start of the period and favours recent
+    stability. It provides no out-of-sample guarantee. For structural-stability
+    selection use selection_method='snv'. A true holdout outside the IS window
+    is not implemented.
     """
     if optimization_results is None or optimization_results.empty:
         raise ValueError("optimization_results must be a non-empty DataFrame.")
@@ -510,13 +521,14 @@ def get_svi_best_params(optimization_results, is2_df, top_k, strategy_adapter,
         return optimization_results.iloc[0], None
 
     k = min(top_k, len(optimization_results))
-    candidates = optimization_results.head(k)
-    drop_cols = ["combined_score"] + list(metrics_info.keys())
+    candidates = optimization_results.head(k).reset_index(drop=True)
+    drop_cols = set(["combined_score"] + list(metrics_info.keys()))
+    param_cols = [c for c in candidates.columns if c not in drop_cols]
 
-    best_row = None
+    best_idx = None
     best_score = float("-inf")
-    for _, row in candidates.iterrows():
-        params = row.drop(drop_cols, errors="ignore").to_dict()
+    for pos, row in enumerate(candidates.itertuples(index=False)):
+        params = {c: getattr(row, c) for c in param_cols}
         params.update(metrics_info)
         try:
             score = strategy_adapter.run_backtest(
@@ -527,15 +539,15 @@ def get_svi_best_params(optimization_results, is2_df, top_k, strategy_adapter,
             score = float(score)
             if score > best_score:
                 best_score = score
-                best_row = row
+                best_idx = pos
         except Exception as exc:
             logger.debug("SVI candidate eval failed: %s", exc)
 
-    if best_row is None:
+    if best_idx is None:
         logger.warning("SVI: no valid IS₂ score — falling back to raw_max.")
         return optimization_results.iloc[0], None
 
-    return best_row, best_score
+    return candidates.iloc[best_idx], best_score
 
 
 def walk_forward_optimization(
@@ -601,6 +613,26 @@ def walk_forward_optimization(
             'weight_metric2': settings.metric_weights[1]
         }
 
+    # ── True out-of-sample holdout ────────────────────────────────────────
+    # Reserve the final slice of data, untouched by any optimization window.
+    # The engine never evaluates on it; bounds are reported in wfo_results so
+    # the final backtest can run an honest validation on never-seen data.
+    holdout_fraction = float(getattr(settings, 'holdout_fraction', 0.0) or 0.0)
+    holdout_info = None
+    if holdout_fraction > 0:
+        if not (0.0 < holdout_fraction < 0.5):
+            raise ValueError("settings.holdout_fraction must be in (0, 0.5).")
+        _holdout_rows = int(len(df) * holdout_fraction)
+        if _holdout_rows > 0:
+            _holdout_df = df.iloc[len(df) - _holdout_rows:]
+            df = df.iloc[:len(df) - _holdout_rows]
+            holdout_info = {
+                'fraction': holdout_fraction,
+                'n_bars': int(len(_holdout_df)),
+                'start': _holdout_df.index[0],
+                'end': _holdout_df.index[-1],
+            }
+
     # Calculate the size of each window
     total_rows = len(df)
     window_size = total_rows // settings.n_windows
@@ -658,10 +690,13 @@ def walk_forward_optimization(
         'best_params': [],
         'nn_guidance': [],
         'prev_best_guidance': [],
+        'holdout': holdout_info,
         'settings': {
             'n_windows': settings.n_windows,
             'train_size': settings.train_size,
             'anchored': settings.anchored,
+            'holdout_fraction': holdout_fraction,
+            'max_parallel_windows': int(getattr(settings, 'max_parallel_windows', 1)),
             'optimization_metric': settings.optimization_metric,
             'secondary_metric': settings.secondary_metric,
             'metric_weights': settings.metric_weights,
@@ -725,8 +760,12 @@ def walk_forward_optimization(
     log(f"Optimization Regime: {optimization_regime}")
     log(f"Parameter Combinations: {param_combinations}")
 
-    # Loop through each window
-    for i in range(settings.n_windows):
+    # ── Per-window worker ────────────────────────────────────────────────
+    # Pure with respect to wfo_results: slices data, optimizes, selects best
+    # params, runs IS/OOS backtests, returns everything in a dict.  Appending
+    # and sequential-state updates (prev_best, nn_guide) happen in the driver,
+    # which enables window-level parallelism in classic regime.
+    def _run_window(i, window_param_grid, _clear_cache=True):
         if control:
             control.wait_if_paused(log)
             if control.should_stop():
@@ -772,41 +811,11 @@ def walk_forward_optimization(
         if len(out_sample_df) > 0:
             log(f"Out-of-Sample: {window_dates['out_sample_start']} to {window_dates['out_sample_end']}")
 
-        # Build the search grid for this window.
-        window_param_grid = param_grid
-        nn_window_info = {
-            'enabled': False,
-            'trained': False,
-            'baseline_combinations': int(np.prod([len(v) for v in param_grid.values()])),
-            'guided_combinations': int(np.prod([len(v) for v in param_grid.values()]))
-        }
-        if use_prev_best_grid:
-            if prev_window_best_params is None:
-                log("Previous-best-grid mode: first window uses full baseline grid.")
-            else:
-                window_param_grid, prev_info = _build_prev_best_grid(param_grid, prev_window_best_params)
-                log(
-                    "Previous-best-grid mode: "
-                    f"{prev_info['guided_combinations']} combos "
-                    f"(baseline {prev_info['baseline_combinations']})"
-                )
-                wfo_results['prev_best_guidance'].append({
-                    'window': i + 1,
-                    **prev_info
-                })
-        elif nn_guide is not None:
-            window_param_grid, nn_window_info = nn_guide.build_guided_grid(param_grid)
-            if nn_window_info.get('enabled'):
-                log(
-                    "NN-guided grid: "
-                    f"{nn_window_info['guided_combinations']} combos "
-                    f"(baseline {nn_window_info['baseline_combinations']})"
-                )
-            else:
-                log("NN-guided grid not active yet (insufficient cumulative trials).")
-
-        # Clear per-window indicator cache so new window data is used
-        clear_window_indicator_cache()
+        if _clear_cache:
+            # Clear per-window indicator cache so new window data is used.
+            # In parallel mode the cache is cleared once before the batch —
+            # keys embed a data signature so windows cannot collide.
+            clear_window_indicator_cache()
 
         # Optimize parameters on in-sample data
         log(f"Optimizing parameters on in-sample data ({len(in_sample_df)} bars)...")
@@ -829,7 +838,6 @@ def walk_forward_optimization(
             log("Optimization interrupted during parameter search.")
             raise
         optimization_time = time.time() - optimization_start
-        optimization_times.append(optimization_time)
 
         # Get best parameters — dispatch on Level 1 selection method
         _sel_method    = getattr(settings, 'selection_method', 'snv')
@@ -887,8 +895,6 @@ def walk_forward_optimization(
             'n_trades': len(in_sample_portfolio.trades)
         }
 
-        wfo_results['in_sample_performance'].append(in_sample_metrics)
-
         # Test on out-of-sample data if available
         out_sample_metrics = None
         if len(out_sample_df) > 0:
@@ -920,8 +926,6 @@ def walk_forward_optimization(
             log(f"Win Rate: {out_sample_metrics['win_rate']:.2f}%")
             log(f"Number of Trades: {out_sample_metrics['n_trades']}")
 
-            wfo_results['out_of_sample_performance'].append(out_sample_metrics)
-
         # Store window results
         window_result = {
             'window_info': window_dates,
@@ -933,48 +937,152 @@ def walk_forward_optimization(
             'best_params': best_params
         }
 
-        wfo_results['window_results'].append(window_result)
-        wfo_results['best_params'].append(best_params)
-        prev_window_best_params = best_params.copy()
-
-        if nn_guide is not None:
-            nn_guide.last_best_params = best_params.copy()
-            nn_guide.update(optimization_results, window_param_grid)
-            latest_weights = nn_guide.get_parameter_weights()
-            nn_window_info['trained_after_window'] = bool(nn_guide.trained)
-            if latest_weights:
-                nn_window_info['parameter_weights'] = latest_weights
-            wfo_results['nn_guidance'].append({
-                'window': i + 1,
-                **nn_window_info
-            })
-
-
-        # Record window processing time
         window_time = time.time() - window_start_time
-        window_times.append(window_time)
         log(f"Window processing time: {timedelta(seconds=int(window_time))}")
 
-        # Progress metrics for GUI
-        combinations_tested = max(1, eval_count)
-        combos_per_sec = combinations_tested / optimization_time if optimization_time > 0 else 0.0
-        windows_completed = i + 1
-        remaining_windows = settings.n_windows - windows_completed
-        avg_window_time = np.mean(window_times)
-        eta_seconds = avg_window_time * remaining_windows if avg_window_time and remaining_windows > 0 else 0.0
-
-        report_payload = {
-            'type': 'stats',
-            'speed': combos_per_sec,
-            'eta': eta_seconds,
-            'window': windows_completed,
-            'evaluations': combinations_tested,
-            'window_metrics': {
-                'in_sample': in_sample_metrics,
-                'out_sample': out_sample_metrics
-            }
+        return {
+            'index': i,
+            'window_result': window_result,
+            'in_sample_metrics': in_sample_metrics,
+            'out_sample_metrics': out_sample_metrics,
+            'best_params': best_params,
+            'optimization_results': optimization_results,
+            'window_time': window_time,
+            'optimization_time': optimization_time,
+            'eval_count': int(eval_count),
         }
-        report_stats(report_payload)
+
+    # ── Driver: append worker output to shared results (ordered) ─────────
+    def _append_window_output(out):
+        wfo_results['in_sample_performance'].append(out['in_sample_metrics'])
+        if out['out_sample_metrics'] is not None:
+            wfo_results['out_of_sample_performance'].append(out['out_sample_metrics'])
+        wfo_results['window_results'].append(out['window_result'])
+        wfo_results['best_params'].append(out['best_params'])
+        window_times.append(out['window_time'])
+        optimization_times.append(out['optimization_time'])
+
+    # ── Window-level parallelism gate ─────────────────────────────────────
+    # Parallel only in classic regime: nn_guided and prev_best_grid build the
+    # grid of window i+1 from the results of window i (sequential by design).
+    try:
+        _mpw = int(getattr(settings, 'max_parallel_windows', 1))
+    except (TypeError, ValueError):
+        _mpw = 1
+    if _mpw == 0:
+        # Auto: use all cores on capable machines, stay serial on weak ones.
+        _cpus = os.cpu_count() or 1
+        _mpw = _cpus if _cpus >= 4 else 1
+    parallel_windows = (
+        _mpw > 1
+        and settings.n_windows > 1
+        and regime_key == 'classic'
+    )
+    effective_workers = min(_mpw, settings.n_windows) if parallel_windows else 1
+
+    if effective_workers > 1:
+        log(f"Window-level parallelism: {effective_workers} workers (classic regime)")
+        clear_window_indicator_cache()
+        window_outputs = [None] * settings.n_windows
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            futures = {
+                executor.submit(_run_window, i, param_grid, False): i
+                for i in range(settings.n_windows)
+            }
+            try:
+                completed = 0
+                for fut in as_completed(futures):
+                    out = fut.result()
+                    window_outputs[out['index']] = out
+                    completed += 1
+                    report_stats({
+                        'type': 'stats',
+                        'speed': out['eval_count'] / out['optimization_time'] if out['optimization_time'] > 0 else 0.0,
+                        'eta': 0.0,
+                        'window': completed,
+                        'evaluations': out['eval_count'],
+                        'window_metrics': {
+                            'in_sample': out['in_sample_metrics'],
+                            'out_sample': out['out_sample_metrics']
+                        }
+                    })
+            except BaseException:
+                for f in futures:
+                    f.cancel()
+                raise
+        for out in window_outputs:
+            _append_window_output(out)
+    else:
+        # Serial path — required for guided regimes, default otherwise.
+        for i in range(settings.n_windows):
+            # Build the search grid for this window (may depend on previous windows).
+            window_param_grid = param_grid
+            nn_window_info = {
+                'enabled': False,
+                'trained': False,
+                'baseline_combinations': int(np.prod([len(v) for v in param_grid.values()])),
+                'guided_combinations': int(np.prod([len(v) for v in param_grid.values()]))
+            }
+            if use_prev_best_grid:
+                if prev_window_best_params is None:
+                    log("Previous-best-grid mode: first window uses full baseline grid.")
+                else:
+                    window_param_grid, prev_info = _build_prev_best_grid(param_grid, prev_window_best_params)
+                    log(
+                        "Previous-best-grid mode: "
+                        f"{prev_info['guided_combinations']} combos "
+                        f"(baseline {prev_info['baseline_combinations']})"
+                    )
+                    wfo_results['prev_best_guidance'].append({
+                        'window': i + 1,
+                        **prev_info
+                    })
+            elif nn_guide is not None:
+                window_param_grid, nn_window_info = nn_guide.build_guided_grid(param_grid)
+                if nn_window_info.get('enabled'):
+                    log(
+                        "NN-guided grid: "
+                        f"{nn_window_info['guided_combinations']} combos "
+                        f"(baseline {nn_window_info['baseline_combinations']})"
+                    )
+                else:
+                    log("NN-guided grid not active yet (insufficient cumulative trials).")
+
+            out = _run_window(i, window_param_grid, True)
+            _append_window_output(out)
+            prev_window_best_params = out['best_params'].copy()
+
+            if nn_guide is not None:
+                nn_guide.last_best_params = out['best_params'].copy()
+                nn_guide.update(out['optimization_results'], window_param_grid)
+                latest_weights = nn_guide.get_parameter_weights()
+                nn_window_info['trained_after_window'] = bool(nn_guide.trained)
+                if latest_weights:
+                    nn_window_info['parameter_weights'] = latest_weights
+                wfo_results['nn_guidance'].append({
+                    'window': i + 1,
+                    **nn_window_info
+                })
+
+            # Progress metrics for GUI
+            combinations_tested = max(1, out['eval_count'])
+            combos_per_sec = combinations_tested / out['optimization_time'] if out['optimization_time'] > 0 else 0.0
+            windows_completed = i + 1
+            remaining_windows = settings.n_windows - windows_completed
+            avg_window_time = np.mean(window_times)
+            eta_seconds = avg_window_time * remaining_windows if avg_window_time and remaining_windows > 0 else 0.0
+
+            report_stats({
+                'type': 'stats',
+                'speed': combos_per_sec,
+                'eta': eta_seconds,
+                'window': windows_completed,
+                'evaluations': combinations_tested,
+                'window_metrics': {
+                    'in_sample': out['in_sample_metrics'],
+                    'out_sample': out['out_sample_metrics']
+                }
+            })
 
     # Calculate total time
     total_time = time.time() - start_time
