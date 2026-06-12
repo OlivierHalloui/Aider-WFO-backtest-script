@@ -9,3 +9,9 @@ __pycache__/
 venv/
 env/
 *.swp
+*.bak
+.grok/
+data/
+Data/
+reports/
+fichiers_configuration_WFO/
