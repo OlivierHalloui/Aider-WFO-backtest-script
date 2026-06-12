@@ -23,7 +23,7 @@ def safe_float(value, default=0.0):
                 return float(default)
             return value
         return float(default)
-    except Exception:
+    except (ValueError, TypeError, OverflowError):
         return float(default)
 
 
