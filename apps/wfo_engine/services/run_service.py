@@ -29,12 +29,21 @@ def _checkpoint_job_state(job_state: dict, run_dir: pathlib.Path) -> None:
     """Write a lightweight checkpoint of job_state to disk (atomic replace)."""
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.error("Checkpoint dir inaccessible %s: %s", run_dir, exc, exc_info=True)
+        if job_state is not None:
+            job_state.setdefault("warnings", []).append(f"Checkpoint write failed: {exc}")
+        return
+
+    try:
         snap = {k: job_state.get(k) for k in _CHECKPOINT_KEYS}
         tmp = run_dir / "checkpoint.json.tmp"
-        tmp.write_text(json.dumps(snap, default=str))
+        tmp.write_text(json.dumps(snap, default=str), encoding="utf-8")
         os.replace(tmp, run_dir / "checkpoint.json")
-    except Exception:
-        logger.debug("Checkpoint write failed (non-fatal)", exc_info=True)
+    except Exception as exc:
+        logger.error("Checkpoint write failed: %s", exc, exc_info=True)
+        if job_state is not None:
+            job_state.setdefault("warnings", []).append(f"Checkpoint write failed: {exc}")
 
 
 def _write_window_result(window: int, payload: dict, run_dir: pathlib.Path) -> None:
@@ -49,10 +58,10 @@ def _write_window_result(window: int, payload: dict, run_dir: pathlib.Path) -> N
             "window_metrics": payload.get("window_metrics", {}),
         }
         tmp = win_dir / f"window_{window:04d}.json.tmp"
-        tmp.write_text(json.dumps(data, default=str))
+        tmp.write_text(json.dumps(data, default=str), encoding="utf-8")
         os.replace(tmp, win_dir / f"window_{window:04d}.json")
-    except Exception:
-        logger.debug("Window result write failed (non-fatal)", exc_info=True)
+    except Exception as exc:
+        logger.error("Window %d result write failed: %s", window, exc, exc_info=True)
 
 
 def run_optimization_job(
@@ -260,7 +269,7 @@ def run_optimization_job(
     except Exception as e:
         if job_state is not None:
             job_state["error"] = str(e)
-        logger.error("Run failed: %s", e)
+        logger.error("Run failed: %s", e, exc_info=True)
         _log_path = write_error_log(
             run_type="classic",
             config=config,
