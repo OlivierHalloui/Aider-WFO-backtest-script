@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import math
 from typing import Any
 
 import numpy as np
@@ -27,18 +28,29 @@ def json_safe(obj: Any) -> Any:
 
 
 def sanitize_for_json(value: Any) -> Any:
-    """Recursively normalize values so they can be serialized to JSON."""
+    """Recursively normalize values so they can be serialized to valid JSON (RFC 7159).
+
+    float('nan') and float('inf') are converted to None (JSON null) because the
+    JSON spec does not permit NaN/Infinity literals. Callers should pass
+    allow_nan=False to json.dumps to catch any residual cases.
+    """
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
     if isinstance(value, dict):
         return {k: sanitize_for_json(v) for k, v in value.items()}
     if isinstance(value, list):
         return [sanitize_for_json(v) for v in value]
     if isinstance(value, tuple):
         return [sanitize_for_json(v) for v in value]
+    if isinstance(value, np.floating):
+        f = float(value)
+        return None if (math.isnan(f) or math.isinf(f)) else f
     if isinstance(
         value,
         (
             np.integer,
-            np.floating,
             np.ndarray,
             pd.Timestamp,
             datetime.datetime,
