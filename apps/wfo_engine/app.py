@@ -3602,6 +3602,40 @@ if _sess_run.wfo_running:
         st.session_state['wfo_running'] = False
         st.rerun()
 
+# IMPL-3.3 — orphaned-run detection (v1: notification only, no resume).
+# Scan once per Streamlit session, never while a run is in flight (an active
+# run legitimately has a checkpoint without a resolution marker yet).
+if not _sess_run.wfo_running and not st.session_state.get("_orphan_scan_done"):
+    from services.run_service import scan_orphaned_runs
+    try:
+        st.session_state["_orphan_runs"] = scan_orphaned_runs()
+    except Exception as _scan_exc:
+        logging.getLogger(__name__).warning("Orphaned-run scan failed: %s", _scan_exc)
+        st.session_state["_orphan_runs"] = []
+    st.session_state["_orphan_scan_done"] = True
+
+_orphan_runs = st.session_state.get("_orphan_runs") or []
+if _orphan_runs:
+    with st.expander(f"⚠️ {len(_orphan_runs)} run(s) WFO interrompu(s) détecté(s)", expanded=True):
+        st.markdown(
+            "Ces runs ont laissé un checkpoint sans marqueur de fin — "
+            "probablement interrompus par un crash ou un arrêt du serveur. "
+            "Les résultats partiels restent disponibles dans `reports/runs/`."
+        )
+        for _o in _orphan_runs:
+            st.markdown(
+                f"- **{_o['run_id']}** — fenêtres complétées : {_o['windows_completed']}, "
+                f"progression : {(_o.get('progress') or 0.0) * 100:.0f}%, "
+                f"démarré : {_o.get('started_at_utc') or '?'}"
+            )
+        st.caption("La reprise d'un run interrompu n'est pas implémentée (v1 : détection seule).")
+        if st.button("✔️ Acquitter (ne plus afficher)", key="ack_orphan_runs"):
+            from services.run_service import mark_run_resolved
+            for _o in _orphan_runs:
+                mark_run_resolved(_o["run_dir"])
+            st.session_state["_orphan_runs"] = []
+            st.rerun()
+
 col_run, col_save = st.sidebar.columns([1, 1])
 
 with col_run:

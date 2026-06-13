@@ -10,7 +10,13 @@ import stat
 
 import pytest
 
-from services.run_service import _checkpoint_job_state, _write_window_result
+from services.run_service import (
+    _checkpoint_job_state,
+    _finalize_run_dir,
+    _write_window_result,
+    mark_run_resolved,
+    scan_orphaned_runs,
+)
 
 
 class TestCheckpointJobState:
@@ -124,3 +130,85 @@ class TestWriteWindowResult:
         (run_dir / "windows").mkdir()
         monkeypatch.setattr(os, "replace", lambda s, d: (_ for _ in ()).throw(OSError("fail")))
         _write_window_result(0, {}, run_dir)  # must not raise
+
+
+def _make_run_dir(root: pathlib.Path, name: str, *, checkpoint: bool = True,
+                  completed: bool = False, n_windows: int = 0, snap: dict | None = None):
+    run_dir = root / name
+    run_dir.mkdir(parents=True)
+    if checkpoint:
+        payload = {"status": "running", "progress": 0.4, "window": 2,
+                   "run_id": name, "started_at_utc": "2026-06-12T10:00:00+00:00"}
+        payload.update(snap or {})
+        (run_dir / "checkpoint.json").write_text(json.dumps(payload), encoding="utf-8")
+    if completed:
+        (run_dir / "completed.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+    if n_windows:
+        win_dir = run_dir / "windows"
+        win_dir.mkdir()
+        for i in range(n_windows):
+            (win_dir / f"window_{i:04d}.json").write_text("{}", encoding="utf-8")
+    return run_dir
+
+
+class TestOrphanedRuns:
+    def test_orphan_detected(self, tmp_path):
+        _make_run_dir(tmp_path, "run_orphan", n_windows=2)
+        orphans = scan_orphaned_runs(tmp_path)
+        assert len(orphans) == 1
+        o = orphans[0]
+        assert o["run_id"] == "run_orphan"
+        assert o["windows_completed"] == 2
+        assert o["progress"] == pytest.approx(0.4)
+        assert o["started_at_utc"] == "2026-06-12T10:00:00+00:00"
+
+    def test_resolved_run_not_reported(self, tmp_path):
+        _make_run_dir(tmp_path, "run_done", completed=True)
+        assert scan_orphaned_runs(tmp_path) == []
+
+    def test_dir_without_checkpoint_ignored(self, tmp_path):
+        _make_run_dir(tmp_path, "run_empty", checkpoint=False)
+        assert scan_orphaned_runs(tmp_path) == []
+
+    def test_missing_root_returns_empty(self, tmp_path):
+        assert scan_orphaned_runs(tmp_path / "does_not_exist") == []
+
+    def test_corrupt_checkpoint_still_reported(self, tmp_path):
+        run_dir = tmp_path / "run_corrupt"
+        run_dir.mkdir()
+        (run_dir / "checkpoint.json").write_text("{not json", encoding="utf-8")
+        orphans = scan_orphaned_runs(tmp_path)
+        assert len(orphans) == 1
+        assert orphans[0]["run_id"] == "run_corrupt"
+
+    def test_finalize_then_scan_excludes_run(self, tmp_path):
+        run_dir = _make_run_dir(tmp_path, "run_fin")
+        _finalize_run_dir(run_dir, "completed", {"run_id": "run_fin", "window": 4})
+        marker = json.loads((run_dir / "completed.json").read_text())
+        assert marker["status"] == "completed"
+        assert marker["window"] == 4
+        assert marker["ended_at_utc"]
+        assert scan_orphaned_runs(tmp_path) == []
+
+    def test_finalize_none_run_dir_noop(self):
+        _finalize_run_dir(None, "completed")  # must not raise
+
+    def test_finalize_write_failure_does_not_raise(self, tmp_path, caplog, monkeypatch):
+        run_dir = _make_run_dir(tmp_path, "run_fin_fail")
+        monkeypatch.setattr(os, "replace", lambda s, d: (_ for _ in ()).throw(OSError("disk full")))
+        with caplog.at_level(logging.ERROR, logger="services.run_service"):
+            _finalize_run_dir(run_dir, "completed")
+        assert any(r.levelname == "ERROR" for r in caplog.records)
+
+    def test_mark_run_resolved_acknowledges(self, tmp_path):
+        run_dir = _make_run_dir(tmp_path, "run_ack")
+        assert len(scan_orphaned_runs(tmp_path)) == 1
+        mark_run_resolved(run_dir)
+        assert scan_orphaned_runs(tmp_path) == []
+        marker = json.loads((run_dir / "completed.json").read_text())
+        assert marker["status"] == "acknowledged"
+
+    def test_no_tmp_files_left(self, tmp_path):
+        run_dir = _make_run_dir(tmp_path, "run_tmp")
+        _finalize_run_dir(run_dir, "stopped")
+        assert list(run_dir.glob("*.tmp")) == []
