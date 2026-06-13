@@ -182,6 +182,7 @@ def get_param_grid(config):
     param_grid['order_sizing_mode'] = [config.get('order_sizing_mode', 'percent_equity')]
     param_grid['order_fixed_cash'] = [float(config.get('order_fixed_cash', 10000.0))]
     param_grid['fees_pct'] = [float(config.get('fees_pct', 0.0))]
+    param_grid['slippage_bps'] = [float(config.get('slippage_bps', 0.0))]
     param_grid['pqs_n_ref'] = [int(config.get('pqs_n_ref', 50))]
     # Entry filter toggles: [True, False] when enabled AND user opted to optimize, else fixed.
     _roc_enabled = bool(config.get('use_roc_filter', True))

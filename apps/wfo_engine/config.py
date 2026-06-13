@@ -61,6 +61,7 @@ class WFOSettings:
     neighbor_count: int = 5                     # Neighbor count for stability selection
     max_parallel_windows: int = 1               # Window-level parallelism: 1 = serial, 0 = auto (all cores if >= 4), N = explicit worker count. Classic regime only.
     holdout_fraction: float = 0.0               # Fraction of data reserved as untouched final holdout (0 = disabled). Excluded from all WFO windows.
+    slippage_bps: float = 0.0                   # Slippage in basis points per trade fill (0 = frictionless, pre-feature behavior)
     selection_method: str = "snv"               # Level 1 intra-window: "snv" | "svi" | "raw_max"
     svi_top_k: int = 20                         # SVI: top-K candidates evaluated on IS₂
     svi_is2_fraction: float = 0.30              # SVI: fraction of IS reserved as IS₂ holdout

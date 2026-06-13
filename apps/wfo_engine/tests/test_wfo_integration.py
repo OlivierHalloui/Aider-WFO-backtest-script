@@ -111,6 +111,28 @@ def test_run_backtest_returns_portfolio():
     assert np.isfinite(total_ret)
 
 
+def test_slippage_degrades_performance():
+    """slippage_bps > 0 must never improve total return; strictly worse when trades exist."""
+    df = generate_mock_data(200)
+    pf_free = run_backtest(df, dict(PARAM_DEFAULTS), timeframe="5s", return_portfolio=True)
+    pf_slip = run_backtest(df, dict(PARAM_DEFAULTS, slippage_bps=50.0),
+                           timeframe="5s", return_portfolio=True)
+    ret_free = float(pf_free.total_return)
+    ret_slip = float(pf_slip.total_return)
+    assert ret_slip <= ret_free
+    if len(pf_free.trades) > 0:
+        assert ret_slip < ret_free
+
+
+def test_slippage_zero_is_noop():
+    """Explicit slippage_bps=0 must reproduce the default (frictionless) result."""
+    df = generate_mock_data(200)
+    pf_default = run_backtest(df, dict(PARAM_DEFAULTS), timeframe="5s", return_portfolio=True)
+    pf_zero = run_backtest(df, dict(PARAM_DEFAULTS, slippage_bps=0.0),
+                           timeframe="5s", return_portfolio=True)
+    assert float(pf_zero.total_return) == pytest.approx(float(pf_default.total_return))
+
+
 def test_run_backtest_returns_scalar_score():
     """run_backtest with return_portfolio=False must return a finite scalar score."""
     df = generate_mock_data(200)

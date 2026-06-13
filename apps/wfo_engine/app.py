@@ -1066,7 +1066,7 @@ with st.sidebar:
                     'i_bars_back': 'i_bars_back',
                     'seuil_overbought_bb': 'seuil_overbought_bb',
                     'order_sizing_mode': 'order_sizing_mode', 'order_fixed_cash': 'order_fixed_cash',
-                    'fees_pct': 'fees_pct'
+                    'fees_pct': 'fees_pct', 'slippage_bps': 'slippage_bps'
                 }
                 for conf_key, widget_key in state_map.items():
                     if conf_key in loaded_config:
@@ -3057,6 +3057,21 @@ with st.sidebar:
             key="fees_pct"
         )
 
+        slippage_bps = st.number_input(
+            "Slippage (bps / trade)",
+            min_value=0.0,
+            value=0.0,
+            step=0.5,
+            format="%.1f",
+            key="slippage_bps",
+            help=(
+                "Glissement de prix appliqué à chaque exécution, en points de base "
+                "(1 bps = 0,01 %). Modélise l'écart entre prix théorique et prix réel "
+                "(spread, latence, impact). 0 = comportement historique sans friction. "
+                "Ordre de grandeur crypto spot liquide : 1–5 bps."
+            ),
+        )
+
 # ==============================================================================
 # HELPER FUNCTIONS
 # ==============================================================================
@@ -3287,6 +3302,7 @@ def get_current_config():
         'order_sizing_mode': order_sizing_mode,
         'order_fixed_cash': order_fixed_cash,
         'fees_pct': fees_pct,
+        'slippage_bps': slippage_bps,
         'n_windows': n_windows,
         'train_size': train_size,
         'anchored': anchored,

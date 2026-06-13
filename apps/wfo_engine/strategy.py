@@ -955,6 +955,8 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
     order_fixed_cash = float(_scalar_param(params.get('order_fixed_cash', 10000.0), 10000.0))
     fees_pct = float(_scalar_param(params.get('fees_pct', 0.0), 0.0))
     fees = fees_pct / 100.0
+    slippage_bps = float(_scalar_param(params.get('slippage_bps', 0.0), 0.0))
+    slippage = slippage_bps / 10000.0  # VBT expects a price fraction per fill
 
     # Create portfolio (vectorized)
     # from_signals automatically handles multi-column boolean dataframes
@@ -994,6 +996,7 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
         size_type=size_type,
         init_cash=order_fixed_cash,
         fees=fees,
+        slippage=slippage,
         freq=timeframe,
     )
 
