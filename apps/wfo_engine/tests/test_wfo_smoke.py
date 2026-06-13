@@ -257,3 +257,67 @@ class TestWfoHoldout:
     def test_holdout_invalid_fraction_raises(self, ohlcv_df):
         with pytest.raises(ValueError):
             _run(ohlcv_df, holdout_fraction=0.7)
+
+
+class TestSnvKdtreeCache:
+    """IMPL-P4 — cached neighbor indices must reproduce the uncached selection."""
+
+    @staticmethod
+    def _make_results(rng, param_grid, shuffle=True):
+        """Full-grid results with random scores, shuffled like a sorted-by-score frame."""
+        import itertools
+        rows = [dict(zip(param_grid.keys(), combo))
+                for combo in itertools.product(*param_grid.values())]
+        df = pd.DataFrame(rows)
+        df["combined_score"] = rng.normal(size=len(df))
+        if shuffle:
+            df = df.sample(frac=1.0, random_state=int(rng.integers(0, 2**31))).reset_index(drop=True)
+        return df.sort_values("combined_score", ascending=False).reset_index(drop=True)
+
+    def test_cached_equals_uncached_across_windows(self):
+        from wfo import get_stable_best_params, _snv_cache
+        _snv_cache.clear()
+        rng = np.random.default_rng(42)
+        grid = {"a": [1.0, 2.0, 3.0, 4.0], "b": [10.0, 20.0, 30.0], "c": [0.1, 0.5]}
+        for _window in range(3):  # window 1 fills the cache, 2-3 hit it
+            results = self._make_results(rng, grid)
+            row_cached, score_cached = get_stable_best_params(
+                results, grid, neighbor_count=3, optimization_method="grid")
+            row_ref, score_ref = get_stable_best_params(
+                results, grid, neighbor_count=3, optimization_method="bayesian")
+            assert row_cached.equals(row_ref)
+            assert score_cached == pytest.approx(score_ref)
+        assert len(_snv_cache) == 1  # same grid+k+n → single entry, reused
+
+    def test_non_grid_method_not_cached(self):
+        from wfo import get_stable_best_params, _snv_cache
+        _snv_cache.clear()
+        rng = np.random.default_rng(7)
+        grid = {"a": [1.0, 2.0, 3.0], "b": [5.0, 6.0]}
+        get_stable_best_params(self._make_results(rng, grid), grid,
+                               neighbor_count=2, optimization_method="optuna")
+        get_stable_best_params(self._make_results(rng, grid), grid,
+                               neighbor_count=2, optimization_method=None)
+        assert _snv_cache == {}
+
+    def test_cache_bounded(self):
+        from wfo import get_stable_best_params, _snv_cache, _SNV_CACHE_MAX
+        _snv_cache.clear()
+        rng = np.random.default_rng(11)
+        for i in range(_SNV_CACHE_MAX + 2):  # distinct grids → distinct keys
+            grid = {"a": [1.0 + i, 2.0 + i, 3.0 + i], "b": [5.0, 6.0]}
+            get_stable_best_params(self._make_results(rng, grid), grid,
+                                   neighbor_count=2, optimization_method="grid")
+        assert len(_snv_cache) <= _SNV_CACHE_MAX
+
+    def test_unhashable_grid_skips_cache(self):
+        from wfo import get_stable_best_params, _snv_cache
+        _snv_cache.clear()
+        rng = np.random.default_rng(3)
+        grid = {"a": [1.0, 2.0, 3.0], "b": [5.0, 6.0]}
+        results = self._make_results(rng, grid)
+        bad_grid = {"a": [1.0, 2.0, 3.0], "b": [5.0, 6.0], "weird": [{"x": 1}, {"x": 2}]}
+        row, _ = get_stable_best_params(results, bad_grid,
+                                        neighbor_count=2, optimization_method="grid")
+        assert row is not None
+        assert _snv_cache == {}

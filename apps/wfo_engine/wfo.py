@@ -465,8 +465,38 @@ def optimize_parameters(
 
     return sorted_results, evaluation_count
 
-def get_stable_best_params(optimization_results, param_grid, neighbor_count=5, score_col='combined_score'):
-    """Select a robust best row using neighborhood-averaged scores in normalized param space."""
+# IMPL-P4 — bounded cache of SNV neighborhood indices.  Valid only for grid
+# search, where every window evaluates the exact same combo set: the neighbor
+# structure in normalized param space is then window-invariant and only the
+# scores change between windows.  Rows arrive sorted by score (order varies
+# per window), so cached indices are stored in canonical lexsort order and
+# remapped to the window's row order on each hit.  Bayesian/Optuna and guided
+# regimes produce different combos per window — never cached.
+_snv_cache: dict = {}
+_SNV_CACHE_MAX = 4
+_snv_cache_lock = threading.Lock()
+
+
+def _snv_grid_cache_key(param_grid, k, n_rows):
+    """Hashable cache key for a param grid, or None when the grid is unhashable."""
+    try:
+        grid_sig = tuple(sorted(
+            (str(name), tuple(vals)) for name, vals in param_grid.items()
+        ))
+        return (hash(grid_sig), int(k), int(n_rows))
+    except TypeError:
+        return None
+
+
+def get_stable_best_params(optimization_results, param_grid, neighbor_count=5, score_col='combined_score',
+                           optimization_method=None):
+    """Select a robust best row using neighborhood-averaged scores in normalized param space.
+
+    When optimization_method == 'grid', the KDTree neighbor indices are cached
+    across windows (see _snv_cache above).  Ties between equidistant neighbors
+    may resolve differently than the uncached path on grids with duplicate
+    numeric coordinates — same arbitrariness the uncached KDTree already has.
+    """
     if optimization_results is None or optimization_results.empty:
         raise ValueError("optimization_results must be a non-empty DataFrame.")
     if score_col not in optimization_results.columns:
@@ -486,8 +516,30 @@ def get_stable_best_params(optimization_results, param_grid, neighbor_count=5, s
     scores = pd.to_numeric(optimization_results[score_col], errors='coerce').to_numpy()
     k = max(1, min(neighbor_count, len(optimization_results)))
 
-    tree = KDTree(norm_vals)
-    _, indices = tree.query(norm_vals, k=k)
+    cache_key = (
+        _snv_grid_cache_key(param_grid, k, len(norm_vals))
+        if optimization_method == 'grid' else None
+    )
+    if cache_key is not None:
+        # Canonical row order makes the neighbor indices window-invariant.
+        order = np.lexsort(norm_vals.T[::-1])
+        inv = np.empty_like(order)
+        inv[order] = np.arange(len(order))
+        with _snv_cache_lock:
+            canon_indices = _snv_cache.get(cache_key)
+        if canon_indices is None:
+            tree = KDTree(norm_vals[order])
+            _, canon_indices = tree.query(norm_vals[order], k=k)
+            with _snv_cache_lock:
+                if len(_snv_cache) >= _SNV_CACHE_MAX:
+                    _snv_cache.pop(next(iter(_snv_cache)))
+                _snv_cache[cache_key] = canon_indices
+        # Neighbors of original row i live at canonical position inv[i];
+        # map canonical neighbor indices back to original row indices.
+        indices = order[canon_indices[inv]]
+    else:
+        tree = KDTree(norm_vals)
+        _, indices = tree.query(norm_vals, k=k)
     smoothed = np.nanmean(scores[indices], axis=1)
 
     if np.all(np.isnan(smoothed)):
@@ -859,7 +911,8 @@ def walk_forward_optimization(
             )
         else:
             best_row, stable_score = get_stable_best_params(
-                optimization_results, window_param_grid, neighbor_count=neighbor_count
+                optimization_results, window_param_grid, neighbor_count=neighbor_count,
+                optimization_method=getattr(settings, 'optimization_method', None),
             )
             log(f"Selection L1: SNV (k={neighbor_count})")
 
