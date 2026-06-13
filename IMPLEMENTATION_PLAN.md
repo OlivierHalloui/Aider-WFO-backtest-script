@@ -642,7 +642,7 @@ pytest apps/wfo_engine/tests/test_run_service.py \
 | IMPL-R6 | 4 | R6 | `session.py`, `app.py` | 3j (scope réduit) | ✅ DONE (scope réduit : run-resolution + résultats/viz ; 614 → 587 accès ; reste = chantier séparé) |
 | IMPL-R9 | 4 | R9 | `stagewise_panel.py` | 0.5j | ✅ DONE |
 | IMPL-R10/R11 | 4 | R10, R11 | `data_loading.py` | 1j | ✅ DONE |
-| IMPL-3.3 | 5 | — | `run_service.py`, `app.py` | 2j (v1 détection seule) | TODO |
-| IMPL-P4 | 5 | P4 | `wfo.py:480–495` | 1j | TODO |
-| IMPL-P6 | 5 | P6 | `neural_search.py:189–196` | 0.5j (si profiling justifie) | TODO |
-| IMPL-M2 | 5 | M2 | `strategy.py`, `config.py` | 2j | TODO |
+| IMPL-3.3 | 5 | — | `run_service.py`, `app.py` | 2j (v1 détection seule) | ✅ DONE (v1 : scan + notification + acquittement ; reprise = chantier séparé) |
+| IMPL-P4 | 5 | P4 | `wfo.py:480–495` | 1j | ✅ DONE (cache canonique lexsort, grid uniquement ; bench 4.0× sur 12k combos × 6 fenêtres) |
+| IMPL-P6 | 5 | P6 | `neural_search.py:189–196` | 0.5j (si profiling justifie) | ⏸ SKIP — profiling 2026-06-13 : 0% doublons sur grille représentative (17 params, 1.3e8 combos, pool 3000) ; doublons des petites grilles ne coûtent qu'un forward MLP, backtests dédupliqués par le cache |
+| IMPL-M2 | 5 | M2 | `strategy.py`, `config.py` | 2j | ✅ DONE (slippage_bps via param_grid → vbt from_signals, défaut 0) |

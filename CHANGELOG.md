@@ -2,6 +2,15 @@
 
 Toutes les évolutions notables de l'application WFO sont documentées ici.
 
+## 2026-06-13
+
+Phase 5 du plan d'audit (`IMPLEMENTATION_PLAN.md`) :
+
+- **Détection des runs interrompus (v1)** : `run_optimization_job` écrit un marqueur `completed.json` à chaque sortie (succès/stop/erreur). Au démarrage d'une session, `scan_orphaned_runs()` repère les répertoires `reports/runs/` avec checkpoint sans marqueur — notification UI avec résumé (fenêtres complétées, progression, timestamp) et bouton d'acquittement. La reprise d'un run interrompu n'est pas implémentée (chantier séparé).
+- **Slippage configurable** : `slippage_bps` (sidebar, sous les frais) appliqué à chaque exécution via VectorBT. Défaut 0 = comportement historique sans friction. Ordre de grandeur crypto spot liquide : 1–5 bps.
+- **Cache KDTree SNV** : en grid search, les indices de voisinage de la sélection SNV sont cachés entre fenêtres (ordre canonique + remap) — sélection ~4× plus rapide sur grosses grilles. Jamais actif en Bayesian/Optuna/régimes guidés (combos différents par fenêtre).
+- **Dédup neural search : abandonné après profiling** — 0 % de doublons sur grille représentative (17 params, pool 3000) ; le coût des doublons sur petites grilles est négligeable (forward MLP, backtests dédupliqués par le cache).
+
 ## 2026-06-12
 
 Corrections issues de l'audit (`AUDIT_REPORT.md`, plan `IMPLEMENTATION_PLAN.md`) :
