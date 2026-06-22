@@ -24,6 +24,25 @@ from metrics import (
 )
 from strategy_adapters import resolve_strategy_adapter
 
+# Integer params that must not be passed as float64 to Numba kernels.
+# pandas DataFrame round-trips convert int columns to float64 when mixed with
+# float columns; these must be cast back to int before calling run_backtest.
+_INT_PARAMS = {
+    'timeperiod', 'Nb_bars_above', 'fenetre_lowest', 'longueur_mediane',
+    'nb_bars_under_bbw_mini', 'nb_bars_entre_bb', 'user_exit_sma_length',
+    'macd_fast_length', 'macd_slow_length', 'macd_signal_length',
+    'nb_bars_left_pivot', 'nb_bars_right_pivot', 'nombre_periodes_reglin',
+    'i_bars_back',
+}
+
+
+def _coerce_int_params(params: dict) -> dict:
+    """Cast known integer params back to int after DataFrame float64 promotion."""
+    return {
+        k: int(round(v)) if k in _INT_PARAMS and isinstance(v, float) else v
+        for k, v in params.items()
+    }
+
 
 @functools.lru_cache(maxsize=512)
 def _value_token(value):
@@ -475,7 +494,7 @@ def adaptive_continuous_optimization(
 
         trials_df = pd.DataFrame(trials_rows).sort_values("combined_score", ascending=False).reset_index(drop=True)
         best_row = trials_df.iloc[0]
-        best_params = {k: _python_scalar(best_row[k]) for k in param_grid.keys() if k in best_row}
+        best_params = _coerce_int_params({k: _python_scalar(best_row[k]) for k in param_grid.keys() if k in best_row})
 
         in_sample_portfolio = strategy_adapter.run_backtest(
             train_df, best_params, timeframe=timeframe, return_portfolio=True
