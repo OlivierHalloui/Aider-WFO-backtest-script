@@ -2,6 +2,32 @@
 
 Toutes les évolutions notables de l'application WFO sont documentées ici.
 
+## 2026-06-13
+
+Phase 5 du plan d'audit (`IMPLEMENTATION_PLAN.md`) :
+
+- **Détection des runs interrompus (v1)** : `run_optimization_job` écrit un marqueur `completed.json` à chaque sortie (succès/stop/erreur). Au démarrage d'une session, `scan_orphaned_runs()` repère les répertoires `reports/runs/` avec checkpoint sans marqueur — notification UI avec résumé (fenêtres complétées, progression, timestamp) et bouton d'acquittement. La reprise d'un run interrompu n'est pas implémentée (chantier séparé).
+- **Slippage configurable** : `slippage_bps` (sidebar, sous les frais) appliqué à chaque exécution via VectorBT. Défaut 0 = comportement historique sans friction. Ordre de grandeur crypto spot liquide : 1–5 bps.
+- **Cache KDTree SNV** : en grid search, les indices de voisinage de la sélection SNV sont cachés entre fenêtres (ordre canonique + remap) — sélection ~4× plus rapide sur grosses grilles. Jamais actif en Bayesian/Optuna/régimes guidés (combos différents par fenêtre).
+- **Dédup neural search : abandonné après profiling** — 0 % de doublons sur grille représentative (17 params, pool 3000) ; le coût des doublons sur petites grilles est négligeable (forward MLP, backtests dédupliqués par le cache).
+
+## 2026-06-12
+
+Corrections issues de l'audit (`AUDIT_REPORT.md`, plan `IMPLEMENTATION_PLAN.md`) :
+
+- **Durabilité checkpoint réparée** : les erreurs d'écriture de `checkpoint.json` et des résultats de fenêtres ne sont plus silencieuses (`logger.error` + `exc_info`) ; les échecs remontent dans `job_state["warnings"]`.
+- **Exports JSON valides (RFC 7159)** : `sanitize_for_json()` convertit `NaN`/`Inf` en `null` ; les deux paths d'export ZIP (`export_panel`, `stagewise_panel`) utilisent le sanitizer + `allow_nan=False`. Note : `NaN` → `null` est lossy au réimport.
+- **Harvest run-resolution idempotent** : flag `harvested` dans `job_state` — un résultat de run ne peut plus être moissonné deux fois.
+- **`MemoryError` re-levée** dans l'évaluation des combos (`wfo.py`) au lieu d'être convertie en NaN ; `safe_float()` restreint aux exceptions de conversion.
+- **Parallélisme fenêtres opt-in** : `WFOSettings.max_parallel_windows` (défaut 1 = série, 0 = auto si ≥ 4 cœurs). Actif uniquement en régime classique — `nn_guided` et `prev_best_grid` restent séquentiels par design. Benchmark local 2 CPUs : speedup 1.43× (sous le seuil 1.5×) — défaut série conservé.
+- **Holdout final optionnel** : `WFOSettings.holdout_fraction` réserve une tranche finale de données jamais vue par l'optimisation ; bornes exposées dans `wfo_results['holdout']`.
+- **SVI** : docstring/tooltip requalifiés (IS₂ = re-ranking sur IS récent, pas un holdout OOS) ; `itertuples` remplace `iterrows`.
+- **Thompson sampling vectorisé** (`adaptive_optimization.py`) : un seul appel `rng.normal` pour tous les candidats, équivalence statistique préservée (masquage des params absents).
+- **`data_loading.py` robustifié** : valeurs CSV non numériques converties en NaN avec warning (au lieu de `ValueError`) ; fetch Binance avec message d'erreur actionnable et garde sur données vides.
+- **Cleanup thread stagewise** : l'état `_sw_thread`/`_sw_stop_event` orphelin est purgé après fin ou crash du thread.
+- **Facade `WFOSessionState` câblée** (`app.py`) : les lectures des clés run-resolution (`wfo_running`, `wfo_thread`, `wfo_job_state`, `wfo_prev_state`, `wfo_control`, `wfo_job_config`) et des sections visualisation/backtest stagewise passent par des snapshots typés `WFOSessionState.read()` — un snapshot par zone, pris après les écritures mid-run (import ZIP, panel stagewise). Les écritures restent directes (facade read-only par design).
+- **Tests** : 80 nouveaux tests — services (`run_service`, `serialization`, `data_loading`), smoke engine sans VBT, intégration VBT réelle (backtest, métriques, SVI, adaptive, stagewise).
+
 ## 2026-04-18
 
 - **WFO Stagewise — héritage complet de la configuration UI** : le panneau stagewise supprime les champs redondants (direction, timeframe, fenêtres, dates, fichier données). Tous ces paramètres sont lus depuis le panneau latéral (`get_current_config()`). Un bandeau d'information affiche les valeurs héritées. Le fichier de données se pré-remplit automatiquement si "Charger depuis fichier CSV" est actif dans la sidebar.

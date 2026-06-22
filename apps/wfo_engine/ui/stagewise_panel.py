@@ -18,6 +18,8 @@ import pandas as pd
 import streamlit as st
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
+from domain.serialization import sanitize_for_json as _sanitize_for_json
+
 from stagewise_optimizer import (
     STAGE_PLAN,
     FULL_PARAM_REGISTRY,
@@ -95,9 +97,9 @@ def _auto_save_stagewise_zip(
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("results.json",
-                        json.dumps(payload, indent=2, default=str))
+                        json.dumps(_sanitize_for_json(payload), indent=2, allow_nan=False, default=str))
             zf.writestr("stagewise_final_report.json",
-                        json.dumps(final_report, indent=2, default=str))
+                        json.dumps(_sanitize_for_json(final_report), indent=2, allow_nan=False, default=str))
 
         zip_path = Path("reports") / f"wfo_results_stagewise_{ts}.zip"
         zip_path.parent.mkdir(parents=True, exist_ok=True)
@@ -351,6 +353,16 @@ def render_stagewise_panel(*, get_current_config, load_data):
     """Entry point — call from app.py."""
 
     st.markdown("### 🎯 Campagne WFO Stagewise")
+
+    # R9 — cleanup orphaned thread state after crash or completion so the next
+    # run does not inherit a stale _sw_run_state.  This mirrors the cleanup in
+    # app.py for the classic WFO thread.
+    _sw_thread = st.session_state.get("_sw_thread")
+    if _sw_thread is not None and not _sw_thread.is_alive():
+        _dead_status = st.session_state.get("_sw_run_state", {}).get("status", "idle")
+        if _dead_status not in ("running",):
+            for _k in ["_sw_thread", "_sw_stop_event"]:
+                st.session_state.pop(_k, None)
 
     status = st.session_state.get("_sw_run_state", {}).get("status", "idle")
     is_running = (status == "running")

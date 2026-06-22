@@ -1,9 +1,14 @@
 # Import necessary libraries for data loading
-import pandas as pd
-import vectorbtpro as vbt
+import logging
 import os
 from pathlib import Path
+
+import pandas as pd
+import vectorbtpro as vbt
+
 from config import DEFAULT_DATA_FILE, DEFAULT_START_DATE, DEFAULT_END_DATE
+
+logger = logging.getLogger(__name__)
 
 # ======================================================================
 # DATA LOADING AND PREPROCESSING
@@ -163,17 +168,16 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
             raise ValueError(f"Missing required columns in CSV: {missing}")
 
         usecols = required_cols + (['Volume'] if 'Volume' in header_cols else [])
-        dtypes = {
-            'Open time': 'str',  # converted to datetime right after loading
-            'Open': 'float64',
-            'High': 'float64',
-            'Low': 'float64',
-            'Close': 'float64',
-        }
-        if 'Volume' in usecols:
-            dtypes['Volume'] = 'float64'
 
-        df = pd.read_csv(file_path, usecols=usecols, dtype=dtypes)
+        # R10 — don't use dtype= so pandas doesn't raise ValueError on 'N/A' or
+        # other non-numeric strings; coerce to numeric after loading instead.
+        df = pd.read_csv(file_path, usecols=usecols, dtype={'Open time': 'str'})
+        numeric_cols = ['Open', 'High', 'Low', 'Close'] + (['Volume'] if 'Volume' in usecols else [])
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        nan_count = df[['Open', 'High', 'Low', 'Close']].isna().sum().sum()
+        if nan_count > 0:
+            logger.warning("CSV: %d non-numeric values coerced to NaN in OHLC columns", nan_count)
         df['Open time'] = pd.to_datetime(df['Open time'], errors='coerce')
         df.set_index('Open time', inplace=True)
         df = df[~df.index.isna()]
@@ -190,15 +194,28 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
         # Fetch from Binance
         # api.binance.com may be geo-blocked; use api1.binance.com as fallback.
         base_timeframe = '1s'  # Fetch at 1s resolution
-        data_obj = vbt.BinanceData.fetch(
-            ["BTCUSDT"],
-            start=start_date,
-            end=end_date,
-            timeframe=base_timeframe,
-            client_config=dict(base_endpoint='1'),
-        )
-        # Extract DataFrame from the VBT symbol_dict wrapper
-        df_1s = data_obj.data['BTCUSDT']
+        try:
+            data_obj = vbt.BinanceData.fetch(
+                ["BTCUSDT"],
+                start=start_date,
+                end=end_date,
+                timeframe=base_timeframe,
+                client_config=dict(base_endpoint='1'),
+            )
+        except Exception as exc:
+            logger.error("Binance fetch failed: %s", exc, exc_info=True)
+            raise RuntimeError(
+                f"Impossible de charger les données Binance. "
+                f"Vérifier la connectivité et le geo-block (api1.binance.com). "
+                f"Erreur: {exc}"
+            ) from exc
+        # Extract DataFrame from the VBT symbol_dict wrapper — R11: guard missing key
+        df_1s = data_obj.data.get('BTCUSDT')
+        if df_1s is None or df_1s.empty:
+            raise RuntimeError(
+                "Binance fetch returned no data for BTCUSDT. "
+                "Check date range, connectivity, and geo-block."
+            )
 
         # Save raw 1s data immediately — before any resample that could fail
         base_dir = Path(__file__).resolve().parent

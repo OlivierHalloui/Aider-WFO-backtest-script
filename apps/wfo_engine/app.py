@@ -80,6 +80,7 @@ from services.runtime_utils import (
     compute_running_elapsed_seconds as _compute_running_elapsed_seconds,
 )
 from services.run_service import run_optimization_job
+from services.session import WFOSessionState
 from strategy_adapters import resolve_strategy_adapter
 from ui.final_backtest_panel import (
     _select_best_params_from_results,
@@ -271,7 +272,8 @@ st.markdown(
 
 def _build_results_payload():
     config_snapshot = get_current_config()
-    results_snapshot = st.session_state.get("wfo_results")
+    _sess = WFOSessionState.read()
+    results_snapshot = _sess.wfo_results
     if isinstance(results_snapshot, dict):
         robust_summary = _build_robust_set_summary(results_snapshot, config_snapshot)
         results_snapshot = dict(results_snapshot)
@@ -287,7 +289,7 @@ def _build_results_payload():
         "exported_at": datetime.datetime.now().isoformat(),
         "config": config_snapshot,
         "wfo_results": results_snapshot,
-        "has_final_portfolio": "final_portfolio" in st.session_state,
+        "has_final_portfolio": _sess.final_portfolio is not None,
         "traceability": traceability,
         "pine_precheck_report": st.session_state.get("pine_precheck_report"),
         "pine_compatibility_report": st.session_state.get("pine_compatibility_report"),
@@ -849,7 +851,7 @@ def _estimate_adaptive_load(start_date, end_date, timeframe_str, train_bars, cyc
     }
 
 def _get_observed_seconds_per_trial():
-    results = st.session_state.get("wfo_results")
+    results = WFOSessionState.read().wfo_results
     if not isinstance(results, dict):
         return None
     timing = results.get("timing", {})
@@ -879,11 +881,12 @@ with st.sidebar:
         help="Single Run: optimize one config. Campaign: run multiple configs sequentially and compare results.",
     )
 
-    has_final_params = 'final_params' in st.session_state or 'wfo_results' in st.session_state
+    _sess_sb = WFOSessionState.read()
+    has_final_params = _sess_sb.final_params is not None or _sess_sb.wfo_results is not None
     # Build window list for the selector (only when WFO results exist)
     _wfo_windows = []
-    if 'wfo_results' in st.session_state:
-        _wr = st.session_state['wfo_results']
+    if _sess_sb.wfo_results is not None:
+        _wr = _sess_sb.wfo_results
         for _w in (_wr.get('window_results') or []):
             _wid = (_w.get('window_info') or {}).get('window')
             if _wid is not None:
@@ -1063,7 +1066,7 @@ with st.sidebar:
                     'i_bars_back': 'i_bars_back',
                     'seuil_overbought_bb': 'seuil_overbought_bb',
                     'order_sizing_mode': 'order_sizing_mode', 'order_fixed_cash': 'order_fixed_cash',
-                    'fees_pct': 'fees_pct'
+                    'fees_pct': 'fees_pct', 'slippage_bps': 'slippage_bps'
                 }
                 for conf_key, widget_key in state_map.items():
                     if conf_key in loaded_config:
@@ -3054,6 +3057,21 @@ with st.sidebar:
             key="fees_pct"
         )
 
+        slippage_bps = st.number_input(
+            "Slippage (bps / trade)",
+            min_value=0.0,
+            value=0.0,
+            step=0.5,
+            format="%.1f",
+            key="slippage_bps",
+            help=(
+                "Glissement de prix appliqué à chaque exécution, en points de base "
+                "(1 bps = 0,01 %). Modélise l'écart entre prix théorique et prix réel "
+                "(spread, latence, impact). 0 = comportement historique sans friction. "
+                "Ordre de grandeur crypto spot liquide : 1–5 bps."
+            ),
+        )
+
 # ==============================================================================
 # HELPER FUNCTIONS
 # ==============================================================================
@@ -3284,6 +3302,7 @@ def get_current_config():
         'order_sizing_mode': order_sizing_mode,
         'order_fixed_cash': order_fixed_cash,
         'fees_pct': fees_pct,
+        'slippage_bps': slippage_bps,
         'n_windows': n_windows,
         'train_size': train_size,
         'anchored': anchored,
@@ -3547,12 +3566,19 @@ if 'wfo_running' not in st.session_state:
     st.session_state['wfo_running'] = False
 
 # Resolve finished background job and update/restore state once.
-if st.session_state.get('wfo_running'):
-    wfo_thread = st.session_state.get('wfo_thread')
-    wfo_job_state = st.session_state.get('wfo_job_state')
-    if wfo_thread is not None and not wfo_thread.is_alive() and wfo_job_state is not None:
+# Snapshot taken after the wfo_running init and after the sidebar ZIP import:
+# every code path that mutates run-resolution keys below ends with st.rerun(),
+# so this snapshot stays valid for the run-control blocks that follow.
+_sess_run = WFOSessionState.read()
+if _sess_run.wfo_running:
+    wfo_thread = _sess_run.wfo_thread
+    wfo_job_state = _sess_run.wfo_job_state
+    if (wfo_thread is not None and not wfo_thread.is_alive()
+            and wfo_job_state is not None
+            and not wfo_job_state.get('harvested', False)):
+        wfo_job_state['harvested'] = True
         status = wfo_job_state.get('status')
-        job_conf = st.session_state.get('wfo_job_config', {})
+        job_conf = _sess_run.wfo_job_config or {}
         run_metadata = {
             "run_id": wfo_job_state.get("run_id"),
             "status": status,
@@ -3574,10 +3600,10 @@ if st.session_state.get('wfo_running'):
             st.session_state['wfo_notice'] = ("success", "Optimization finished.")
             st.session_state['wfo_error_log_path'] = _log_p
         elif status == 'stopped':
-            _restore_state_snapshot(st.session_state.get('wfo_prev_state', {}))
+            _restore_state_snapshot(_sess_run.wfo_prev_state or {})
             st.session_state['wfo_notice'] = ("warning", "Optimization stopped. Previous state restored.")
         else:
-            _restore_state_snapshot(st.session_state.get('wfo_prev_state', {}))
+            _restore_state_snapshot(_sess_run.wfo_prev_state or {})
             err = wfo_job_state.get('error') or "Unknown optimization error."
             st.session_state['wfo_notice'] = ("error", f"An error occurred during optimization: {err}")
 
@@ -3591,6 +3617,40 @@ if st.session_state.get('wfo_running'):
             st.session_state.pop(key, None)
         st.session_state['wfo_running'] = False
         st.rerun()
+
+# IMPL-3.3 — orphaned-run detection (v1: notification only, no resume).
+# Scan once per Streamlit session, never while a run is in flight (an active
+# run legitimately has a checkpoint without a resolution marker yet).
+if not _sess_run.wfo_running and not st.session_state.get("_orphan_scan_done"):
+    from services.run_service import scan_orphaned_runs
+    try:
+        st.session_state["_orphan_runs"] = scan_orphaned_runs()
+    except Exception as _scan_exc:
+        logging.getLogger(__name__).warning("Orphaned-run scan failed: %s", _scan_exc)
+        st.session_state["_orphan_runs"] = []
+    st.session_state["_orphan_scan_done"] = True
+
+_orphan_runs = st.session_state.get("_orphan_runs") or []
+if _orphan_runs:
+    with st.expander(f"⚠️ {len(_orphan_runs)} run(s) WFO interrompu(s) détecté(s)", expanded=True):
+        st.markdown(
+            "Ces runs ont laissé un checkpoint sans marqueur de fin — "
+            "probablement interrompus par un crash ou un arrêt du serveur. "
+            "Les résultats partiels restent disponibles dans `reports/runs/`."
+        )
+        for _o in _orphan_runs:
+            st.markdown(
+                f"- **{_o['run_id']}** — fenêtres complétées : {_o['windows_completed']}, "
+                f"progression : {(_o.get('progress') or 0.0) * 100:.0f}%, "
+                f"démarré : {_o.get('started_at_utc') or '?'}"
+            )
+        st.caption("La reprise d'un run interrompu n'est pas implémentée (v1 : détection seule).")
+        if st.button("✔️ Acquitter (ne plus afficher)", key="ack_orphan_runs"):
+            from services.run_service import mark_run_resolved
+            for _o in _orphan_runs:
+                mark_run_resolved(_o["run_dir"])
+            st.session_state["_orphan_runs"] = []
+            st.rerun()
 
 col_run, col_save = st.sidebar.columns([1, 1])
 
@@ -3630,7 +3690,7 @@ with col_run:
             "Pine gate actif: lancement bloqué"
             + (f" ({', '.join(blocker_codes[:3])})" if blocker_codes else ".")
         )
-    if not st.session_state.get('wfo_running'):
+    if not _sess_run.wfo_running:
         if st.button(
             "🚀 Start WFO",
             type="primary",
@@ -3698,7 +3758,8 @@ with col_run:
                     'started_at_utc': run_started_at,
                     'ended_at_utc': None,
                     'config_sha256': config_sha,
-                    'results_sha256': None
+                    'results_sha256': None,
+                    'harvested': False,
                 }
                 control = WFOControl()
                 st.session_state['wfo_prev_state'] = _capture_state_snapshot()
@@ -3761,16 +3822,18 @@ with col_run:
                 st.rerun()
     else:
         if st.button("🛑 Stop WFO", key="stop_wfo_btn", width="stretch", help="Demande un arrêt propre après l'essai en cours."):
-            control = st.session_state.get('wfo_control')
+            control = _sess_run.wfo_control
             if control:
                 control.request_stop()
-            if st.session_state.get('wfo_job_state') is not None:
-                st.session_state['wfo_job_state']['message'] = "Stop requested. Waiting for clean shutdown..."
+            if _sess_run.wfo_job_state is not None:
+                # Snapshot holds the same dict object as session state — the
+                # worker thread reads this message live.
+                _sess_run.wfo_job_state['message'] = "Stop requested. Waiting for clean shutdown..."
             st.sidebar.warning("Stop requested. Optimization is shutting down...")
             st.rerun()
 
-if st.session_state.get('wfo_running'):
-    job_state = st.session_state.get('wfo_job_state', {})
+if _sess_run.wfo_running:
+    job_state = _sess_run.wfo_job_state or {}
     _inject_running_animation_css()
     st.sidebar.markdown(
         '<div class="run-badge"><span class="run-badge-dot"></span>RUNNING</div>',
@@ -4339,14 +4402,18 @@ with st.expander("🎯 Campagne WFO Stagewise", expanded=False):
         load_data=load_data,
     )
 
+# Fresh snapshot: the stagewise panel above may have written a synthetic
+# wfo_results / final_portfolio mid-run without triggering a rerun.
+_sess_viz = WFOSessionState.read()
+
 # ==============================================================================
 # STAGEWISE FINAL BACKTEST RESULTS
 # Shown when a stagewise backtest ran successfully but no WFO campaign exists.
 # ==============================================================================
-if 'final_portfolio' in st.session_state and 'wfo_results' not in st.session_state:
-    _sw_pf     = st.session_state['final_portfolio']
-    _sw_params = st.session_state.get('final_params', {})
-    _sw_src    = st.session_state.get('final_params_source', 'stagewise')
+if _sess_viz.final_portfolio is not None and _sess_viz.wfo_results is None:
+    _sw_pf     = _sess_viz.final_portfolio
+    _sw_params = _sess_viz.final_params or {}
+    _sw_src    = _sess_viz.final_params_source or 'stagewise'
     st.divider()
     st.header("🏆 Backtest Final — Résultats")
     st.caption(f"Source des paramètres : `{_sw_src}`")
@@ -4358,7 +4425,7 @@ if 'final_portfolio' in st.session_state and 'wfo_results' not in st.session_sta
     _c4.metric("Max Drawdown",  f"{_sw_pf.max_drawdown * 100:.2f}%")
     _c5.metric("Trades",        str(len(_sw_pf.trades)))
 
-    _sw_tf = st.session_state.get('final_timeframe') or st.session_state.get('timeframe', DEFAULT_TIMEFRAME)
+    _sw_tf = _sess_viz.final_timeframe or st.session_state.get('timeframe', DEFAULT_TIMEFRAME)
     st.caption(f"Timeframe : `{_sw_tf}`")
 
     with st.expander("Paramètres utilisés", expanded=False):
@@ -4388,8 +4455,8 @@ if 'final_portfolio' in st.session_state and 'wfo_results' not in st.session_sta
 # RESULTS VISUALIZATION
 # ==============================================================================
 
-if 'wfo_results' in st.session_state:
-    results = st.session_state['wfo_results']
+if _sess_viz.wfo_results is not None:
+    results = _sess_viz.wfo_results
     if isinstance(results, dict):
         # Guard expensive derivations behind a results-identity token.
         # id(results) changes only when a new WFO run assigns a fresh dict to
@@ -4409,7 +4476,7 @@ if 'wfo_results' in st.session_state:
 
             st.session_state["_wfo_results_token"] = _results_token
 
-    df = st.session_state.get('df')
+    df = _sess_viz.df
     traceability = results.get("traceability") or st.session_state.get("wfo_traceability")
 
     st.divider()
@@ -6212,8 +6279,9 @@ else:
     st.info("👈 Click **Start Optimization** in the sidebar to run the backtest.")
 
 # Keep the UI in sync with background WFO progress/completion without requiring user interaction.
-if st.session_state.get('wfo_running'):
-    live_thread = st.session_state.get('wfo_thread')
+_sess_end = WFOSessionState.read()
+if _sess_end.wfo_running:
+    live_thread = _sess_end.wfo_thread
     if live_thread is not None and live_thread.is_alive():
         time.sleep(0.8)
     st.rerun()

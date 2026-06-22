@@ -2,19 +2,137 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import pathlib
 import time
 from typing import Any
 
 from adaptive_optimization import adaptive_continuous_optimization
 from config import DEFAULT_STRATEGY_ID, DEFAULT_STRATEGY_MODE
 from data_loading import load_data
+from domain.serialization import utc_now_iso
 from main import get_metrics_info, get_param_grid, get_wfo_settings
 from services.error_log import write_error_log, collect_classic_wfo_entries
 from strategy_adapters import resolve_strategy_adapter
 from wfo import OptimizationInterrupted, walk_forward_optimization
 
 logger = logging.getLogger(__name__)
+
+_CHECKPOINT_KEYS = (
+    "status", "progress", "message", "window",
+    "evaluations", "run_id", "started_at_utc", "ended_at_utc",
+)
+
+
+def _checkpoint_job_state(job_state: dict, run_dir: pathlib.Path) -> None:
+    """Write a lightweight checkpoint of job_state to disk (atomic replace)."""
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.error("Checkpoint dir inaccessible %s: %s", run_dir, exc, exc_info=True)
+        if job_state is not None:
+            job_state.setdefault("warnings", []).append(f"Checkpoint write failed: {exc}")
+        return
+
+    try:
+        snap = {k: job_state.get(k) for k in _CHECKPOINT_KEYS}
+        tmp = run_dir / "checkpoint.json.tmp"
+        tmp.write_text(json.dumps(snap, default=str), encoding="utf-8")
+        os.replace(tmp, run_dir / "checkpoint.json")
+    except Exception as exc:
+        logger.error("Checkpoint write failed: %s", exc, exc_info=True)
+        if job_state is not None:
+            job_state.setdefault("warnings", []).append(f"Checkpoint write failed: {exc}")
+
+
+def _write_window_result(window: int, payload: dict, run_dir: pathlib.Path) -> None:
+    """Persist per-window metrics to disk so partial results survive a crash."""
+    try:
+        win_dir = run_dir / "windows"
+        win_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "window": window,
+            "evaluations": payload.get("evaluations"),
+            "speed": payload.get("speed"),
+            "window_metrics": payload.get("window_metrics", {}),
+        }
+        tmp = win_dir / f"window_{window:04d}.json.tmp"
+        tmp.write_text(json.dumps(data, default=str), encoding="utf-8")
+        os.replace(tmp, win_dir / f"window_{window:04d}.json")
+    except Exception as exc:
+        logger.error("Window %d result write failed: %s", window, exc, exc_info=True)
+
+
+def _finalize_run_dir(run_dir: pathlib.Path | None, status: str,
+                      job_state: dict | None = None) -> None:
+    """Write the completed.json resolution marker into a run directory.
+
+    A run directory holding a checkpoint.json without this marker is what
+    scan_orphaned_runs() reports as an interrupted run, so every exit path
+    of run_optimization_job (success, stop, error) must call this.
+    """
+    if run_dir is None:
+        return
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        snap = job_state or {}
+        data = {
+            "status": status,
+            "run_id": snap.get("run_id") or run_dir.name,
+            "ended_at_utc": snap.get("ended_at_utc") or utc_now_iso(),
+            "window": snap.get("window"),
+            "evaluations": snap.get("evaluations"),
+            "progress": snap.get("progress"),
+        }
+        tmp = run_dir / "completed.json.tmp"
+        tmp.write_text(json.dumps(data, default=str), encoding="utf-8")
+        os.replace(tmp, run_dir / "completed.json")
+    except Exception as exc:
+        logger.error("Run resolution marker write failed: %s", exc, exc_info=True)
+
+
+def scan_orphaned_runs(runs_root: str | os.PathLike = "reports/runs") -> list[dict]:
+    """Detect interrupted runs: checkpoint.json present, completed.json absent.
+
+    Returns one summary dict per orphan (run_id, progress, windows completed,
+    timestamps).  Read-only — resuming is a separate, future feature; callers
+    can acknowledge an orphan with mark_run_resolved().
+    """
+    root = pathlib.Path(runs_root)
+    if not root.is_dir():
+        return []
+    orphans: list[dict] = []
+    for run_dir in sorted(root.iterdir()):
+        if not run_dir.is_dir():
+            continue
+        checkpoint = run_dir / "checkpoint.json"
+        if not checkpoint.is_file() or (run_dir / "completed.json").is_file():
+            continue
+        try:
+            snap = json.loads(checkpoint.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Unreadable checkpoint %s: %s", checkpoint, exc)
+            snap = {}
+        win_dir = run_dir / "windows"
+        n_windows = len(list(win_dir.glob("window_*.json"))) if win_dir.is_dir() else 0
+        orphans.append({
+            "run_id": snap.get("run_id") or run_dir.name,
+            "run_dir": str(run_dir),
+            "status": snap.get("status"),
+            "progress": snap.get("progress"),
+            "window": snap.get("window"),
+            "evaluations": snap.get("evaluations"),
+            "started_at_utc": snap.get("started_at_utc"),
+            "windows_completed": n_windows,
+        })
+    return orphans
+
+
+def mark_run_resolved(run_dir: str | os.PathLike, status: str = "acknowledged") -> None:
+    """Acknowledge an orphaned run so scan_orphaned_runs() stops reporting it."""
+    _finalize_run_dir(pathlib.Path(run_dir), status)
 
 
 def run_optimization_job(
@@ -40,6 +158,9 @@ def run_optimization_job(
         which eliminates the full-file CSV read when multiple campaign configs share
         the same dataset.
     """
+    _run_id = job_state.get("run_id") if job_state else None
+    _run_dir = pathlib.Path("reports") / "runs" / _run_id if _run_id else None
+
     try:
         strategy_mode = str(config.get("strategy_mode", DEFAULT_STRATEGY_MODE)).lower()
         strategy_id = str(config.get("strategy_id", DEFAULT_STRATEGY_ID))
@@ -150,6 +271,14 @@ def run_optimization_job(
                     w = msg.get("window", 0)
                     job_state["message"] = f"Window {min(w, config['n_windows'])}/{config['n_windows']}"
 
+                # 3.2 — persist per-window metrics to disk
+                if _run_dir is not None and msg.get("window") is not None:
+                    _write_window_result(int(msg["window"]), msg, _run_dir)
+
+            # 3.1 — checkpoint lightweight job_state after every callback
+            if _run_dir is not None:
+                _checkpoint_job_state(job_state, _run_dir)
+
         if regime == "adaptive_continuous":
             results = adaptive_continuous_optimization(
                 df,
@@ -193,6 +322,7 @@ def run_optimization_job(
         if job_state is not None:
             job_state["error_log_path"] = _log_path
 
+        _finalize_run_dir(_run_dir, "completed", job_state)
         return results, df, elapsed
 
     except OptimizationInterrupted:
@@ -207,11 +337,12 @@ def run_optimization_job(
             run_ts=run_ts,
             status="INTERRUPTED",
         )
+        _finalize_run_dir(_run_dir, "stopped", job_state)
         return None, None, None
     except Exception as e:
         if job_state is not None:
             job_state["error"] = str(e)
-        logger.error("Run failed: %s", e)
+        logger.error("Run failed: %s", e, exc_info=True)
         _log_path = write_error_log(
             run_type="classic",
             config=config,
@@ -223,4 +354,5 @@ def run_optimization_job(
         )
         if job_state is not None:
             job_state["error_log_path"] = _log_path
+        _finalize_run_dir(_run_dir, "error", job_state)
         return None, None, None

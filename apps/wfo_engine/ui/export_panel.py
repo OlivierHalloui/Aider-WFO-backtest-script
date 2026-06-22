@@ -272,9 +272,9 @@ def _export_results_zip(
     data_source_descriptor = _build_data_source_descriptor(config_snapshot, df)
 
     with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("results.json", json.dumps(payload, indent=2))
-        zf.writestr("audit_trace.json", json.dumps(payload.get("traceability", {}), indent=2))
-        zf.writestr("expert_context_pack.json", json.dumps(expert_context_pack, indent=2, ensure_ascii=False))
+        zf.writestr("results.json", json.dumps(_sanitize_for_json(payload), indent=2, allow_nan=False, default=str))
+        zf.writestr("audit_trace.json", json.dumps(_sanitize_for_json(payload.get("traceability", {})), indent=2, allow_nan=False, default=str))
+        zf.writestr("expert_context_pack.json", json.dumps(_sanitize_for_json(expert_context_pack), indent=2, ensure_ascii=False, allow_nan=False, default=str))
         if isinstance(pine_precheck_report, dict) and pine_precheck_report:
             zf.writestr("pine_precheck_report.json", json.dumps(pine_precheck_report, indent=2, ensure_ascii=False))
         if isinstance(pine_compatibility_report, dict) and pine_compatibility_report:
