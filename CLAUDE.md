@@ -10,16 +10,16 @@ A Pine Script V3 subsystem enables importing TradingView Pine V6 strategies, tra
 
 ## Build & Run
 
-**Python 3.10+** required. Key dependencies: `streamlit`, `vectorbtpro`, `pandas`, `numpy`, `numba`, `optuna`, `scikit-optimize`, `plotly`.
+**Python 3.10+** required. Key dependencies: `streamlit`, `vectorbtpro`, `pandas`, `numpy`, `numba`, `optuna`, `scikit-optimize`, `plotly`. VectorBT Pro is commercial software — not available in CI.
 
 ```bash
-pip install -r requirements.txt
+pip install -r apps/wfo_engine/requirements.txt
 
-# Run the main app
-streamlit run apps/wfo_engine/app.py
-
-# Alternative launcher (handles streamlit args)
+# Preferred launcher — raises Streamlit upload/message limits to 6 GB (large OHLCV CSVs)
 bash scripts/run_wfoe.sh
+
+# Plain launch (default Streamlit limits)
+streamlit run apps/wfo_engine/app.py
 ```
 
 **PYTHONPATH must include `apps/wfo_engine`** for imports to resolve. The CI sets `PYTHONPATH: apps/wfo_engine` explicitly. For local dev:
@@ -28,26 +28,47 @@ PYTHONPATH=apps/wfo_engine pytest ...
 PYTHONPATH=apps/wfo_engine python -c "from config import ..."
 ```
 
+**Environment variables** (all optional, used at startup):
+- `WFOE_DEFAULT_DATA_FILE` — pre-fills the CSV data file path in the UI
+- `WFOE_UPLOAD_DIR` — persistent directory for uploaded CSV files (default: `~/.atdmf/uploads`)
+
 ## Testing
 
+Tests are split into two groups by dependency. VBT-dependent tests are guarded by `HAS_VBT` and **skip silently** when `vectorbtpro` is not importable — check the skip count, a green run without VBT does not cover the engine.
+
+**Lightweight (no VBT — runs in CI):**
 ```bash
-# Run all Pine V3 tests (lightweight — only needs pytest, numpy, pandas)
+# Pine V3 subsystem + parity
 pytest -q apps/wfo_engine/tests/test_pine_v3_*.py apps/wfo_engine/tests/test_pine_strategy_test_adapter.py
 
-# Run a single test file
+# Services, metrics, serialization, data loading
+pytest -q apps/wfo_engine/tests/test_metrics.py apps/wfo_engine/tests/test_neural_search.py \
+  apps/wfo_engine/tests/test_serialization.py apps/wfo_engine/tests/test_data_loading.py \
+  apps/wfo_engine/tests/test_run_service.py
+
+# Single test file or test by name
 pytest apps/wfo_engine/tests/test_pine_v3_spec.py
-
-# Run a single test by name
 pytest apps/wfo_engine/tests/test_pine_v3_spec.py -k test_spec_extracts_strategy_order_short_direction
+```
 
-# Run parity CI campaign (generates JSON report)
+**Requires VBT (local only):**
+```bash
+# Smoke, integration, adaptive, stagewise — all need vectorbtpro importable
+pytest -q apps/wfo_engine/tests/test_wfo_smoke.py apps/wfo_engine/tests/test_wfo_unit.py \
+  apps/wfo_engine/tests/test_wfo_integration.py apps/wfo_engine/tests/test_adaptive_integration.py \
+  apps/wfo_engine/tests/test_stagewise_integration.py apps/wfo_engine/tests/test_strategy_short.py
+```
+
+**Other:**
+```bash
+# Parity CI campaign (generates JSON report, lightweight)
 python apps/wfo_engine/tests/run_pine_parity_ci.py --output reports/ci/pine_parity_ci_report.json
 
 # Syntax check on core modules (run before pushing)
 python -m py_compile apps/wfo_engine/app.py apps/wfo_engine/main.py apps/wfo_engine/wfo.py apps/wfo_engine/adaptive_optimization.py apps/wfo_engine/strategy.py apps/wfo_engine/indicators.py apps/wfo_engine/data_loading.py apps/wfo_engine/config.py apps/wfo_engine/metrics.py apps/wfo_engine/neural_search.py apps/wfo_engine/stagewise_optimizer.py apps/wfo_engine/ui/stagewise_panel.py apps/wfo_engine/ui/final_backtest_panel.py
 ```
 
-CI (`.github/workflows/ci.yml`) runs on push to `main` and PRs: Pine V3 tests, parity CI campaign, and syntax check. VectorBT Pro is **not** installed in CI — only `pytest`, `numpy`, `pandas`.
+CI (`.github/workflows/ci.yml`) runs on push to `main` and PRs: lightweight Pine V3 tests, parity CI campaign, and syntax check. Note that CI's `py_compile` step only covers the first 10 modules above (not `stagewise_optimizer.py` or the `ui/` panels) — run the full command locally.
 
 ## Architecture
 
@@ -70,6 +91,7 @@ All adapters implement: `get_param_space()`, `generate_signals()`, `run_backtest
 ### Core Modules (`apps/wfo_engine/`)
 
 - **`app.py`**: Streamlit UI entry point — sidebar config, session state, panel orchestration. Imports from `ui/` panels, `services/`, `expert/`, `pine_v3/`, and `domain/`
+- **`main.py`**: Headless helper module (not a standalone entrypoint) — provides `get_param_grid()`, `get_metrics_info()`, `get_wfo_settings()` consumed by `run_service.py`. Also used for CLI-level visualization calls.
 - **`wfo.py`**: Walk-forward optimization engine — orchestrates train/test windows, optimization methods, Level 1 parameter selection (SNV/SVI/raw_max), backtest caching. Key functions: `walk_forward_optimization`, `get_stable_best_params` (SNV), `get_svi_best_params` (SVI)
 - **`wfo_save.py`**: Persistence of WFO run results (JSON/CSV serialization)
 - **`stagewise_optimizer.py`**: Stagewise WFO campaign — runs N sequential stages, each fixing the previous stage's consensus best params. Key functions: `run_stagewise_campaign`, `build_stagewise_wfo_results`, `_apply_stage_consensus` (Level 3 dispatch). Produces a standard `wfo_results` dict compatible with all visualization and export flows
@@ -96,12 +118,13 @@ Pipeline: **Pine text → spec.v1 JSON → Python runtime → VectorBT signals**
 
 ### Supporting Modules
 
-- **`expert/`**: LLM gateway for WFO analysis (OpenAI-compatible API) — `llm_gateway.py`, `prompt_builder.py`, `analyzer.py`; storage in `reports/expert/`
-- **`services/`**: Run orchestration (`run_service.py`), ZIP export (`export_utils.py`), audit trail (`traceability.py`), timeframe/date helpers (`runtime_utils.py`)
+- **`expert/`**: LLM gateway for WFO analysis (OpenAI-compatible API) — `llm_gateway.py`, `prompt_builder.py`, `analyzer.py`, `service.py`, `storage.py`; storage in `reports/expert/`
+- **`services/`**: Run orchestration (`run_service.py`), ZIP export (`export_utils.py`), audit trail (`traceability.py`), timeframe/date helpers (`runtime_utils.py`), error log (`error_log.py`), and `session.py` — `WFOSessionState`: typed read-only facade over `st.session_state` (immutable snapshot via `WFOSessionState.read()`; writes remain direct). Per-run checkpoint files live in `reports/runs/<run_id>/`: `checkpoint.json` (incremental), `windows/window_NNNN.json` (per-window), `completed.json` (resolution marker written on every exit path — its absence flags an orphaned run).
 - **`ui/`**: Streamlit UI panels:
   - `strategy_panel.py` — 4-tab strategy parameter editor (entry signals, exits, filters, MTF); `PARAMETER_HELP` is single source of truth imported by `expert_panel.py`
   - `stagewise_panel.py` — stagewise WFO campaign launcher; inherits all config from sidebar; Level 3 consensus method selector; auto-saves timestamped ZIP
   - `final_backtest_panel.py` — final backtest display + Level 2 cross-window selection dispatch (`_select_final_params_from_results`); implements `best_is_oos`, `best_oos`, `robust_set`, `weighted_oos`
+  - `campaign_panel.py` — side-by-side comparison of two WFO campaigns with metric highlighting
   - `pine_panel.py` — Pine V3 import/parity
   - `expert_panel.py` — LLM analysis
   - `export_panel.py` — ZIP export/import
