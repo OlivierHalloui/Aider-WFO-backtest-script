@@ -15,6 +15,7 @@ HAS_VBT = importlib.util.find_spec("vectorbtpro") is not None
 pytestmark = pytest.mark.skipif(not HAS_VBT, reason="vectorbtpro is required for MTF tests")
 
 if HAS_VBT:
+    from data_loading import _to_pandas_freq
     from pine_v3.mtf import request_security_series, request_security_signal, resample_ohlcv
 
 
@@ -41,6 +42,70 @@ def test_resample_pine_minutes_is_not_monthly():
     assert out["Open"].tolist() == pytest.approx([99.8, 114.8])
     assert out["Close"].tolist() == pytest.approx([114.0, 123.0])
     assert out["Volume"].tolist() == pytest.approx([15.0, 9.0])
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "expected"),
+    [
+        ("1m", "60s"),
+        ("24h", "1D"),
+        ("1440m", "1D"),
+        ("48h", "2D"),
+        ("1500m", "90000s"),
+        ("1w", "1W"),
+        ("1W", "1W"),
+    ],
+)
+def test_pine_frequency_normalization(timeframe, expected):
+    assert _to_pandas_freq(timeframe) == expected
+
+
+def test_pine_month_is_month_end_not_minute():
+    monthly_freq = _to_pandas_freq("1M")
+    assert pd.tseries.frequencies.to_offset(monthly_freq) == pd.offsets.MonthEnd(1)
+    assert _to_pandas_freq("1m") == "60s"
+
+    base = _mock_ohlcv(n=40, freq="1D")
+    out = resample_ohlcv(base, "1M")
+    assert out.index.equals(pd.DatetimeIndex(["2025-01-31", "2025-02-28"], tz="UTC"))
+    assert out["Close"].tolist() == pytest.approx([130.0, 139.0])
+
+
+@pytest.mark.parametrize("timeframe", ["24h", "1440m"])
+def test_day_expressed_in_short_units_is_not_monthly(timeframe):
+    base = _mock_ohlcv(n=48, freq="1h")
+    out = resample_ohlcv(base, timeframe)
+    assert out.index.equals(base.index[[0, 24]])
+    assert out["Close"].tolist() == pytest.approx([123.0, 147.0])
+
+
+def test_pine_week_resamples_by_week():
+    base = _mock_ohlcv(n=10, freq="1D")
+    out = resample_ohlcv(base, "1w")
+    assert out.index.equals(pd.DatetimeIndex(["2025-01-05", "2025-01-12"], tz="UTC"))
+
+
+@pytest.mark.parametrize("timeframe", ["24h", "1440m", "1w", "1M"])
+def test_request_security_passes_safe_calendar_frequency_to_vbt(monkeypatch, timeframe):
+    import pine_v3.mtf as mtf
+
+    captured = {}
+    original_resampler = mtf.vbt.Resampler
+
+    def capture_resampler(**kwargs):
+        captured.update(kwargs)
+        return original_resampler(**kwargs)
+
+    monkeypatch.setattr(mtf.vbt, "Resampler", capture_resampler)
+    base = _mock_ohlcv(n=40, freq="1D")
+    request_security_series(
+        base,
+        timeframe=timeframe,
+        expr_fn=lambda htf: htf["Close"],
+        base_freq="1d",
+    )
+    assert captured["source_freq"] == _to_pandas_freq(timeframe)
+    assert captured["target_freq"] == "1D"
 
 
 def test_request_security_normalizes_both_resampler_frequencies(monkeypatch):

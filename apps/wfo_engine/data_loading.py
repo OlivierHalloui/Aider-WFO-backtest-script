@@ -70,40 +70,46 @@ def _apply_date_filter(df, start_date, end_date):
     return df
 
 def _to_pandas_freq(timeframe: str) -> str:
-    """Convert a VBT/Streamlit timeframe string to a pandas-compatible resample frequency.
+    """Shared frequency adapter for data loading and Pine V3 MTF (pine_v3.mtf).
 
-    VBT uses TradingView notation ('1m' = 1 minute, '1h' = 1 hour, '1d' = 1 day).
-    pandas 2.x uses different aliases: minutes='min' (not 'm'), days='D' (not 'd').
-    Sub-day timeframes are expressed in seconds to avoid any ambiguity.
-
-    Examples:
-        '5s'  → '5s'
-        '1m'  → '60s'
-        '5m'  → '300s'
-        '15m' → '900s'
-        '30m' → '1800s'
-        '1h'  → '3600s'
-        '4h'  → '14400s'
-        '1d'  → '1D'
+    Pine distinguishes 'm' (minute) from 'M' (calendar month); pandas uses
+    'M' or 'ME' (depending on its version) for month-end. Fixed-length units
+    are converted to seconds or whole calendar days before reaching pandas.
+    Unknown frequencies are passed through for pandas to validate.
     """
-    tf = str(timeframe).strip().lower()
-    _SECONDS = {'s': 1, 'm': 60, 'h': 3600}
-    for suffix, factor in _SECONDS.items():
-        if tf.endswith(suffix):
-            try:
-                n = int(tf[:-len(suffix)])
-                total_s = n * factor
-                if total_s < 86400:          # less than 1 day → express in seconds
-                    return f'{total_s}s'
-            except ValueError:
-                pass
-    # Day or unknown: let pandas handle it (uppercase D for calendar day)
-    if tf.endswith('d'):
+    tf = str(timeframe).strip()
+    if tf.endswith('M'):
         try:
             n = int(tf[:-1])
-            return f'{n}D'
         except ValueError:
             pass
+        else:
+            # pandas < 2.2 supports 'M'; newer pandas uses 'ME'. Never
+            # lowercase Pine's monthly suffix into a one-minute frequency.
+            try:
+                pd.tseries.frequencies.to_offset('ME')
+                return f'{n}ME'
+            except ValueError:
+                return f'{n}M'
+
+    tf_lower = tf.lower()
+    for suffix, factor in {'s': 1, 'm': 60, 'h': 3600}.items():
+        if tf_lower.endswith(suffix):
+            try:
+                n = int(tf_lower[:-1])
+            except ValueError:
+                break
+            total_s = n * factor
+            if total_s >= 86400 and total_s % 86400 == 0:
+                return f'{total_s // 86400}D'
+            return f'{total_s}s'
+
+    for suffix, pandas_suffix in (('d', 'D'), ('w', 'W')):
+        if tf_lower.endswith(suffix):
+            try:
+                return f'{int(tf_lower[:-1])}{pandas_suffix}'
+            except ValueError:
+                break
     return timeframe   # fallback: pass through unchanged
 
 
