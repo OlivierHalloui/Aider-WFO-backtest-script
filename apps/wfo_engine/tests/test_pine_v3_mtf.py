@@ -15,7 +15,7 @@ HAS_VBT = importlib.util.find_spec("vectorbtpro") is not None
 pytestmark = pytest.mark.skipif(not HAS_VBT, reason="vectorbtpro is required for MTF tests")
 
 if HAS_VBT:
-    from pine_v3.mtf import request_security_series, request_security_signal
+    from pine_v3.mtf import request_security_series, request_security_signal, resample_ohlcv
 
 
 def _mock_ohlcv(n=12, freq="1h"):
@@ -31,6 +31,43 @@ def _mock_ohlcv(n=12, freq="1h"):
         },
         index=index,
     )
+
+
+def test_resample_pine_minutes_is_not_monthly():
+    base = _mock_ohlcv(n=24, freq="1min")
+    out = resample_ohlcv(base, "15m")
+
+    assert out.index.equals(base.index[[0, 15]])
+    assert out["Open"].tolist() == pytest.approx([99.8, 114.8])
+    assert out["Close"].tolist() == pytest.approx([114.0, 123.0])
+    assert out["Volume"].tolist() == pytest.approx([15.0, 9.0])
+
+
+def test_request_security_normalizes_both_resampler_frequencies(monkeypatch):
+    import pine_v3.mtf as mtf
+
+    captured = {}
+    original_resampler = mtf.vbt.Resampler
+
+    def capture_resampler(**kwargs):
+        captured.update(kwargs)
+        return original_resampler(**kwargs)
+
+    monkeypatch.setattr(mtf.vbt, "Resampler", capture_resampler)
+    base = _mock_ohlcv(n=30, freq="1min")
+    out = request_security_series(
+        base,
+        timeframe="15m",
+        expr_fn=lambda htf: htf["Close"],
+        base_freq="1m",
+    )
+
+    assert captured["source_freq"] == "900s"
+    assert captured["target_freq"] == "60s"
+    assert out.iloc[:14].isna().all()
+    assert float(out.iloc[14]) == 114.0
+    assert float(out.iloc[28]) == 114.0
+    assert float(out.iloc[29]) == 129.0
 
 
 def test_request_security_closing_alignment_no_lookahead():

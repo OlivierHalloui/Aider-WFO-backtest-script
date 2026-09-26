@@ -7,6 +7,8 @@ from typing import Callable, Literal
 import pandas as pd
 import vectorbtpro as vbt
 
+from data_loading import _to_pandas_freq
+
 
 TimingMode = Literal["opening", "closing"]
 GapsMode = Literal["on", "off"]
@@ -27,7 +29,7 @@ def resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     }
     if "Volume" in df.columns:
         agg["Volume"] = "sum"
-    return df.resample(timeframe).agg(agg).dropna(subset=["Open", "High", "Low", "Close"])
+    return df.resample(_to_pandas_freq(timeframe)).agg(agg).dropna(subset=["Open", "High", "Low", "Close"])
 
 
 def _to_ffill(gaps: GapsMode | str | bool | None) -> bool:
@@ -68,8 +70,8 @@ def realign_series_to_base(
 
     src = series.sort_index()
     target_index = pd.DatetimeIndex(base_index)
-    src_freq = source_freq if isinstance(source_freq, str) and source_freq.strip() else False
-    tgt_freq = target_freq if isinstance(target_freq, str) and target_freq.strip() else False
+    src_freq = _to_pandas_freq(source_freq) if isinstance(source_freq, str) and source_freq.strip() else False
+    tgt_freq = _to_pandas_freq(target_freq) if isinstance(target_freq, str) and target_freq.strip() else False
     resampler = vbt.Resampler(
         source_index=src.index,
         target_index=target_index,
