@@ -2,6 +2,11 @@
 
 Toutes les évolutions notables de l'application WFO sont documentées ici.
 
+## Non publié
+
+- **Warm-up Pine généré** : les nouveaux modules transmettent `trade_start` au runtime ; les modules déjà persistés sont adaptés au chargement, sans invalider leur configuration ni leur spécification.
+- **Warm-up stagewise** : le CSV est lu avec le préfixe causal calculé depuis les plages de paramètres ; le moteur reçoit `selected_start` pour borner fenêtres et métriques à la période choisie (UI et CLI).
+
 ## 2026-06-22
 
 - **fix(adaptive): cast int params après round-trip DataFrame float64** : `adaptive_optimization.py` — pandas promouvait les colonnes entières en `float64` quand elles coexistaient avec `combined_score` (float). Les params comme `timeperiod` arrivaient en float à Numba (`TypingError getitem`). Ajout de `_coerce_int_params()` + `_INT_PARAMS` pour restituer le type int avant chaque `run_backtest`. Régression introduite par le merge du revert `_INT_PARAMS` local (commit `fe5a48e`) avec les nouveaux tests adaptatifs du VPS (audit phase 5).

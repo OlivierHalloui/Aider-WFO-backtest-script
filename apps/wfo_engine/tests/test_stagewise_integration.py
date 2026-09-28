@@ -166,3 +166,36 @@ def test_run_stagewise_campaign_smoke(tmp_path):
     final_params = report["final_best_params"]
     assert isinstance(final_params, dict)
     assert "timeperiod" in final_params
+
+
+def test_stagewise_first_window_receives_csv_prefix(tmp_path, monkeypatch):
+    import stagewise_optimizer as stagewise
+    from config import compute_warmup_bars
+
+    idx = pd.date_range('2024-01-01', periods=18007, freq='5s')
+    path = tmp_path / 'bars.csv'
+    pd.DataFrame({'Open time': idx, 'Open': np.arange(len(idx)),
+                  'High': np.arange(len(idx)), 'Low': np.arange(len(idx)),
+                  'Close': np.arange(len(idx))}).to_csv(path, index=False)
+    warmup = compute_warmup_bars({'timeperiod': (10, 30, 1)})
+    df = stagewise._load_csv(str(path), '2024-01-02', '2024-01-02', warmup_bars=warmup)
+    selected_start = df.index[warmup]
+    assert warmup == 287
+    assert len(df) == 1014
+    assert len(df.loc[selected_start:]) == 727
+
+    calls = []
+
+    def fake_wfo(df, **kwargs):
+        calls.append((df.index, kwargs['selected_start']))
+        return {'best_params': [{'timeperiod': 30}], 'window_results': [],
+                'in_sample_performance': [], 'out_of_sample_performance': []}
+
+    monkeypatch.setattr(stagewise, 'walk_forward_optimization', fake_wfo)
+    report = stagewise.run_stagewise_campaign(
+        df, stage_plan=MINI_STAGE_PLAN, n_windows=1, output_dir=tmp_path / 'run',
+        selected_start=selected_start,
+    )
+    assert report['stages'][0]['status'] == 'OK'
+    assert calls[0][0][0] == idx[16993]
+    assert calls[0][1] == idx[17280]

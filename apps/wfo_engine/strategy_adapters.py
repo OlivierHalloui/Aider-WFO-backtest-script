@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib.util
+import inspect
 import os
 from typing import Any, Protocol
 
 from config import DEFAULT_PARAM_GRID, DEFAULT_STRATEGY_ID, DEFAULT_STRATEGY_MODE
-from pine_v3.runtime_adapter import PineStrategyTestAdapter, supports_strategy_test_runtime
+from pine_v3.runtime_adapter import GeneratedPineRuntimeAdapter, PineStrategyTestAdapter, supports_strategy_test_runtime
 from strategy import create_signal_generators, run_backtest
 
 
@@ -48,6 +49,45 @@ class ATDMFAdapter:
 _NATIVE_ADAPTER = ATDMFAdapter()
 
 
+class _LegacyGeneratedAdapter:
+    """Keep persisted pre-warm-up Pine modules executable without rewriting them."""
+
+    def __init__(self, adapter, strategy_spec):
+        self._adapter = adapter
+        self._strategy_spec = strategy_spec
+        self.strategy_mode = adapter.strategy_mode
+        self.strategy_id = adapter.strategy_id
+
+    def get_param_space(self):
+        return self._adapter.get_param_space()
+
+    def generate_signals(self, df, params):
+        return self._adapter.generate_signals(df, params)
+
+    def __getattr__(self, name):
+        return getattr(self._adapter, name)
+
+    def run_backtest(self, df, params, timeframe="5s", return_portfolio=True, trade_start=0):
+        base = GeneratedPineRuntimeAdapter(
+            strategy_id=self._adapter.strategy_id,
+            runtime_config=self._adapter._merged_config(),
+            strategy_spec=self._strategy_spec,
+        )
+        return base.run_backtest(
+            df, params, timeframe=timeframe, return_portfolio=return_portfolio,
+            trade_start=trade_start,
+        )
+
+
+def _with_generated_warmup(adapter, module):
+    generated_cls = getattr(module, "GeneratedPineAdapter", None)
+    if (generated_cls is not None and isinstance(adapter, generated_cls)
+            and "trade_start" not in inspect.signature(adapter.run_backtest).parameters
+            and callable(getattr(adapter, "_merged_config", None))):
+        return _LegacyGeneratedAdapter(adapter, module.GENERATED_STRATEGY_SPEC)
+    return adapter
+
+
 def _load_generated_adapter_from_file(module_path: str, config: dict[str, Any], strategy_id: str):
     """Best-effort loading of generated Pine adapter module from file path."""
     path = str(module_path or "").strip()
@@ -64,15 +104,15 @@ def _load_generated_adapter_from_file(module_path: str, config: dict[str, Any], 
     if callable(create_adapter):
         adapter = create_adapter(runtime_config=config)
         if adapter is not None:
-            return adapter
+            return _with_generated_warmup(adapter, module)
 
     generated_cls = getattr(module, "GeneratedPineAdapter", None)
     if generated_cls is not None:
         try:
-            return generated_cls(strategy_id=strategy_id, runtime_config=config)
+            return _with_generated_warmup(generated_cls(strategy_id=strategy_id, runtime_config=config), module)
         except TypeError:
             try:
-                return generated_cls(runtime_config=config)
+                return _with_generated_warmup(generated_cls(runtime_config=config), module)
             except Exception:
                 return None
     return None

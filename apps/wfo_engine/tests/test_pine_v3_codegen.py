@@ -41,3 +41,5 @@ x = input.int(defval = 20, title = "Len")
     assert "create_adapter" in content
     assert "GeneratedPineRuntimeAdapter" in content
     assert "GENERATED_STRATEGY_SPEC" in content
+    assert "return_portfolio: bool = True, trade_start: int = 0" in content
+    assert "return_portfolio=return_portfolio, trade_start=trade_start" in content

@@ -33,7 +33,8 @@ import numpy as np
 import pandas as pd
 
 # ── project imports ──────────────────────────────────────────────────────────
-from config import WFOSettings, DEFAULT_PARAM_GRID
+from config import WFOSettings, DEFAULT_PARAM_GRID, compute_warmup_bars
+from data_loading import _read_csv_period
 from strategy_adapters import resolve_strategy_adapter
 from wfo import walk_forward_optimization
 
@@ -760,13 +761,15 @@ def run_stagewise_campaign(
     pqs_n_ref: int = 50,
     stage_consensus_method: str = "median_mode",
     param_ranges: dict | None = None,
+    selected_start=None,
 ) -> dict:
     """
     Run the full stagewise WFO campaign.
 
     Parameters
     ----------
-    df                  : full OHLCV DataFrame (date-filtered externally)
+    df                  : OHLCV including a causal prefix if selected_start is set
+    selected_start      : first selected bar; prefix is excluded from WFO windows
     timeframe           : pandas frequency string ('5s', '1m', …)
     direction           : 'long_only' | 'short_only' | 'both'
     stage_plan          : list of stage dicts (defaults to STAGE_PLAN)
@@ -878,6 +881,7 @@ def run_stagewise_campaign(
                 strategy_adapter=adapter,
                 status_callback=lambda msg: logger.info("  [wfo] %s", msg),
                 control=None,
+                selected_start=selected_start,
             )
         except Exception as exc:
             logger.error("Stage %d FAILED: %s", stage_num, exc, exc_info=True)
@@ -1001,11 +1005,20 @@ def _normalize_date(s: str) -> str:
     return re.sub(r'(\d{4})[.\-/](\d{2})[.\-/](\d{2})', r'\1-\2-\3', s.strip())
 
 
-def _load_csv(path: str, start: str, end: str) -> pd.DataFrame:
-    df = pd.read_csv(path, index_col="Open time", parse_dates=True)
+def _load_csv(path: str, start: str, end: str, warmup_bars: int = 0) -> pd.DataFrame:
+    """Read the selected CSV interval plus source bars before its start."""
+    columns = ["Open time", "Open", "High", "Low", "Close"]
+    df, warmup_start = _read_csv_period(
+        path, columns, _normalize_date(start), _normalize_date(end), warmup_bars,
+    )
+    df = df.set_index("Open time")
     df.index = pd.to_datetime(df.index, utc=True)
     df = df[["Open", "High", "Low", "Close"]].dropna()
-    if start:
+    if warmup_start is not None:
+        first = pd.Timestamp(warmup_start)
+        first = first.tz_localize("UTC") if first.tzinfo is None else first.tz_convert("UTC")
+        df = df[df.index >= first]
+    elif start:
         df = df[df.index >= pd.Timestamp(_normalize_date(start), tz="UTC")]
     if end:
         df = df[df.index <= pd.Timestamp(_normalize_date(end) + " 23:59:59", tz="UTC")]
@@ -1057,7 +1070,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    df = _load_csv(args.data_file, args.start, args.end)
+    df = _load_csv(args.data_file, args.start, args.end,
+                   warmup_bars=compute_warmup_bars(FULL_PARAM_REGISTRY) if args.start else 0)
 
     initial_params: dict = {}
     if args.initial_params and Path(args.initial_params).exists():
@@ -1090,6 +1104,7 @@ def main() -> None:
         resume_from_stage=args.resume_from,
         initial_fixed_params=initial_params or None,
         final_df=final_df,
+        selected_start=pd.Timestamp(_normalize_date(args.start), tz="UTC") if args.start else None,
     )
 
 

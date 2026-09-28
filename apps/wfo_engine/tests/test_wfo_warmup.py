@@ -98,3 +98,44 @@ def test_future_perturbation_does_not_change_earlier_signals():
     assert a['window_results'][0]['optimization_trials'] == b['window_results'][0]['optimization_trials']
     assert a['in_sample_performance'][0] == b['in_sample_performance'][0]
     assert a['out_of_sample_performance'][0] == b['out_of_sample_performance'][0]
+
+
+@pytest.mark.parametrize('persisted_legacy', [False, True])
+def test_generated_pine_module_wfo_warmup(tmp_path, monkeypatch, persisted_legacy):
+    from pine_v3.codegen import build_generated_strategy_source
+    from pine_v3.runtime_adapter import GeneratedPineRuntimeAdapter
+    from strategy_adapters import resolve_strategy_adapter
+
+    spec = {'strategy': {'id': 'pine_warmup_test'}}
+    source = build_generated_strategy_source(spec)
+    if persisted_legacy:
+        source = source.replace(', trade_start: int = 0):', '):').replace(
+            ', trade_start=trade_start)', ')',
+        )
+    module_path = tmp_path / 'generated_pine.py'
+    module_path.write_text(source, encoding='utf-8')
+
+    calls = []
+
+    def backtest(self, df, params, timeframe='5s', return_portfolio=True, trade_start=0):
+        indicator = df['Close'].rolling(20, min_periods=20).mean()
+        calls.append((trade_start, df.index[trade_start], indicator.iloc[trade_start]))
+        score = float(indicator.iloc[trade_start:].fillna(0).sum())
+        if return_portfolio:
+            return Portfolio(score)
+        if isinstance(params['length'], np.ndarray):
+            return np.repeat(score, len(params['length']))
+        return score
+
+    monkeypatch.setattr(GeneratedPineRuntimeAdapter, 'run_backtest', backtest)
+    adapter = resolve_strategy_adapter(
+        strategy_mode='pine_imported', strategy_id='pine_warmup_test',
+        config={'pine_generated_module_path': str(module_path), 'pine_strategy_spec': spec},
+    )
+    idx = pd.date_range('2024-01-01', periods=120, freq='5s')
+    df = pd.DataFrame({'Close': np.arange(120, dtype=float) + 100}, index=idx)
+    result = run(df, idx[30], adapter)
+    assert calls and calls[0][0] == 30
+    assert calls[0][1] == idx[30]
+    assert calls[0][2] == pytest.approx(df['Close'].iloc[11:31].mean())
+    assert result['window_results'][0]['window_info']['start_date'] == idx[30]

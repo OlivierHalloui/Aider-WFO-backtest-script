@@ -28,7 +28,7 @@ from stagewise_optimizer import (
     propose_stage_settings,
     _load_csv,
 )
-from config import DEFAULT_PARAM_GRID
+from config import DEFAULT_PARAM_GRID, compute_warmup_bars
 from services.error_log import write_error_log, collect_stagewise_entries
 from ui.final_backtest_panel import load_stagewise_params_from_json
 
@@ -177,6 +177,7 @@ def _stagewise_worker(
             pqs_n_ref=cfg.get("pqs_n_ref", 50),
             stage_consensus_method=cfg.get("stage_consensus_method", "median_mode"),
             param_ranges=cfg.get("param_ranges"),
+            selected_start=cfg.get("selected_start"),
         )
         run_state["final_report"] = final_report
 
@@ -605,13 +606,19 @@ def render_stagewise_panel(*, get_current_config, load_data):
         ):
             # Load data
             try:
-                df = _load_csv(sw_data_file, sw_start, sw_end)
+                df = _load_csv(
+                    sw_data_file, sw_start, sw_end,
+                    warmup_bars=compute_warmup_bars(_param_ranges),
+                )
+                selected_df = df.loc[sw_start:sw_end + " 23:59:59"]
+                if selected_df.empty:
+                    raise ValueError("Aucune donnée dans la période WFO sélectionnée")
             except Exception as exc:
                 st.error(f"Erreur chargement données : {exc}")
                 st.stop()
 
             # Store df so visualization is available after campaign completes
-            st.session_state["df"] = df
+            st.session_state["df"] = selected_df
             st.session_state["opt_start_date"] = sw_start
             st.session_state["opt_end_date"] = sw_end
 
@@ -680,6 +687,7 @@ def render_stagewise_panel(*, get_current_config, load_data):
                 "pqs_n_ref":             pqs_n_ref,
                 "stage_consensus_method": st.session_state.get("_sw_stage_consensus", "median_mode"),
                 "param_ranges":          _param_ranges,
+                "selected_start":        str(selected_df.index[0]),
             }
             st.session_state["_sw_cfg"] = cfg
 
