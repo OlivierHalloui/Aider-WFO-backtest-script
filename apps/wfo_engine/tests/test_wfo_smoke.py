@@ -67,7 +67,8 @@ class StubAdapter:
         n = len(df)
         return pd.Series(False, index=df.index), pd.Series(False, index=df.index)
 
-    def run_backtest(self, df, params, timeframe=None, return_portfolio=False):
+    def run_backtest(self, df, params, timeframe=None, return_portfolio=False, trade_start=0):
+        df = df.iloc[trade_start:]
         a = params.get("param_a")
         b = params.get("param_b")
         # Vectorized path: arrays in → array of scores out

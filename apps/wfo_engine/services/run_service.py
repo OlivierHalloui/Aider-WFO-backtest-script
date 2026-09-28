@@ -219,16 +219,18 @@ def run_optimization_job(
                 config.get("timeframe", "?"),
             )
 
-        # Window sizes, IS/OOS splits, holdout and metrics must only see the
-        # selected period.  Strategy adapters currently compute indicators
-        # separately on each IS/OOS slice, so passing a prefix into WFO would
-        # alter every split and leak pre-period P&L into the first IS metric.
-        # Keep the loaded prefix available to callers, but never optimize on it.
-        if warmup_bars > 0 and config.get("from_file"):
-            df = _apply_date_filter(df, config["start_date"], config["end_date"])
+        # Keep CSV prefix for causal indicator history in classic WFO; the
+        # adaptive engine still expects data restricted to the selected dates.
+        selected_df = _apply_date_filter(df, config["start_date"], config["end_date"])
+        if selected_df is None or selected_df.empty:
+            raise ValueError("No data in selected optimization period")
         metrics_info = get_metrics_info(config)
         wfo_settings = get_wfo_settings(config)
         regime = str(getattr(wfo_settings, "optimization_regime", "classic")).lower()
+        if regime == "adaptive_continuous":
+            df = selected_df
+        else:
+            df = df.loc[:selected_df.index[-1]]
 
         if job_state is not None:
             if regime == "adaptive_continuous":
@@ -309,6 +311,7 @@ def run_optimization_job(
                 status_callback=status_callback,
                 control=control,
                 strategy_adapter=strategy_adapter,
+                selected_start=selected_df.index[0],
             )
 
         elapsed = time.time() - start_time
@@ -332,7 +335,7 @@ def run_optimization_job(
             job_state["error_log_path"] = _log_path
 
         _finalize_run_dir(_run_dir, "completed", job_state)
-        return results, df, elapsed
+        return results, selected_df, elapsed
 
     except OptimizationInterrupted:
         if job_state is not None:

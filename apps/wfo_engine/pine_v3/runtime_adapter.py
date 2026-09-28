@@ -862,6 +862,7 @@ def run_strategy_test_backtest(
     timeframe: str = "5s",
     return_portfolio: bool = True,
     external_bindings: dict[str, Any] | None = None,
+    trade_start: int = 0,
 ):
     """Backtest runtime for strategy_test Pine adapter."""
     signals = create_strategy_test_signals(df, external_bindings=external_bindings, **params)
@@ -881,9 +882,9 @@ def run_strategy_test_backtest(
         size_type = "percent"
 
     portfolio = vbt.Portfolio.from_signals(
-        close=df["Close"],
-        entries=entries,
-        exits=exits,
+        close=df["Close"].iloc[trade_start:],
+        entries=entries.iloc[trade_start:],
+        exits=exits.iloc[trade_start:],
         size=size,
         size_type=size_type,
         init_cash=10000,
@@ -1001,13 +1002,14 @@ class PineStrategyTestAdapter:
             **params,
         )
 
-    def run_backtest(self, df, params: dict[str, Any], timeframe: str = "5s", return_portfolio: bool = True):
+    def run_backtest(self, df, params: dict[str, Any], timeframe: str = "5s", return_portfolio: bool = True, trade_start: int = 0):
         return run_strategy_test_backtest(
             df,
             params,
             timeframe=timeframe,
             return_portfolio=return_portfolio,
             external_bindings=self._external_bindings(),
+            trade_start=trade_start,
         )
 
 
@@ -2151,6 +2153,7 @@ def run_transpiled_pine_backtest(
     timeframe: str = "5s",
     return_portfolio: bool = True,
     external_bindings: dict[str, Any] | None = None,
+    trade_start: int = 0,
 ):
     vec_len = _vectorized_param_length(params)
     if vec_len > 1:
@@ -2169,6 +2172,7 @@ def run_transpiled_pine_backtest(
                 timeframe=timeframe,
                 return_portfolio=False,
                 external_bindings=external_bindings,
+                trade_start=trade_start,
             )
             if np.isscalar(score_i):
                 scores.append(float(score_i))
@@ -2234,6 +2238,12 @@ def run_transpiled_pine_backtest(
     if isinstance(short_entries, pd.Series) and isinstance(short_exits, pd.Series):
         pf_kwargs["short_entries"] = short_entries
         pf_kwargs["short_exits"] = short_exits
+    if trade_start:
+        if not 0 <= trade_start < len(df):
+            raise ValueError("trade_start must point to a bar in df")
+        for key, value in pf_kwargs.items():
+            if isinstance(value, (pd.Series, pd.DataFrame)):
+                pf_kwargs[key] = value.iloc[trade_start:]
     portfolio = vbt.Portfolio.from_signals(**pf_kwargs)
     if return_portfolio:
         return portfolio
@@ -2305,7 +2315,7 @@ class GeneratedPineRuntimeAdapter:
             signals["order_semantics"] = order_semantics
         return signals
 
-    def run_backtest(self, df, params: dict[str, Any], timeframe: str = "5s", return_portfolio: bool = True):
+    def run_backtest(self, df, params: dict[str, Any], timeframe: str = "5s", return_portfolio: bool = True, trade_start: int = 0):
         spec = self._spec()
         bindings = self._external_bindings()
         contract = self._external_contract(bindings)
@@ -2321,4 +2331,5 @@ class GeneratedPineRuntimeAdapter:
             timeframe=timeframe,
             return_portfolio=return_portfolio,
             external_bindings=bindings,
+            trade_start=trade_start,
         )

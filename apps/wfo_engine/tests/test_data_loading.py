@@ -63,13 +63,13 @@ class TestCSVLoading:
         assert 'falling back' in caplog.text
 
     def test_warmup_grid_only_lookbacks(self):
-        assert compute_warmup_bars(DEFAULT_PARAM_GRID) == 188
+        assert compute_warmup_bars(DEFAULT_PARAM_GRID) == 274
         assert compute_warmup_bars({'macd_slow_length': [26, 42], 'macd_signal_length': [9, 16],
                                     'StDev': [999], 'sar_maximum': [5000]}) == 73
         assert compute_warmup_bars({'StDev': [1000], 'exit_macd_enabled': [True]}) == 0
         assert WFOSettings().warmup_bars == 0
 
-    def test_run_service_trims_prefix_before_wfo(self, tmp_path, monkeypatch):
+    def test_run_service_passes_prefix_to_wfo_but_returns_selected_data(self, tmp_path, monkeypatch):
         from services import run_service
         idx = pd.date_range('2024-01-01', periods=100, freq='5s')
         path = tmp_path / 'run.csv'
@@ -84,6 +84,7 @@ class TestCSVLoading:
 
         def fake_wfo(df, **kwargs):
             seen['index'] = df.index
+            seen['selected_start'] = kwargs['selected_start']
             return {'window_results': []}
 
         monkeypatch.setattr(run_service, 'load_data', monitored_load)
@@ -96,9 +97,11 @@ class TestCSVLoading:
                   'timeframe': '5s', 'from_file': True, 'file_path': str(path),
                   'optimization_method': 'grid', 'n_windows': 2}
         result, df, _ = run_service.run_optimization_job(config)
-        assert seen['requested_warmup'] == 10
+        assert seen['requested_warmup'] == 259
         assert len(df) == 20
-        assert seen['index'].equals(df.index)
+        assert seen['index'][0] == idx[0]
+        assert seen['index'][-1] == idx[59]
+        assert seen['selected_start'] == idx[40]
         assert df.index[0] == idx[40] and df.index[-1] == idx[59]
         assert result == {'window_results': []}
 

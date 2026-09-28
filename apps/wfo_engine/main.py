@@ -13,9 +13,10 @@ from typing import Optional, Dict, Callable, Any
 logger = logging.getLogger(__name__)
 from config import (
     DEFAULT_START_DATE, DEFAULT_END_DATE, DEFAULT_TIMEFRAME, DEFAULT_DATA_FILE,
-    DEFAULT_PARAM_GRID, DEFAULT_STRATEGY_MODE, DEFAULT_STRATEGY_ID, WFOSettings
+    DEFAULT_PARAM_GRID, DEFAULT_STRATEGY_MODE, DEFAULT_STRATEGY_ID, WFOSettings,
+    compute_warmup_bars,
 )
-from data_loading import get_dates, load_data
+from data_loading import get_dates, load_data, _apply_date_filter
 from strategy_adapters import resolve_strategy_adapter
 from wfo import walk_forward_optimization, OptimizationInterrupted
 from adaptive_optimization import adaptive_continuous_optimization
@@ -396,17 +397,23 @@ def run_optimization(config, status_callback: Optional[Callable[[Any], None]] = 
     
     from_file = config.get('from_file', True)
     file_path = config.get('file_path', DEFAULT_DATA_FILE)
+    param_grid = get_param_grid(config)
+    settings = get_wfo_settings(config)
+    classic = str(settings.optimization_regime).lower() != 'adaptive_continuous'
     
     if from_file:
-        df = load_data(start_date, end_date, timeframe, from_file=True, file_path=file_path)
+        df = load_data(start_date, end_date, timeframe, from_file=True, file_path=file_path,
+                       warmup_bars=int(config.get('warmup_bars', compute_warmup_bars(param_grid))) if classic else 0)
     else:
         df = load_data(start_date, end_date, timeframe, from_file=False)
     
     log(f"Loaded {len(df)} bars of data from {start_date} to {end_date}")
+    selected_df = _apply_date_filter(df, start_date, end_date)
+    if selected_df is None or selected_df.empty:
+        raise ValueError("No data in selected optimization period")
     
     display_default_parameters()
 
-    param_grid = get_param_grid(config)
     log(f"Parameter grid: {param_grid}")
     
     metrics_info = get_metrics_info(config)
@@ -414,8 +421,6 @@ def run_optimization(config, status_callback: Optional[Callable[[Any], None]] = 
         f"Metrics: {metrics_info['metric1_name']} (weight: {metrics_info['weight_metric1']:.2f}), "
         f"{metrics_info['metric2_name']} (weight: {metrics_info['weight_metric2']:.2f})"
     )
-    
-    settings = get_wfo_settings(config)
     
     if str(settings.optimization_regime).lower() == 'adaptive_continuous':
         log("Starting adaptive continuous optimization...")
@@ -441,8 +446,10 @@ def run_optimization(config, status_callback: Optional[Callable[[Any], None]] = 
             status_callback=status_callback,
             control=control,
             strategy_adapter=strategy_adapter,
+            selected_start=selected_df.index[0],
         )
         log("Walk-forward optimization completed.")
+    df = selected_df
     
     results_dir = "WFO_Results"
     os.makedirs(results_dir, exist_ok=True)

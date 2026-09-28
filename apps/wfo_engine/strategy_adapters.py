@@ -24,7 +24,7 @@ class StrategyAdapter(Protocol):
     def generate_signals(self, df, params: dict[str, Any]) -> Any:
         """Generate entry/exit signals (optional, for diagnostics and future use)."""
 
-    def run_backtest(self, df, params: dict[str, Any], timeframe: str = "5s", return_portfolio: bool = True):
+    def run_backtest(self, df, params: dict[str, Any], timeframe: str = "5s", return_portfolio: bool = True, trade_start: int = 0):
         """Execute backtest and return portfolio or scalar score."""
 
 
@@ -41,8 +41,8 @@ class ATDMFAdapter:
     def generate_signals(self, df, params: dict[str, Any]) -> Any:
         return create_signal_generators(df, **params)
 
-    def run_backtest(self, df, params: dict[str, Any], timeframe: str = "5s", return_portfolio: bool = True):
-        return run_backtest(df, params, timeframe=timeframe, return_portfolio=return_portfolio)
+    def run_backtest(self, df, params: dict[str, Any], timeframe: str = "5s", return_portfolio: bool = True, trade_start: int = 0):
+        return run_backtest(df, params, timeframe=timeframe, return_portfolio=return_portfolio, trade_start=trade_start)
 
 
 _NATIVE_ADAPTER = ATDMFAdapter()

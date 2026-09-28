@@ -140,6 +140,17 @@ def test_pine_strategy_test_backtest_scalar_and_vectorized():
     assert int(len(score_vec)) == 2
 
 
+def test_pine_warmup_keeps_prefix_out_of_portfolio():
+    df = _mock_ohlc(240)
+    adapter = resolve_strategy_adapter(
+        strategy_mode="pine_imported", strategy_id="pine_strategy_test",
+        config={"pine_source_name": "strategy_test.txt"},
+    )
+    pf = adapter.run_backtest(df, {"timeperiod": 20}, timeframe="5s",
+                              return_portfolio=True, trade_start=120)
+    assert pf.wrapper.index.equals(df.index[120:])
+
+
 def test_pine_strategy_test_mtf_filter_reduces_or_equals_entries():
     df = _mock_ohlc(500)
     adapter = resolve_strategy_adapter(

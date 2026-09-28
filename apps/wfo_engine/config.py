@@ -54,7 +54,11 @@ def compute_warmup_bars(param_grid) -> int:
         candidates = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
         return max(candidates, default=0)
 
-    longest = max(*(upper(name) for name in names),
+    # Native strategy.py computes bbw from BBANDS(timeperiod), then a
+    # 200-bar rolling median on bbw. Both lookbacks must be satisfied before
+    # the first selected bar; the old 150-bar bound left that signal cold.
+    bbw_median = 200 + upper('timeperiod') - 1 if upper('timeperiod') else 0
+    longest = max(*(upper(name) for name in names), bbw_median,
                   upper('macd_slow_length') + upper('macd_signal_length'))
     return math.ceil(longest * 1.25) if longest > 0 else 0
 

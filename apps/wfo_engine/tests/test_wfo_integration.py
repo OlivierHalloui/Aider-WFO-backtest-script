@@ -18,7 +18,7 @@ if HAS_VBT:
     import vectorbtpro as vbt
     from main import get_param_grid, get_metrics_info, get_wfo_settings
     from wfo import walk_forward_optimization, get_svi_best_params
-    from strategy import run_backtest
+    from strategy import run_backtest, create_signal_generators
     from metrics import portfolio_metrics
     from stagewise_optimizer import PARAM_DEFAULTS
     from strategy_adapters import resolve_strategy_adapter
@@ -109,6 +109,26 @@ def test_run_backtest_returns_portfolio():
     assert isinstance(portfolio, vbt.Portfolio)
     total_ret = float(portfolio.total_return)
     assert np.isfinite(total_ret)
+
+
+def test_native_history_is_indicator_only_not_traded():
+    """Native vectorbt portfolio must start flat on the selected 5s bar."""
+    df = generate_mock_data(250)
+    params = dict(PARAM_DEFAULTS)
+    pf = run_backtest(df, params, timeframe="5s", return_portfolio=True,
+                      trade_start=150)
+    assert pf.wrapper.index.equals(df.index[150:])
+    assert len(pf.wrapper.index) == 100
+    assert np.isfinite(float(pf.total_return))
+
+
+def test_native_indicator_valid_at_selected_start_with_prefix():
+    df = generate_mock_data(120)
+    start = 50
+    warm = create_signal_generators(df.iloc[:80], timeperiod=20)['upper_band']
+    cold = create_signal_generators(df.iloc[start:80], timeperiod=20)['upper_band']
+    assert np.isfinite(np.asarray(warm.iloc[start]).astype(float)).all()
+    assert np.isnan(np.asarray(cold.iloc[0]).astype(float)).all()
 
 
 def test_slippage_degrades_performance():

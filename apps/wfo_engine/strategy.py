@@ -888,7 +888,7 @@ def create_entry_exit_conditions(df, signals):
            short_entry_condition, short_exit_condition, t2_short_entry_price
 
 
-def run_backtest(df, params, timeframe='5s', return_portfolio=True):
+def run_backtest(df, params, timeframe='5s', return_portfolio=True, trade_start=0):
     """
     Run a backtest with the ATDMF strategy using given parameters.
     Supports both scalar parameters (single backtest) and lists/arrays (vectorized backtest).
@@ -999,6 +999,13 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True):
         pf_kwargs['short_entries'] = short_entry_condition
         pf_kwargs['short_exits']   = short_exit_condition
 
+    # Indicators see history; execution begins flat at the scoring boundary.
+    if trade_start:
+        if not 0 <= trade_start < len(df):
+            raise ValueError("trade_start must point to a bar in df")
+        for key, value in pf_kwargs.items():
+            if isinstance(value, (pd.Series, pd.DataFrame)):
+                pf_kwargs[key] = value.iloc[trade_start:]
     portfolio = vbt.Portfolio.from_signals(**pf_kwargs)
     
     if return_portfolio:

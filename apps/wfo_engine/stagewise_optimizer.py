@@ -333,10 +333,11 @@ class _FixedParamAdapter:
         return self._base.generate_signals(df, self._merge(params), **kw)
 
     def run_backtest(self, df, params: dict, timeframe: str = "5s",
-                     return_portfolio: bool = True):
+                     return_portfolio: bool = True, trade_start: int = 0):
         return self._base.run_backtest(
             df, self._merge(params),
             timeframe=timeframe, return_portfolio=return_portfolio,
+            trade_start=trade_start,
         )
 
 

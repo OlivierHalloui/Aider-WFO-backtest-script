@@ -623,6 +623,7 @@ def walk_forward_optimization(
     status_callback=None,
     control=None,
     strategy_adapter=None,
+    selected_start=None,
 ):
     """
     Performs Walk-Forward Optimization on the given data with timing measurements.
@@ -663,6 +664,12 @@ def walk_forward_optimization(
     if not (0 < settings.train_size <= 1):
         raise ValueError("settings.train_size must be between 0 and 1.")
 
+    # Prefix bars contribute to indicators, not splits, holdout or P&L.
+    selected_offset = int(df.index.searchsorted(selected_start, side='left')) if selected_start is not None else 0
+    if selected_offset >= len(df):
+        raise ValueError("selected_start is after the available data")
+    selected_df = df.iloc[selected_offset:]
+
     if param_grid is None:
         param_grid = {
             'timeperiod': [10, 15, 20, 25, 30],
@@ -686,10 +693,10 @@ def walk_forward_optimization(
     if holdout_fraction > 0:
         if not (0.0 < holdout_fraction < 0.5):
             raise ValueError("settings.holdout_fraction must be in (0, 0.5).")
-        _holdout_rows = int(len(df) * holdout_fraction)
+        _holdout_rows = int(len(selected_df) * holdout_fraction)
         if _holdout_rows > 0:
-            _holdout_df = df.iloc[len(df) - _holdout_rows:]
-            df = df.iloc[:len(df) - _holdout_rows]
+            _holdout_df = selected_df.iloc[-_holdout_rows:]
+            selected_df = selected_df.iloc[:-_holdout_rows]
             holdout_info = {
                 'fraction': holdout_fraction,
                 'n_bars': int(len(_holdout_df)),
@@ -698,7 +705,7 @@ def walk_forward_optimization(
             }
 
     # Calculate the size of each window
-    total_rows = len(df)
+    total_rows = len(selected_df)
     window_size = total_rows // settings.n_windows
 
     # Store WFO results
@@ -841,7 +848,7 @@ def walk_forward_optimization(
         start_idx = i * window_size
         end_idx = start_idx + window_size if i < settings.n_windows - 1 else total_rows
 
-        window_df = df.iloc[start_idx:end_idx]
+        window_df = selected_df.iloc[start_idx:end_idx]
 
         # For anchored WFO, always start from the first data point
         if settings.anchored:
@@ -854,11 +861,33 @@ def walk_forward_optimization(
 
         # Create in-sample and out-of-sample DataFrames
         if settings.anchored:
-            in_sample_df = df.iloc[in_sample_start_idx:in_sample_end_idx]
+            in_sample_df = selected_df.iloc[in_sample_start_idx:in_sample_end_idx]
         else:
             in_sample_df = window_df.iloc[:int(window_size * settings.train_size)]
 
         out_sample_df = window_df.iloc[int(window_size * settings.train_size):]
+
+        # Compute signals on all available *past* bars, ending at each IS/OOS
+        # boundary. Simulate separately on the scoring slice with flat cash.
+        is_start = selected_offset + in_sample_start_idx
+        is_end = selected_offset + in_sample_end_idx
+        oos_start = selected_offset + start_idx + int(window_size * settings.train_size)
+        oos_end = selected_offset + end_idx
+        is_history = df.iloc[:is_end]
+        oos_history = df.iloc[:oos_end]
+
+        class ScoredAdapter:
+            def __init__(self, trade_start):
+                self.trade_start = trade_start
+
+            def run_backtest(self, history, params, timeframe='5s', return_portfolio=True):
+                return strategy_adapter.run_backtest(
+                    history, params, timeframe=timeframe,
+                    return_portfolio=return_portfolio, trade_start=self.trade_start,
+                )
+
+        is_adapter = ScoredAdapter(is_start)
+        oos_adapter = ScoredAdapter(oos_start)
 
         window_dates = {
             'window': i + 1,
@@ -888,13 +917,13 @@ def walk_forward_optimization(
         optimization_start = time.time()
         try:
             optimization_results, eval_count = optimize_parameters(
-                in_sample_df,
+                is_history,
                 window_param_grid,
                 metrics_info,
                 timeframe,
                 settings,
                 control=control,
-                strategy_adapter=strategy_adapter,
+                strategy_adapter=is_adapter,
                 cache=backtest_cache,
                 cache_lock=backtest_cache_lock,
             )
@@ -915,11 +944,11 @@ def walk_forward_optimization(
             _svi_frac = float(getattr(settings, 'svi_is2_fraction', 0.30))
             _svi_k    = int(getattr(settings, 'svi_top_k', 20))
             _split    = int(len(in_sample_df) * (1.0 - _svi_frac))
-            _is2_df   = in_sample_df.iloc[_split:]
-            log(f"Selection L1: SVI top-{_svi_k} on IS₂ ({len(_is2_df)} bars)")
+            _is2_df   = is_history if _split < len(in_sample_df) else is_history.iloc[:0]
+            log(f"Selection L1: SVI top-{_svi_k} on IS₂ ({len(in_sample_df) - _split} bars)")
             best_row, stable_score = get_svi_best_params(
                 optimization_results, _is2_df, _svi_k,
-                strategy_adapter, timeframe, metrics_info, window_param_grid,
+                ScoredAdapter(is_start + _split), timeframe, metrics_info, window_param_grid,
             )
         else:
             best_row, stable_score = get_stable_best_params(
@@ -940,8 +969,8 @@ def walk_forward_optimization(
         log(f"Optimization time: {timedelta(seconds=int(optimization_time))}")
 
         # Test best parameters on in-sample data
-        in_sample_portfolio = strategy_adapter.run_backtest(
-            in_sample_df, best_params, timeframe=timeframe, return_portfolio=True
+        in_sample_portfolio = is_adapter.run_backtest(
+            is_history, best_params, timeframe=timeframe, return_portfolio=True
         )
 
         _is_stats = _get_trades_stats(in_sample_portfolio.trades)
@@ -964,8 +993,8 @@ def walk_forward_optimization(
         out_sample_metrics = None
         if len(out_sample_df) > 0:
             log(f"Testing best parameters on out-of-sample data ({len(out_sample_df)} bars)...")
-            out_sample_portfolio = strategy_adapter.run_backtest(
-                out_sample_df, best_params, timeframe=timeframe, return_portfolio=True
+            out_sample_portfolio = oos_adapter.run_backtest(
+                oos_history, best_params, timeframe=timeframe, return_portfolio=True
             )
 
             _oos_stats = _get_trades_stats(out_sample_portfolio.trades)
