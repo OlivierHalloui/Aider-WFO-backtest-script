@@ -140,7 +140,41 @@ def get_csv_date_range(file_path):
     except Exception:
         return None, None
 
-def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=None):
+def _read_csv_period(file_path, usecols, start_date, end_date, warmup_bars):
+    """Read selected CSV rows while preserving its header; fallback on bad dates."""
+    if isinstance(warmup_bars, bool) or not isinstance(warmup_bars, int) or warmup_bars < 0:
+        raise ValueError("warmup_bars must be a non-negative integer")
+    read_kwargs = dict(usecols=usecols, dtype={'Open time': 'str'})
+    try:
+        start_ts, end_ts = _normalize_date_range(start_date, end_date)
+        if start_ts is None or end_ts is None:
+            raise ValueError("both valid date bounds are required")
+        # Scan timestamps only: OHLCV data outside the period is never loaded.
+        dates = pd.to_datetime(
+            pd.read_csv(file_path, usecols=['Open time'], dtype={'Open time': 'str'})['Open time'],
+            errors='raise',
+        )
+        if dates.empty or dates.isna().any() or not dates.is_monotonic_increasing:
+            raise ValueError("CSV timestamps are empty, invalid or unsorted")
+        if dates.dt.tz is not None:
+            start_ts = start_ts.tz_localize(dates.dt.tz) if start_ts.tzinfo is None else start_ts.tz_convert(dates.dt.tz)
+            end_ts = end_ts.tz_localize(dates.dt.tz) if end_ts.tzinfo is None else end_ts.tz_convert(dates.dt.tz)
+        elif start_ts.tzinfo is not None:
+            start_ts = start_ts.tz_localize(None)
+            end_ts = end_ts.tz_localize(None)
+        first = int(dates.searchsorted(start_ts, side='left'))
+        last = int(dates.searchsorted(end_ts, side='right'))
+        if first >= last:
+            raise ValueError("requested period is not in CSV")
+        row_start = max(0, first - warmup_bars)
+        return pd.read_csv(
+            file_path, skiprows=range(1, row_start + 1), nrows=last - row_start, **read_kwargs,
+        ), dates.iloc[row_start] if row_start < first else None
+    except (ValueError, TypeError, OverflowError, KeyError, OSError) as exc:
+        logger.warning("CSV filtered read failed (%s); falling back to full read", exc)
+        return pd.read_csv(file_path, **read_kwargs), None
+
+def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=None, warmup_bars: int = 0):
     """
     Load OHLCV data for the specified period, either from Binance API or from a file.
     
@@ -156,6 +190,8 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
         Whether to load from file or fetch from Binance
     file_path : str, optional
         Path to the data file
+    warmup_bars : int, optional
+        Number of source CSV rows preceding start_date (file source only).
         
     Returns:
     --------
@@ -177,7 +213,7 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
 
         # R10 — don't use dtype= so pandas doesn't raise ValueError on 'N/A' or
         # other non-numeric strings; coerce to numeric after loading instead.
-        df = pd.read_csv(file_path, usecols=usecols, dtype={'Open time': 'str'})
+        df, warmup_start = _read_csv_period(file_path, usecols, start_date, end_date, warmup_bars)
         numeric_cols = ['Open', 'High', 'Low', 'Close'] + (['Volume'] if 'Volume' in usecols else [])
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -194,7 +230,7 @@ def load_data(start_date, end_date, timeframe='5s', from_file=True, file_path=No
             'Low': 'min',
             'Close': 'last'
         }).dropna()
-        df = _apply_date_filter(df, start_date, end_date)
+        df = _apply_date_filter(df, warmup_start if warmup_start is not None else start_date, end_date)
 
     else:
         # Fetch from Binance

@@ -965,12 +965,16 @@ def _run_campaign_worker(
 
         # Pre-load data once per unique (from_file, file_path, start, end, timeframe).
         # run_optimization_job accepts an optional df= to skip its own load step.
+        from config import compute_warmup_bars
+        from main import get_param_grid
+        _warmup = int(cfg.get("warmup_bars", compute_warmup_bars(get_param_grid(cfg))))
         _data_key = (
             bool(cfg.get("from_file")),
             str(cfg.get("file_path", "")),
             str(cfg.get("start_date", "")),
             str(cfg.get("end_date", "")),
             str(cfg.get("timeframe", "")),
+            _warmup,
         )
         preloaded_df = _df_cache.get(_data_key)
         if preloaded_df is None:
@@ -982,7 +986,7 @@ def _run_campaign_worker(
                 if cfg.get("from_file"):
                     preloaded_df = _load_data(
                         cfg["start_date"], cfg["end_date"], cfg["timeframe"],
-                        from_file=True, file_path=cfg["file_path"],
+                        from_file=True, file_path=cfg["file_path"], warmup_bars=_warmup,
                     )
                 else:
                     preloaded_df = _load_data(

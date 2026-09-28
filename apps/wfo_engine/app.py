@@ -32,7 +32,7 @@ from plotly.subplots import make_subplots
 from config import (
     DEFAULT_START_DATE, DEFAULT_END_DATE, DEFAULT_TIMEFRAME, DEFAULT_DATA_FILE, DEFAULT_PARAM_GRID,
     DEFAULT_STRATEGY_MODE, DEFAULT_STRATEGY_ID,
-    WFOSettings, WFOE_UPLOAD_DIR,
+    WFOSettings, WFOE_UPLOAD_DIR, compute_warmup_bars,
 )
 from wfo import OptimizationInterrupted
 from data_loading import load_data, get_csv_date_range
@@ -3515,6 +3515,9 @@ def run_final_backtest_logic(window_id=None):
 def run_wfo(config, control=None, job_state=None):
     """Run WFO via the run service without direct UI calls."""
     import time as _time
+    from main import get_param_grid
+    config = dict(config)
+    config.setdefault("warmup_bars", compute_warmup_bars(get_param_grid(config)))
     _ts = _time.strftime("%Y%m%d_%H%M%S")
     return run_optimization_job(
         config=config, control=control, job_state=job_state,

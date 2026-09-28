@@ -6,6 +6,7 @@ import textwrap
 
 import pandas as pd
 import pytest
+from config import DEFAULT_PARAM_GRID, compute_warmup_bars, WFOSettings
 
 
 def _write_csv(tmp_path, content: str, filename: str = "test.csv") -> str:
@@ -21,6 +22,86 @@ def load_csv():
 
 
 class TestCSVLoading:
+    def test_period_read_only_ohlcv_slice_with_warmup(self, tmp_path, load_csv, monkeypatch):
+        import data_loading
+        idx = pd.date_range('2024-01-01', periods=1000, freq='5s')
+        path = tmp_path / 'large.csv'
+        pd.DataFrame({
+            'Open time': idx, 'Open': range(1000), 'High': range(1000),
+            'Low': range(1000), 'Close': range(1000),
+        }).to_csv(path, index=False)
+        real_read = data_loading.pd.read_csv
+        reads = []
+
+        def spy(*args, **kwargs):
+            reads.append(kwargs.copy())
+            return real_read(*args, **kwargs)
+
+        monkeypatch.setattr(data_loading.pd, 'read_csv', spy)
+        start, end = str(idx[500]), str(idx[519])
+        df = load_csv(start, end, '5s', file_path=str(path), warmup_bars=15)
+        assert len(df) == 35
+        assert df.index[0] == idx[485]
+        assert df.index[-1] == idx[519]
+        ohlcv_reads = [r for r in reads if 'Close' in r.get('usecols', [])]
+        assert len(ohlcv_reads) == 1
+        assert ohlcv_reads[0]['nrows'] == 35
+        assert 485 in ohlcv_reads[0]['skiprows']
+        assert 0 not in ohlcv_reads[0]['skiprows']
+        baseline = load_csv(start, end, '5s', file_path=str(path))
+        pd.testing.assert_frame_equal(df.loc[start:], baseline, check_exact=True)
+
+    def test_unsorted_csv_falls_back_and_warns(self, tmp_path, load_csv, caplog):
+        path = _write_csv(tmp_path, '''\
+            Open time,Open,High,Low,Close
+            2024-01-02,2,2,2,2
+            2024-01-01,1,1,1,1
+        ''')
+        with caplog.at_level('WARNING', logger='data_loading'):
+            df = load_csv('2024-01-01', '2024-01-02', '1d', file_path=path)
+        assert len(df) == 2
+        assert 'falling back' in caplog.text
+
+    def test_warmup_grid_only_lookbacks(self):
+        assert compute_warmup_bars(DEFAULT_PARAM_GRID) == 188
+        assert compute_warmup_bars({'macd_slow_length': [26, 42], 'macd_signal_length': [9, 16],
+                                    'StDev': [999], 'sar_maximum': [5000]}) == 73
+        assert compute_warmup_bars({'StDev': [1000], 'exit_macd_enabled': [True]}) == 0
+        assert WFOSettings().warmup_bars == 0
+
+    def test_run_service_trims_prefix_before_wfo(self, tmp_path, monkeypatch):
+        from services import run_service
+        idx = pd.date_range('2024-01-01', periods=100, freq='5s')
+        path = tmp_path / 'run.csv'
+        pd.DataFrame({'Open time': idx, 'Open': range(100), 'High': range(100),
+                      'Low': range(100), 'Close': range(100)}).to_csv(path, index=False)
+        seen = {}
+        real_load = run_service.load_data
+
+        def monitored_load(*args, **kwargs):
+            seen['requested_warmup'] = kwargs['warmup_bars']
+            return real_load(*args, **kwargs)
+
+        def fake_wfo(df, **kwargs):
+            seen['index'] = df.index
+            return {'window_results': []}
+
+        monkeypatch.setattr(run_service, 'load_data', monitored_load)
+        monkeypatch.setattr(run_service, 'get_param_grid', lambda cfg: {'timeperiod': [8]})
+        monkeypatch.setattr(run_service, 'resolve_strategy_adapter', lambda **kw: object())
+        monkeypatch.setattr(run_service, 'walk_forward_optimization', fake_wfo)
+        monkeypatch.setattr(run_service, 'write_error_log', lambda **kw: None)
+        monkeypatch.setattr(run_service, 'collect_classic_wfo_entries', lambda results: [])
+        config = {'start_date': str(idx[40]), 'end_date': str(idx[59]),
+                  'timeframe': '5s', 'from_file': True, 'file_path': str(path),
+                  'optimization_method': 'grid', 'n_windows': 2}
+        result, df, _ = run_service.run_optimization_job(config)
+        assert seen['requested_warmup'] == 10
+        assert len(df) == 20
+        assert seen['index'].equals(df.index)
+        assert df.index[0] == idx[40] and df.index[-1] == idx[59]
+        assert result == {'window_results': []}
+
     def test_standard_ohlcv_loads(self, tmp_path, load_csv):
         path = _write_csv(tmp_path, """\
             Open time,Open,High,Low,Close,Volume

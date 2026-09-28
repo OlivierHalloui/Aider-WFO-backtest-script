@@ -17,6 +17,7 @@ import pytest
 vbt = pytest.importorskip("vectorbtpro", reason="wfo.py imports vectorbtpro")
 
 from config import WFOSettings
+from data_loading import load_data, _apply_date_filter
 from wfo import walk_forward_optimization
 
 
@@ -138,6 +139,24 @@ def _run(df, **overrides):
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests
 # ─────────────────────────────────────────────────────────────────────────────
+def test_csv_warmup_keeps_selected_wfo_metrics_bit_identical(tmp_path, ohlcv_df):
+    path = tmp_path / 'hourly.csv'
+    ohlcv_df.rename_axis('Open time').to_csv(path)
+    start, end = str(ohlcv_df.index[50]), str(ohlcv_df.index[449])
+    baseline = load_data(start, end, '1h', file_path=str(path), warmup_bars=0)
+    warmed = load_data(start, end, '1h', file_path=str(path), warmup_bars=30)
+    assert warmed.index[0] == ohlcv_df.index[20]
+    selected = _apply_date_filter(warmed, start, end)
+    pd.testing.assert_frame_equal(baseline, selected, check_exact=True)
+    original_result = _run(baseline)
+    warmed_result = _run(selected)
+    assert original_result['best_params'] == warmed_result['best_params']
+    assert original_result['in_sample_performance'] == warmed_result['in_sample_performance']
+    assert original_result['out_of_sample_performance'] == warmed_result['out_of_sample_performance']
+    assert [r['window_info'] for r in original_result['window_results']] == [
+        r['window_info'] for r in warmed_result['window_results']
+    ]
+
 class TestWfoStructure:
     def test_runs_and_returns_dict(self, ohlcv_df):
         results = _run(ohlcv_df)

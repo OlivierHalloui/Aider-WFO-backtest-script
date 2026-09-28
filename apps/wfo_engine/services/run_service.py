@@ -10,8 +10,8 @@ import time
 from typing import Any
 
 from adaptive_optimization import adaptive_continuous_optimization
-from config import DEFAULT_STRATEGY_ID, DEFAULT_STRATEGY_MODE
-from data_loading import load_data
+from config import DEFAULT_STRATEGY_ID, DEFAULT_STRATEGY_MODE, compute_warmup_bars
+from data_loading import load_data, _apply_date_filter
 from domain.serialization import utc_now_iso
 from main import get_metrics_info, get_param_grid, get_wfo_settings
 from services.error_log import write_error_log, collect_classic_wfo_entries
@@ -176,6 +176,8 @@ def run_optimization_job(
                 job_state["error"] = message
             return None, None, None
 
+        params_grid = get_param_grid(config)
+        warmup_bars = int(config.get("warmup_bars", compute_warmup_bars(params_grid)))
         if df is None:
             if job_state is not None:
                 job_state["message"] = "Loading data..."
@@ -188,6 +190,7 @@ def run_optimization_job(
                     config["timeframe"],
                     from_file=True,
                     file_path=config["file_path"],
+                    warmup_bars=warmup_bars,
                 )
             else:
                 df = load_data(
@@ -216,7 +219,13 @@ def run_optimization_job(
                 config.get("timeframe", "?"),
             )
 
-        params_grid = get_param_grid(config)
+        # Window sizes, IS/OOS splits, holdout and metrics must only see the
+        # selected period.  Strategy adapters currently compute indicators
+        # separately on each IS/OOS slice, so passing a prefix into WFO would
+        # alter every split and leak pre-period P&L into the first IS metric.
+        # Keep the loaded prefix available to callers, but never optimize on it.
+        if warmup_bars > 0 and config.get("from_file"):
+            df = _apply_date_filter(df, config["start_date"], config["end_date"])
         metrics_info = get_metrics_info(config)
         wfo_settings = get_wfo_settings(config)
         regime = str(getattr(wfo_settings, "optimization_regime", "classic")).lower()

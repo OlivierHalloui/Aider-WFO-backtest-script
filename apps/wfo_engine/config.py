@@ -1,5 +1,6 @@
 # Import necessary libraries for configuration
 import os
+import math
 from dataclasses import dataclass, field, fields
 from datetime import date
 from typing import Tuple
@@ -36,6 +37,27 @@ DEFAULT_PARAM_GRID = {
     'macd_signal_length': (4, 10, 2)
 }
 
+def compute_warmup_bars(param_grid) -> int:
+    """Max lookback among candidate bounds, with 25% safety margin.
+
+    Configuration tuples are (min, max, step); expanded grid lists contain
+    actual candidate values. Thresholds, booleans, SAR and StDev are ignored.
+    """
+    names = ('timeperiod', 'longueur_mediane', 'fenetre_lowest', 'user_exit_sma_length')
+
+    def upper(name):
+        values = param_grid.get(name, ())
+        if isinstance(values, tuple) and len(values) == 3:
+            values = values[:2]
+        elif not isinstance(values, (list, tuple)):
+            values = (values,)
+        candidates = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+        return max(candidates, default=0)
+
+    longest = max(*(upper(name) for name in names),
+                  upper('macd_slow_length') + upper('macd_signal_length'))
+    return math.ceil(longest * 1.25) if longest > 0 else 0
+
 # ======================================================================
 # CONFIGURATION SETTINGS
 # ======================================================================
@@ -46,6 +68,7 @@ class WFOSettings:
     """Runtime settings container for classic, NN-guided and adaptive WFO engines."""
 
     n_windows: int = 1                          # Number of windows to divide data into
+    warmup_bars: int = 0                        # Prior source bars loaded for indicator history
     train_size: float = 0.5                     # Proportion of window for training
     anchored: bool = False                      # Whether to use anchored (fixed start date) WFO
     optimization_metric: str = "sharpe_ratio"   # Main metric to optimize
