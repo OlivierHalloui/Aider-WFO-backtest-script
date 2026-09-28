@@ -197,5 +197,5 @@ def test_stagewise_first_window_receives_csv_prefix(tmp_path, monkeypatch):
         selected_start=selected_start,
     )
     assert report['stages'][0]['status'] == 'OK'
-    assert calls[0][0][0] == idx[16993]
-    assert calls[0][1] == idx[17280]
+    assert calls[0][0][0] == pd.Timestamp(idx[16993], tz='UTC')
+    assert calls[0][1] == pd.Timestamp(idx[17280], tz='UTC')
