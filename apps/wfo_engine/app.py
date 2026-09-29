@@ -4164,9 +4164,21 @@ if 'wfo_results' in st.session_state or _has_stagewise_params:
 @st.cache_data(show_spinner=False)
 def _cached_price_windows_chart(cache_key: str, price_col: str, _df, _window_results):
     """Price series + WFO train/test window overlays."""
+    # Cap the number of plotted points: a full 5s series (millions of bars) makes
+    # st.plotly_chart deepcopy/serialize a gigantic figure, which holds the GIL for
+    # minutes and stalls the WFO worker thread. Downsample for display only.
+    _MAX_POINTS = 20_000
+    if len(_df) > _MAX_POINTS:
+        _step = max(1, len(_df) // _MAX_POINTS)
+        _plot_x = _df.index[::_step]
+        _plot_y = _df[price_col].iloc[::_step]
+    else:
+        _plot_x = _df.index
+        _plot_y = _df[price_col]
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=_df.index, y=_df[price_col], mode='lines', name='Price',
+        x=_plot_x, y=_plot_y, mode='lines', name='Price',
         line=dict(color='#1f77b4', width=1)
     ))
     colors = {'train': 'rgba(0, 255, 0, 0.1)', 'test': 'rgba(255, 0, 0, 0.1)'}
