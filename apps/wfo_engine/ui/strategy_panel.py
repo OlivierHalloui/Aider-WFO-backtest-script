@@ -61,17 +61,17 @@ def param_input(
     display_label = str(label).replace("_", " ")
     c_toggle, c_label = st.columns([0.14, 0.86])
 
-    # Use setdefault so that session_state values set by load_stagewise_params_from_json
-    # or run_final_backtest_logic take precedence without triggering the Streamlit warning
-    # "widget created with default value but also had its value set via the Session State API".
-    st.session_state.setdefault(f"check_{key}", True)
-    st.session_state.setdefault(f"min_{key}", float(default_min))
-    st.session_state.setdefault(f"max_{key}", float(default_max))
-    st.session_state.setdefault(f"step_{key}", float(default_step))
-
+    # Bind each widget's `value` explicitly to session_state (do NOT use
+    # setdefault + key-without-value). The setdefault pattern sets the value via
+    # the Session State API while the widget carries a different default, which
+    # triggers the Streamlit "default value conflict" warning and makes Streamlit
+    # reset the widget to its default during run reruns — losing the user's
+    # Min/Max/Step configuration mid-run. Explicit `value=` always matches the
+    # persisted value, so there is no conflict and the state survives reruns.
     with c_toggle:
         enabled = st.checkbox(
             "Activer",
+            value=bool(st.session_state.get(f"check_{key}", True)),
             key=f"check_{key}",
             label_visibility="collapsed",
             help=PARAMETER_HELP.get(key, "Active/désactive ce paramètre dans l'optimisation."),
@@ -84,6 +84,7 @@ def param_input(
     with c2:
         min_val = st.number_input(
             "Min",
+            value=float(st.session_state.get(f"min_{key}", default_min)),
             key=f"min_{key}",
             disabled=not enabled,
             help=f"Borne minimale testée pour `{key}`.",
@@ -91,6 +92,7 @@ def param_input(
     with c3:
         max_val = st.number_input(
             "Max",
+            value=float(st.session_state.get(f"max_{key}", default_max)),
             key=f"max_{key}",
             disabled=not enabled,
             help=f"Borne maximale testée pour `{key}`.",
@@ -98,6 +100,7 @@ def param_input(
     with c4:
         step_val = st.number_input(
             "Step",
+            value=float(st.session_state.get(f"step_{key}", default_step)),
             key=f"step_{key}",
             disabled=not enabled,
             help=f"Pas d'incrément entre Min et Max pour `{key}`.",
