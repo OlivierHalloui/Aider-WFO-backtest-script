@@ -4647,7 +4647,7 @@ if _sess_viz.wfo_results is not None:
             if not params_df.empty:
                 _display_df = _arrow_safe_df(params_df.copy())
                 _display_df.insert(0, "Window", range(1, len(_display_df) + 1))
-                st.dataframe(_display_df, use_container_width=True, hide_index=True)
+                st.dataframe(_display_df, width='stretch', hide_index=True)
 
             st.subheader("Robust Set (Level 1)")
             robust_summary = results.get("robust_set_summary", {}) if isinstance(results, dict) else {}

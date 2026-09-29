@@ -1344,7 +1344,7 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
             return styles
 
         styler = _style_cmp_dataframe(df_cmp).apply(_highlight_best, axis=1)
-        st.dataframe(styler, use_container_width=True)
+        st.dataframe(styler, width='stretch')
 
         # Params table
         with st.expander("Paramètres par fenêtre (+ Robust Set)", expanded=False):
@@ -1356,7 +1356,7 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
                              if k in DEFAULT_PARAM_GRID})
                 param_records.append(rec)
             if param_records:
-                st.dataframe(_arrow_safe_df(pd.DataFrame(param_records).set_index("Fenêtre")), use_container_width=True)
+                st.dataframe(_arrow_safe_df(pd.DataFrame(param_records).set_index("Fenêtre")), width='stretch')
 
         # ── Multi-window returns chart ────────────────────────────────────
         all_pfs = st.session_state.get("_window_cmp_all_pfs", {})

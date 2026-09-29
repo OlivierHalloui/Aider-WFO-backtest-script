@@ -1504,7 +1504,7 @@ def _render_comparison_table(records: list[dict]):
         ]
 
     styled = df.style.apply(_highlight_best, axis=0)
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(styled, width='stretch', hide_index=True)
 
     err_records = [r for r in records if r["status"] == "error"]
     if err_records:
@@ -1728,7 +1728,7 @@ def _render_comparison_table_keyed(records: list[dict], key_suffix: str = ""):
         ]
 
     styled = df.style.apply(_highlight_best, axis=0)
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(styled, width='stretch', hide_index=True)
 
     err_records = [r for r in records if r["status"] == "error"]
     if err_records:
