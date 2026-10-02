@@ -1,4 +1,5 @@
 # Import necessary libraries for WFO
+import gc
 import logging
 import os
 import pandas as pd
@@ -244,8 +245,8 @@ def optimize_parameters(
         logger.info("Generating %d parameter combinations...", total_combos)
 
         # Chunking Logic
-        chunk_size = getattr(settings, 'batch_size', 1000) # Default to 1000 if not set
-        if chunk_size <= 0: chunk_size = 1000
+        chunk_size = getattr(settings, 'batch_size', 250) # Default 250 to bound peak memory
+        if chunk_size <= 0: chunk_size = 250
 
         result_chunks = []
         combos_iter = product(*param_values_list)
@@ -276,6 +277,10 @@ def optimize_parameters(
             chunk_df = pd.DataFrame(chunk_combos, columns=param_keys)
             chunk_df['combined_score'] = score_values
             result_chunks.append(chunk_df)
+            # Force-release the chunk's 2-D indicator/signal arrays: numpy/pandas
+            # fragmentation + circular refs keep RSS growing across chunks
+            # otherwise, eventually tripping the OOM killer.
+            gc.collect()
 
             nan_count = sum(1 for s in score_values if not np.isfinite(float(s) if s is not None else float('nan')))
             if nan_count:
