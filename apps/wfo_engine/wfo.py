@@ -366,6 +366,10 @@ def optimize_parameters(
             for param_name, values in tunable_grid.items():
                 if param_name in int_params:
                     params[param_name] = int(trial.suggest_categorical(param_name, values))
+                elif values and all(isinstance(v, (bool, np.bool_)) for v in values):
+                    # Boolean exit/filter toggles: keep them as bool so they appear
+                    # as True/False (not 1.0/0.0) in results and best-params tables.
+                    params[param_name] = bool(trial.suggest_categorical(param_name, values))
                 else:
                     params[param_name] = float(trial.suggest_categorical(param_name, values))
             params.update(fixed_params)
@@ -428,6 +432,10 @@ def optimize_parameters(
                     'i_bars_back',
                 }:
                     params[param_name] = int(trial.suggest_categorical(param_name, values))
+                elif values and all(isinstance(v, (bool, np.bool_)) for v in values):
+                    # Boolean exit/filter toggles: keep them as bool so they appear
+                    # as True/False (not 1.0/0.0) in results and best-params tables.
+                    params[param_name] = bool(trial.suggest_categorical(param_name, values))
                 else:
                     params[param_name] = float(trial.suggest_categorical(param_name, values))
             params.update(fixed_params)
