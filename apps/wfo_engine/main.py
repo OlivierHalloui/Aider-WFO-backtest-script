@@ -110,13 +110,20 @@ def get_param_grid(config):
             if param in ['timeperiod', 'fenetre_lowest', 'user_exit_sma_length', 'macd_fast_length', 'macd_slow_length', 'macd_signal_length']:
                 param_grid[param] = list(range(int(min_val), int(max_val) + 1, int(step)))
             else:
-                decimals = max(0, int(round(-np.log10(step)))) if step > 0 else 0
-                # Use count-based expansion to avoid IEEE 754 floating-point drift
-                # (np.arange(min, max+step, step) can include an extra value when
-                # min==max because 0.8+0.3 = 1.0999… < 1.1, so numpy includes it).
-                count = max(1, int(np.floor((max_val - min_val) / step + 1e-9)) + 1)
-                values = [min_val + step * i for i in range(count)]
-                param_grid[param] = list(np.round(values, decimals))
+                if abs(float(max_val) - float(min_val)) < 1e-12:
+                    # Frozen single value (min == max): preserve the user's exact
+                    # value instead of rounding it to the step's decimal precision
+                    # (rounding 0.74 -> 0.7 or 3.1 -> 3.0 silently alters the frozen
+                    # parameter the user explicitly chose).
+                    param_grid[param] = [float(min_val)]
+                else:
+                    decimals = max(0, int(round(-np.log10(step)))) if step > 0 else 0
+                    # Use count-based expansion to avoid IEEE 754 floating-point drift
+                    # (np.arange(min, max+step, step) can include an extra value when
+                    # min==max because 0.8+0.3 = 1.0999… < 1.1, so numpy includes it).
+                    count = max(1, int(np.floor((max_val - min_val) / step + 1e-9)) + 1)
+                    values = [min_val + step * i for i in range(count)]
+                    param_grid[param] = list(np.round(values, decimals))
     
     # 1b. Collapse SAR/MACD params to fixed defaults when their exit is disabled.
     # A param in selected_params has no effect on the objective when its exit is off —
