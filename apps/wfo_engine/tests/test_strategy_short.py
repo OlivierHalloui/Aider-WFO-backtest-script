@@ -138,12 +138,13 @@ class TestCalculateExitSmaShortNb:
     @_VBT_SKIP
     def test_crossover_fires(self):
         from indicators import calculate_exit_sma_short_nb
-        n = 30
-        # Build a series where close starts below SMA then crosses above
-        close = np.ones(n) * 95.0
-        close[20:] = 105.0   # crosses above SMA≈100 after warmup
+        # Build a series where close is strictly below its SMA then crosses above.
+        close = np.concatenate([
+            np.linspace(100, 90, 15),   # declining: close < SMA (SMA lags above)
+            np.linspace(90, 105, 15),   # recovering: close crosses above SMA
+        ])
         sig = calculate_exit_sma_short_nb(close, 10)
-        assert sig[20:25].any(), "Crossover above SMA should fire"
+        assert sig[15:].any(), "Crossover above SMA should fire"
 
     @_VBT_SKIP
     def test_crossunder_does_not_fire(self):
