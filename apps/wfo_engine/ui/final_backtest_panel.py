@@ -649,27 +649,53 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
     config = get_current_config()
     final_start_date = st.session_state.get('final_start_date', config.get('start_date'))
     final_end_date = st.session_state.get('final_end_date', config.get('end_date'))
-    final_file_path = st.session_state.get('final_file_path', config.get('file_path'))
+    # Fall back to the sidebar file_path when final_file_path is empty: the
+    # final_file_path widget is initialized once (often before the CSV is
+    # uploaded), so it can stay stale/empty while file_path is already set.
+    final_file_path = st.session_state.get('final_file_path') or config.get('file_path')
 
     _final_tf = _get_final_timeframe(config)
+    # For stagewise imports, force file loading when a path is provided.
+    _use_file = config.get('from_file') or (_is_stagewise and bool(final_file_path))
+
+    # Validate the local data file before loading: an imported results ZIP does
+    # not contain the raw OHLCV data, so `final_file_path` may be empty or point
+    # to a file that no longer exists. Fail with an actionable message instead of
+    # a raw FileNotFoundError traceback.
+    if _use_file and (not final_file_path or not os.path.exists(final_file_path)):
+        st.error(
+            "Fichier de données introuvable pour le backtest final : "
+            f"`{final_file_path or '(chemin vide)'}`.\n\n"
+            "Les résultats importés ne contiennent pas les données OHLCV brutes. "
+            "Sélectionnez un fichier CSV dans la sidebar (Data Source → Local File) "
+            "ou corrigez le champ « Final Data File Path », puis relancez le backtest."
+        )
+        return
+
     with st.spinner("Loading data for final backtest..."):
-        # For stagewise imports, force file loading when a path is provided.
-        _use_file = config.get('from_file') or (_is_stagewise and bool(final_file_path))
-        if _use_file:
-            df = load_data(
-                final_start_date,
-                final_end_date,
-                _final_tf,
-                from_file=True,
-                file_path=final_file_path
+        try:
+            if _use_file:
+                df = load_data(
+                    final_start_date,
+                    final_end_date,
+                    _final_tf,
+                    from_file=True,
+                    file_path=final_file_path
+                )
+            else:
+                df = load_data(
+                    final_start_date,
+                    final_end_date,
+                    _final_tf,
+                    from_file=False
+                )
+        except FileNotFoundError as exc:
+            st.error(
+                f"Fichier de données introuvable : {exc}\n\n"
+                "Sélectionnez un fichier CSV dans la sidebar (Data Source → Local File) "
+                "ou corrigez le champ « Final Data File Path »."
             )
-        else:
-            df = load_data(
-                final_start_date,
-                final_end_date,
-                _final_tf,
-                from_file=False
-            )
+            return
 
     if df is None or df.empty:
         st.error("No data loaded for the final backtest range.")
@@ -838,12 +864,21 @@ def _load_full_df(config, load_data):
     """Load the full date-range dataframe for window comparison backtests."""
     final_start = st.session_state.get('final_start_date', config.get('start_date'))
     final_end   = st.session_state.get('final_end_date',   config.get('end_date'))
-    file_path   = st.session_state.get('final_file_path',  config.get('file_path'))
+    # Same fallback as run_final_backtest_logic: use the sidebar file_path when
+    # the final_file_path widget is still empty/stale.
+    file_path   = st.session_state.get('final_file_path') or config.get('file_path')
     tf          = _get_final_timeframe(config)
 
     if config.get('from_file'):
+        if not file_path or not os.path.exists(file_path):
+            raise FileNotFoundError(
+                "Fichier de données introuvable : "
+                f"{file_path or '(chemin vide)'}. "
+                "Sélectionnez un CSV dans la sidebar (Data Source → Local File) "
+                "ou corrigez le champ « Final Data File Path »."
+            )
         try:
-            mtime = os.path.getmtime(file_path) if file_path and os.path.exists(file_path) else 0.0
+            mtime = os.path.getmtime(file_path)
         except OSError:
             mtime = 0.0
         return load_data(final_start, final_end, tf, from_file=True, file_path=file_path)
@@ -1190,8 +1225,16 @@ def render_window_comparison_panel(*, get_current_config, load_data, resolve_str
     if need_run and run_btn:
         config = get_current_config()
 
-        with st.spinner("Chargement des données pour la période complète…"):
-            df_full = _load_full_df(config, load_data)
+        try:
+            with st.spinner("Chargement des données pour la période complète…"):
+                df_full = _load_full_df(config, load_data)
+        except FileNotFoundError as exc:
+            st.error(
+                f"{exc}\n\n"
+                "Sélectionnez un CSV dans la sidebar (Data Source → Local File) "
+                "ou corrigez le champ « Final Data File Path »."
+            )
+            return
 
         if df_full is None or df_full.empty:
             st.error("Données non disponibles pour la période sélectionnée.")

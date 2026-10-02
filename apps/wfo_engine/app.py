@@ -1213,6 +1213,11 @@ with st.sidebar:
                 uploaded_path, is_new_upload = _persist_uploaded_data_file(uploaded_market_csv)
                 if uploaded_path:
                     st.session_state["file_path"] = uploaded_path
+                    # Keep the final-backtest file field in sync when it is still
+                    # empty, so a freshly loaded CSV is reused by the final
+                    # backtest instead of a stale empty path.
+                    if not st.session_state.get("final_file_path"):
+                        st.session_state["final_file_path"] = uploaded_path
                     if is_new_upload:
                         sync_dates_from_file(force=True)
                     st.caption(f"Selected file: `{uploaded_market_csv.name}`")
