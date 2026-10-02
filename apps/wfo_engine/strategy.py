@@ -22,10 +22,44 @@ def _bool_fill(s) -> "pd.Series":
 
     pandas ≥ 2.1 warns when silently downcasting object-dtype arrays via
     .fillna(). Using np.where on the raw array bypasses the pandas
-    downcasting path entirely.
+    downcasting path entirely.  Preserves 2D shape (DataFrame) for the
+    vectorized (multi-combination) path.
     """
     vals = np.where(pd.isna(s), False, np.asarray(s, dtype=bool))
+    if hasattr(s, 'columns'):
+        return pd.DataFrame(vals, index=s.index, columns=s.columns)
     return pd.Series(vals, index=s.index if hasattr(s, 'index') else None)
+
+
+def _flag_is_vectorized(flag) -> bool:
+    """True when a boolean flag is a multi-element array (vectorized run)."""
+    return (
+        hasattr(flag, "__len__")
+        and not isinstance(flag, (str, bytes, dict))
+        and np.asarray(flag).size > 1
+    )
+
+
+def _flag_array(flag) -> np.ndarray:
+    """Return a 1-D boolean array for a vectorized flag."""
+    return np.asarray(flag, dtype=bool).reshape(-1)
+
+
+def _apply_enable_mask(signal, flag, vector_len):
+    """Mask a vectorized (2-D) signal by an enable-flag array, or zero it when
+    scalar-disabled.  Mirrors the SAR/MACD exit pattern for the remaining
+    enable flags (cross_sar_sma, retour_bb, regline, volat_down)."""
+    if _flag_is_vectorized(flag):
+        mask = pd.DataFrame(
+            np.tile(_flag_array(flag), (len(signal), 1)),
+            index=signal.index,
+            columns=signal.columns,
+        )
+        return signal & mask
+    if not bool(flag):
+        return signal & ~signal
+    return signal
+
 
 
 # ======================================================================
@@ -155,9 +189,9 @@ def create_signal_generators(df, **params):
     nb_bars_entre_bb = p['nb_bars_entre_bb']
     depassement_sma_roc = p['depassement_sma_roc']
     roc_max_t1 = p['roc_max_t1']
-    use_roc_filter = bool(p.get('use_roc_filter', True))
+    use_roc_filter = p['use_roc_filter']
     use_t2_signal = p['use_t2_signal']
-    use_divergence_bb = bool(p.get('use_divergence_bb', True))
+    use_divergence_bb = p['use_divergence_bb']
     user_exit_sma_length = p['user_exit_sma_length']
     sar_start = p['sar_start']
     sar_increment = p['sar_increment']
@@ -188,7 +222,13 @@ def create_signal_generators(df, **params):
     high_price  = df['High']
     low_price   = df['Low']
 
-    strategy_direction = str(p.get('strategy_direction', 'long_only'))
+    _sd_raw = p.get('strategy_direction', 'long_only')
+    if is_array_like(_sd_raw) and np.asarray(_sd_raw).size > 1:
+        _sd_vals = np.asarray(_sd_raw).reshape(-1)
+        if len(set(_sd_vals.tolist())) > 1:
+            raise ValueError(
+                f"strategy_direction must be uniform across combinations, got {list(_sd_vals)}")
+    strategy_direction = str(scalarize(_sd_raw))
 
     def normalize_columns(obj):
         """Ensure deterministic unique columns to avoid many-to-many label alignment."""
@@ -336,8 +376,24 @@ def create_signal_generators(df, **params):
             per_column=True
         )
         _sma_exit_signal = normalize_columns(sma_exit_ind.signal)
-        _sma_len = int(scalarize(user_exit_sma_length)) if is_array_like(user_exit_sma_length) else int(user_exit_sma_length)
-        sma_series = close_price_aligned.rolling(window=_sma_len, min_periods=_sma_len).mean()
+        if is_array_like(user_exit_sma_length) and np.asarray(user_exit_sma_length).size > 1 \
+                and hasattr(close_price_aligned, 'columns'):
+            # Vectorized: one SMA per combination (per-column window).
+            _lens = np.asarray(user_exit_sma_length, dtype=int).reshape(-1)
+            if close_price_aligned.shape[1] != len(_lens):
+                raise ValueError(
+                    f"user_exit_sma_length has {len(_lens)} values but close has "
+                    f"{close_price_aligned.shape[1]} columns")
+            sma_series = pd.concat(
+                [close_price_aligned.iloc[:, i].rolling(window=int(_lens[i]), min_periods=int(_lens[i])).mean()
+                 for i in range(len(_lens))], axis=1)
+            sma_series.columns = close_price_aligned.columns
+        elif is_array_like(user_exit_sma_length) and np.asarray(user_exit_sma_length).size > 1:
+            raise ValueError(
+                "user_exit_sma_length is vectorized but close_price_aligned is not 2-D")
+        else:
+            _sma_len = int(scalarize(user_exit_sma_length)) if is_array_like(user_exit_sma_length) else int(user_exit_sma_length)
+            sma_series = close_price_aligned.rolling(window=_sma_len, min_periods=_sma_len).mean()
         if None not in _sma_exit_key:
             _WINDOW_INDICATOR_CACHE[_sma_exit_key] = (_sma_exit_signal, sma_series)
 
@@ -414,27 +470,8 @@ def create_signal_generators(df, **params):
         )
 
     # macd_exit_signal set in MACD cache block above
-    if vector_len > 1 and is_array_like(exit_sar_enabled):
-        exit_mask = pd.DataFrame(
-            np.tile(np.asarray(exit_sar_enabled, dtype=bool), (len(sar_exit_signal), 1)),
-            index=sar_exit_signal.index,
-            columns=sar_exit_signal.columns
-        )
-        sar_exit_signal = sar_exit_signal & exit_mask
-    else:
-        if not bool(exit_sar_enabled):
-            sar_exit_signal[:] = False
-
-    if vector_len > 1 and is_array_like(exit_macd_enabled):
-        exit_mask = pd.DataFrame(
-            np.tile(np.asarray(exit_macd_enabled, dtype=bool), (len(macd_exit_signal), 1)),
-            index=macd_exit_signal.index,
-            columns=macd_exit_signal.columns
-        )
-        macd_exit_signal = macd_exit_signal & exit_mask
-    else:
-        if not bool(exit_macd_enabled):
-            macd_exit_signal[:] = False
+    sar_exit_signal = _apply_enable_mask(sar_exit_signal, exit_sar_enabled, vector_len)
+    macd_exit_signal = _apply_enable_mask(macd_exit_signal, exit_macd_enabled, vector_len)
 
     # --- Additional exit signals (Phase 5) ---
 
@@ -448,12 +485,12 @@ def create_signal_generators(df, **params):
         sar=sar_signal,
     )
     cross_sar_sma_signal = normalize_columns(cross_sar_sma_exit_ind.signal).astype(bool)
-    if not bool(exit_cross_sar_sma_enabled):
-        cross_sar_sma_signal[:] = False
+    cross_sar_sma_signal = _apply_enable_mask(cross_sar_sma_signal, exit_cross_sar_sma_enabled, vector_len)
 
     # 2. Retour BB exit: pivot low on lower band
     retour_bb_signal = None
-    if bool(exit_retour_bb_enabled):
+    _retour_vec = vector_len > 1 and _flag_is_vectorized(exit_retour_bb_enabled)
+    if _retour_vec or bool(exit_retour_bb_enabled):
         retour_bb_ind = PivotLow.run(
             series=lower_band,
             left=nb_bars_left_pivot,
@@ -461,10 +498,13 @@ def create_signal_generators(df, **params):
             per_column=True
         )
         retour_bb_signal = normalize_columns(retour_bb_ind.signal).astype(bool)
+        if _retour_vec:
+            retour_bb_signal = _apply_enable_mask(retour_bb_signal, exit_retour_bb_enabled, vector_len)
 
     # 3. Regline exit: crossunder(close, linreg) — cached by (length, offset, data)
     regline_signal = None
-    if bool(exit_regline_enabled):
+    _regline_vec = vector_len > 1 and _flag_is_vectorized(exit_regline_enabled)
+    if _regline_vec or bool(exit_regline_enabled):
         _linreg_key = (
             "linreg",
             int(nombre_periodes_reglin) if np.isscalar(nombre_periodes_reglin) else None,
@@ -484,10 +524,13 @@ def create_signal_generators(df, **params):
             regline_signal = normalize_columns(regline_ind.signal).astype(bool)
             if None not in _linreg_key:
                 _WINDOW_INDICATOR_CACHE[_linreg_key] = regline_signal
+        if _regline_vec:
+            regline_signal = _apply_enable_mask(regline_signal, exit_regline_enabled, vector_len)
 
     # 4. Volat down exit: crossunder(%BB, seuil_overbought)
     volat_down_signal = None
-    if bool(exit_volat_down_enabled):
+    _volat_vec = vector_len > 1 and _flag_is_vectorized(exit_volat_down_enabled)
+    if _volat_vec or bool(exit_volat_down_enabled):
         volat_down_ind = VolatDownExit.run(
             close=close_price_aligned,
             upper=upper_band,
@@ -496,6 +539,8 @@ def create_signal_generators(df, **params):
             per_column=True
         )
         volat_down_signal = normalize_columns(volat_down_ind.signal).astype(bool)
+        if _volat_vec:
+            volat_down_signal = _apply_enable_mask(volat_down_signal, exit_volat_down_enabled, vector_len)
 
     # ── SHORT SIGNALS (generated only when direction requires it) ──────────
     depassement_roc_short_signal = None
@@ -552,11 +597,11 @@ def create_signal_generators(df, **params):
                 (prev_close_s < prev_sar_s) &
                 (close_price_aligned_s > sar_signal)
             )
-        if not bool(exit_sar_enabled):
-            sar_short_exit_signal[:] = False
+        sar_short_exit_signal = _apply_enable_mask(sar_short_exit_signal, exit_sar_enabled, vector_len)
 
         # --- MACD short exit: MACD crosses ABOVE signal line ---
-        if bool(exit_macd_enabled):
+        _macd_short_vec = vector_len > 1 and _flag_is_vectorized(exit_macd_enabled)
+        if _macd_short_vec or bool(exit_macd_enabled):
             _macd_short_key = (
                 "macd_short",
                 int(macd_fast_length) if np.isscalar(macd_fast_length) else None,
@@ -587,18 +632,24 @@ def create_signal_generators(df, **params):
                 macd_short_exit_signal_out = normalize_columns(_macd_short_ind.signal)
                 if None not in _macd_short_key:
                     _WINDOW_INDICATOR_CACHE[_macd_short_key] = macd_short_exit_signal_out
+        if _macd_short_vec:
+            macd_short_exit_signal_out = _apply_enable_mask(macd_short_exit_signal_out, exit_macd_enabled, vector_len)
 
         # --- Cross SAR/SMA short exit: SAR crosses BELOW SMA ---
-        if bool(exit_cross_sar_sma_enabled):
+        _css_short_vec = vector_len > 1 and _flag_is_vectorized(exit_cross_sar_sma_enabled)
+        if _css_short_vec or bool(exit_cross_sar_sma_enabled):
             cross_sar_sma_short_ind = CrossSARSMAShortExit.run(
                 sma=sma_series,
                 sar=sar_signal,
             )
             cross_sar_sma_short_signal = normalize_columns(
                 cross_sar_sma_short_ind.signal).astype(bool)
+            if _css_short_vec:
+                cross_sar_sma_short_signal = _apply_enable_mask(cross_sar_sma_short_signal, exit_cross_sar_sma_enabled, vector_len)
 
         # --- Retour BB short exit: pivot HIGH on upper band ---
-        if bool(exit_retour_bb_enabled):
+        _retour_short_vec = vector_len > 1 and _flag_is_vectorized(exit_retour_bb_enabled)
+        if _retour_short_vec or bool(exit_retour_bb_enabled):
             pivot_high_ind = PivotHigh.run(
                 series=upper_band,
                 left=nb_bars_left_pivot,
@@ -607,10 +658,13 @@ def create_signal_generators(df, **params):
             )
             retour_bb_short_exit_signal = normalize_columns(
                 pivot_high_ind.signal).astype(bool)
+            if _retour_short_vec:
+                retour_bb_short_exit_signal = _apply_enable_mask(retour_bb_short_exit_signal, exit_retour_bb_enabled, vector_len)
 
         # --- Regline short exit: close crosses ABOVE linreg (crossover) ---
         # Mirror of regline long exit (crossunder). Reuses cached linreg signal series.
-        if bool(exit_regline_enabled) and regline_signal is not None:
+        _regline_short_vec = vector_len > 1 and _flag_is_vectorized(exit_regline_enabled)
+        if (_regline_short_vec or bool(exit_regline_enabled)) and regline_signal is not None:
             # linreg_exit_nb detects crossunder (long). For short we need crossover.
             # Reconstruct the crossover from close and the cached regline series.
             # We compute it inline to avoid duplicating the expensive linreg calculation.
@@ -656,26 +710,22 @@ def create_signal_generators(df, **params):
                 regline_short_signal = normalize_columns(_linreg_short_ind.signal).astype(bool)
                 if None not in _linreg_short_key:
                     _WINDOW_INDICATOR_CACHE[_linreg_short_key] = regline_short_signal
+            if _regline_short_vec:
+                regline_short_signal = _apply_enable_mask(regline_short_signal, exit_regline_enabled, vector_len)
         else:
             regline_short_signal = None
 
         # --- Volat up short exit: %BB crosses ABOVE (1 - seuil_overbought) ---
         # Mirror of volat_down exit (long): price was in lower %BB zone, recovers upward.
         # Signal = BBR[i-1] < (1-seuil) AND BBR[i] >= (1-seuil).
-        if bool(exit_volat_down_enabled):
-            seuil_oversold = 1.0 - (
-                float(seuil_overbought_bb) if np.isscalar(seuil_overbought_bb)
-                else float(np.asarray(seuil_overbought_bb).flat[0])
-            )
+        _volat_short_vec = vector_len > 1 and _flag_is_vectorized(exit_volat_down_enabled)
+        if _volat_short_vec or bool(exit_volat_down_enabled):
+            seuil_oversold = 1.0 - seuil_overbought_bb
             # Run VolatDownExit on mirrored %BB: %BB_short = (upper-close)/(upper-lower)
             # which equals (1 - %BB_long). crossunder(%BB_short, 1-seuil) == crossover(%BB_long, seuil-1+1=seuil)
             # Simpler: pass seuil_oversold as threshold to VolatDownExit on the mirrored series.
-            _vup_key = (
-                "volat_up",
-                round(float(seuil_overbought_bb) if np.isscalar(seuil_overbought_bb)
-                      else float(np.asarray(seuil_overbought_bb).flat[0]), 6),
-                _df_sig,
-            )
+            _seuil_key = round(float(seuil_overbought_bb), 6) if np.isscalar(seuil_overbought_bb) else None
+            _vup_key = ("volat_up", _seuil_key, _df_sig)
             _vup_cached = _WINDOW_INDICATOR_CACHE.get(_vup_key) if None not in _vup_key else None
             if _vup_cached is not None:
                 volat_up_exit_signal = _vup_cached
@@ -696,6 +746,8 @@ def create_signal_generators(df, **params):
                 volat_up_exit_signal = normalize_columns(_vup_ind.signal).astype(bool)
                 if None not in _vup_key:
                     _WINDOW_INDICATOR_CACHE[_vup_key] = volat_up_exit_signal
+            if _volat_short_vec:
+                volat_up_exit_signal = _apply_enable_mask(volat_up_exit_signal, exit_volat_down_enabled, vector_len)
         else:
             volat_up_exit_signal = None
 
@@ -789,10 +841,21 @@ def create_entry_exit_conditions(df, signals):
 
     # T1: T0 (current or previous bar) + crossover + optional RoC filter
     _t0_cross = (T0 | _bool_fill(T0.shift(1))) & crossover_upper
-    if signals.get('use_roc_filter', True):
-        T1 = _t0_cross & signals['depassement_roc_signal']
+    _roc = signals.get('use_roc_filter', True)
+    _roc_vec = _flag_is_vectorized(_roc)
+    if _roc_vec:
+        _roc_mask = np.tile(_flag_array(_roc), (len(_t0_cross), 1))
+        _dep = np.asarray(signals['depassement_roc_signal'], dtype=bool)
+        if _dep.ndim == 1:
+            _dep2d = np.broadcast_to(_dep.reshape(-1, 1), _roc_mask.shape)
+        else:
+            _dep2d = _dep
+        T1 = pd.DataFrame(
+            np.asarray(_t0_cross, dtype=bool) & np.where(_roc_mask, _dep2d, True),
+            index=_t0_cross.index, columns=_t0_cross.columns,
+        )
     else:
-        T1 = _t0_cross
+        T1 = _t0_cross & signals['depassement_roc_signal'] if bool(_roc) else _t0_cross
 
     # T2: stop-buy order placed at close of T1 bar, filled on next bar if High breaks out
     # Setup bar (T1, t-1): divergence_BB must be true on setup bar
@@ -806,11 +869,47 @@ def create_entry_exit_conditions(df, signals):
 
     use_t2 = signals.get('use_t2_signal', True)
     use_div_bb = signals.get('use_divergence_bb', True)
-    if use_t2:
+    _t2_vec = _flag_is_vectorized(use_t2)
+    _div_vec = _flag_is_vectorized(use_div_bb)
+
+    if _t2_vec or _div_vec:
+        # Vectorized T2 path: compute both branches for all combos, then select.
+        _div_on_t1 = _bool_fill(divergence_BB.shift(1)) | _bool_fill(divergence_BB.shift(2))
+        _bo = np.asarray(high.gt(high.shift(1), axis=0), dtype=bool).reshape(-1, 1) \
+            & np.asarray(_bool_fill(T1.shift(1)), dtype=bool)  # (time, combos)
+        _div = np.asarray(_div_on_t1, dtype=bool)
+        _idx, _cols = T1.index, T1.columns
+        if _div_vec:
+            _t2_arr = np.where(
+                np.tile(_flag_array(use_div_bb), (len(T1), 1)), _bo & _div, _bo)
+        else:
+            _t2_arr = (_bo & _div) if bool(use_div_bb) else _bo
+        if _t2_vec:
+            _t2_mask = np.tile(_flag_array(use_t2), (len(T1), 1))
+            _entry_arr = np.where(_t2_mask, _t2_arr, np.asarray(T1, dtype=bool))
+            _price = np.broadcast_to(
+                (high.shift(1) + _MINTICK).to_numpy().reshape(-1, 1), _t2_mask.shape)
+            _close_2d = np.broadcast_to(
+                np.asarray(close, dtype=float).reshape(-1, 1), _t2_mask.shape)
+            entry_condition = pd.DataFrame(_entry_arr, index=_idx, columns=_cols)
+            t2_entry_price = pd.DataFrame(
+                np.where(_t2_mask, _price, _close_2d), index=_idx, columns=_cols)
+        else:
+            # use_t2 scalar + use_div_bb vectorized: honor scalar use_t2 semantics.
+            if bool(use_t2):
+                entry_condition = pd.DataFrame(_t2_arr, index=_idx, columns=_cols)
+                t2_entry_price = pd.DataFrame(
+                    np.broadcast_to(
+                        (high.shift(1) + _MINTICK).to_numpy().reshape(-1, 1),
+                        _t2_arr.shape), index=_idx, columns=_cols)
+            else:
+                entry_condition = _bool_fill(T1)
+                t2_entry_price = None
+    elif bool(use_t2):
         # divergence_BB evaluated on the T1 (setup) bar, i.e. shift(1) relative to trigger bar
         _div_on_t1 = _bool_fill(divergence_BB.shift(1)) | _bool_fill(divergence_BB.shift(2))
         _breakout = high.gt(high.shift(1), axis=0) & _bool_fill(T1.shift(1))
-        T2 = (_breakout & _div_on_t1) if use_div_bb else _breakout
+        T2 = (_breakout & _div_on_t1) if bool(use_div_bb) else _breakout
         entry_condition = _bool_fill(T2)
         # Entry price = High of T1 bar + mintick (stop-buy fill price)
         t2_entry_price = high.shift(1) + _MINTICK
@@ -845,16 +944,61 @@ def create_entry_exit_conditions(df, signals):
         # T1 short: close crosses BELOW lower band
         crossunder_lower = lower_band.gt(close, axis=0) & prev_lower.le(prev_close, axis=0)
         _t0_cross_short = (T0 | _bool_fill(T0.shift(1))) & crossunder_lower
-        if signals.get('use_roc_filter', True) and signals.get('depassement_roc_short_signal') is not None:
-            T1_short = _t0_cross_short & signals['depassement_roc_short_signal']
+        _dep_short = signals.get('depassement_roc_short_signal')
+        if _roc_vec:
+            _roc_mask_s = np.tile(_flag_array(_roc), (len(_t0_cross_short), 1))
+            if _dep_short is not None:
+                _dep_s = np.asarray(_dep_short, dtype=bool)
+                if _dep_s.ndim == 1:
+                    _dep_s2d = np.broadcast_to(_dep_s.reshape(-1, 1), _roc_mask_s.shape)
+                else:
+                    _dep_s2d = _dep_s
+                _t1s_arr = np.asarray(_t0_cross_short, dtype=bool) & np.where(_roc_mask_s, _dep_s2d, True)
+            else:
+                _t1s_arr = np.asarray(_t0_cross_short, dtype=bool)
+            T1_short = pd.DataFrame(_t1s_arr, index=_t0_cross_short.index, columns=_t0_cross_short.columns)
         else:
-            T1_short = _t0_cross_short
+            T1_short = (_t0_cross_short & _dep_short) if (bool(_roc) and _dep_short is not None) else _t0_cross_short
 
         # T2 short (optional): Low[t] < Low[t-1] after T1_short bar
-        if use_t2:
+        if _t2_vec or _div_vec:
+            low = df['Low']
+            _bo_s = np.asarray(low.lt(low.shift(1), axis=0), dtype=bool).reshape(-1, 1) \
+                & np.asarray(_bool_fill(T1_short.shift(1)), dtype=bool)  # (time, combos)
+            _div_s = np.asarray(_div_on_t1, dtype=bool)
+            _idx_s, _cols_s = T1_short.index, T1_short.columns
+            if _div_vec:
+                _t2s_arr = np.where(
+                    np.tile(_flag_array(use_div_bb), (len(T1_short), 1)), _bo_s & _div_s, _bo_s)
+            else:
+                _t2s_arr = (_bo_s & _div_s) if bool(use_div_bb) else _bo_s
+            if _t2_vec:
+                _t2_mask_s = np.tile(_flag_array(use_t2), (len(T1_short), 1))
+                _sentry_arr = np.where(_t2_mask_s, _t2s_arr, np.asarray(T1_short, dtype=bool))
+                _price_s = np.broadcast_to(
+                    (low.shift(1) - _MINTICK).to_numpy().reshape(-1, 1), _t2_mask_s.shape)
+                _close2d_s = np.broadcast_to(
+                    np.asarray(close, dtype=float).reshape(-1, 1), _t2_mask_s.shape)
+                short_entry_condition = pd.DataFrame(
+                    _sentry_arr, index=_idx_s, columns=_cols_s)
+                t2_short_entry_price = pd.DataFrame(
+                    np.where(_t2_mask_s, _price_s, _close2d_s), index=_idx_s, columns=_cols_s)
+            else:
+                # use_t2 scalar + use_div_bb vectorized: honor scalar use_t2 semantics.
+                if bool(use_t2):
+                    short_entry_condition = pd.DataFrame(
+                        _t2s_arr, index=_idx_s, columns=_cols_s)
+                    t2_short_entry_price = pd.DataFrame(
+                        np.broadcast_to(
+                            (low.shift(1) - _MINTICK).to_numpy().reshape(-1, 1),
+                            _t2s_arr.shape), index=_idx_s, columns=_cols_s)
+                else:
+                    short_entry_condition = _bool_fill(T1_short)
+                    t2_short_entry_price = None
+        elif bool(use_t2):
             low = df['Low']
             _breakout_short = low.lt(low.shift(1), axis=0) & _bool_fill(T1_short.shift(1))
-            T2_short = (_breakout_short & _div_on_t1) if use_div_bb else _breakout_short
+            T2_short = (_breakout_short & _div_on_t1) if bool(use_div_bb) else _breakout_short
             short_entry_condition = _bool_fill(T2_short)
             t2_short_entry_price  = low.shift(1) - _MINTICK   # stop-sell fill
         else:
@@ -866,8 +1010,9 @@ def create_entry_exit_conditions(df, signals):
         _macd_s  = signals.get('macd_short_exit_signal')
         _xss_s   = signals.get('cross_sar_sma_short_exit_signal')
 
-        # Start from a zero baseline
-        _false_base = _bool_fill(close * 0 == 1)   # all-False, same shape as close
+        # Start from a zero baseline with the SAME shape as T1_short (1-D scalar,
+        # 2-D vectorized) so downstream ORs align column-wise.
+        _false_base = _bool_fill(T1_short & ~T1_short)   # all-False
         short_exit_condition = _false_base
         if _sma_s is not None:
             short_exit_condition = short_exit_condition | _sma_s
@@ -953,15 +1098,22 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True, trade_start=
     # Avoid copying the full Close Series — allocate a numpy array and patch
     # only the T2 bars (typically <1% of rows), then wrap back as Series.
     if t2_entry_price is not None:
-        close_vals = df['Close'].values.copy()  # numpy copy — no pandas overhead
         mask = entry_condition.values if hasattr(entry_condition, 'values') else np.asarray(entry_condition)
         t2_vals = t2_entry_price.values if hasattr(t2_entry_price, 'values') else np.asarray(t2_entry_price)
-        close_vals[mask] = t2_vals[mask]
-        exec_price = pd.Series(close_vals, index=df['Close'].index)
+        if mask.ndim == 2:
+            # Vectorized: build a per-combination execution price matrix.
+            _close_2d = np.broadcast_to(df['Close'].values.reshape(-1, 1), mask.shape)
+            exec_price = pd.DataFrame(
+                np.where(mask, t2_vals, _close_2d),
+                index=df['Close'].index, columns=entry_condition.columns)
+        else:
+            close_vals = df['Close'].values.copy()  # numpy copy — no pandas overhead
+            close_vals[mask] = t2_vals[mask]
+            exec_price = pd.Series(close_vals, index=df['Close'].index)
     else:
         exec_price = df['Close']
 
-    _direction = str(params.get('strategy_direction', 'long_only')).lower()
+    _direction = str(_scalar_param(params.get('strategy_direction', 'long_only'), 'long_only')).lower()
 
     # In short_only mode, suppress long entries to avoid accidental longs
     _entries = entry_condition if _direction in ('long_only', 'both') else \
@@ -988,14 +1140,24 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True, trade_start=
         if t2_short_entry_price is not None:
             # exec_price may already be a patched Series (T2 long) or df['Close'].
             # Work on a numpy copy to avoid mutating the original.
-            exec_vals = exec_price.values.copy() \
-                if hasattr(exec_price, 'values') else np.array(exec_price, dtype=float)
             mask_s = short_entry_condition.values \
                 if hasattr(short_entry_condition, 'values') else np.asarray(short_entry_condition)
             t2s_vals = t2_short_entry_price.values \
                 if hasattr(t2_short_entry_price, 'values') else np.asarray(t2_short_entry_price)
-            exec_vals[mask_s] = t2s_vals[mask_s]
-            pf_kwargs['price'] = pd.Series(exec_vals, index=df['Close'].index)
+            if mask_s.ndim == 2:
+                if hasattr(exec_price, 'ndim') and exec_price.ndim == 2:
+                    exec_vals = exec_price.values.copy()
+                else:
+                    exec_vals = np.broadcast_to(
+                        np.asarray(exec_price, dtype=float).reshape(-1, 1), mask_s.shape).copy()
+                exec_vals[mask_s] = t2s_vals[mask_s]
+                pf_kwargs['price'] = pd.DataFrame(
+                    exec_vals, index=df['Close'].index, columns=short_entry_condition.columns)
+            else:
+                exec_vals = exec_price.values.copy() \
+                    if hasattr(exec_price, 'values') else np.array(exec_price, dtype=float)
+                exec_vals[mask_s] = t2s_vals[mask_s]
+                pf_kwargs['price'] = pd.Series(exec_vals, index=df['Close'].index)
         pf_kwargs['short_entries'] = short_entry_condition
         pf_kwargs['short_exits']   = short_exit_condition
 
