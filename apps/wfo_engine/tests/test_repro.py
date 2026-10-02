@@ -41,3 +41,16 @@ def test_get_param_grid_adds_fixed_execution_settings():
     assert grid["order_sizing_mode"] == ["percent_equity"]
     assert grid["order_fixed_cash"] == [10000.0]
     assert grid["fees_pct"] == [0.0]
+
+
+def test_get_param_grid_frozen_decimal_keeps_exact_value():
+    """A frozen (min==max) decimal param keeps its exact value, not the step-rounded one."""
+    config = {
+        "selected_params": ["coef_mediane", "seuil_lowest"],
+        "coef_mediane_min": 0.74, "coef_mediane_max": 0.74, "coef_mediane_step": 0.1,
+        "seuil_lowest_min": 3.1, "seuil_lowest_max": 3.1, "seuil_lowest_step": 0.5,
+    }
+    grid = get_param_grid(config)
+
+    assert grid["coef_mediane"] == [0.74]   # not [0.7]
+    assert grid["seuil_lowest"] == [3.1]    # not [3.0]
