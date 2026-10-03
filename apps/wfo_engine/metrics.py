@@ -182,6 +182,26 @@ def calc_pqs(portfolio, n_ref: int = 50) -> float:
         return 0.0
 
 
+def _get_returns(portfolio):
+    """Extract the per-bar returns of *portfolio* as a clean 1-D finite array.
+
+    VectorBT exposes ``returns`` as a property or a method depending on the
+    build; NaN bars (leading/interior) are dropped. Returns None when no usable
+    return series is available (e.g. mocked portfolios in tests).
+    """
+    try:
+        import numpy as np
+
+        rets = getattr(portfolio, "returns", None)
+        if callable(rets):
+            rets = rets()
+        rets = np.asarray(rets, dtype=float).ravel()
+        rets = rets[np.isfinite(rets)]
+        return rets if rets.size > 1 else None
+    except Exception:
+        return None
+
+
 def _sharpe_from_returns(portfolio, fallback):
     """Non-annualised Sharpe = mean / std of the window's per-bar returns.
 
@@ -192,17 +212,49 @@ def _sharpe_from_returns(portfolio, fallback):
     returns are unavailable (e.g. mocked portfolios in tests).
     """
     try:
-        import numpy as np
-
-        rets = getattr(portfolio, "returns", None)
-        if callable(rets):
-            rets = rets()  # VectorBT exposes returns() as a method (see export_panel)
-        rets = np.asarray(rets, dtype=float).ravel()
-        rets = rets[np.isfinite(rets)]  # drop leading/interior NaN bars
-        if rets.size > 1:
+        rets = _get_returns(portfolio)
+        if rets is not None:
             std = rets.std()
             if std > 0:
                 return float(rets.mean() / std)
+    except Exception:
+        pass
+    return fallback
+
+
+def _sortino_from_returns(portfolio, fallback):
+    """Non-annualised Sortino = mean / downside deviation of per-bar returns.
+
+    Same de-annualisation rationale as `_sharpe_from_returns`; the downside
+    deviation uses the root-mean-square of negative returns (target 0).
+    """
+    try:
+        import numpy as np
+
+        rets = _get_returns(portfolio)
+        if rets is not None:
+            downside = np.minimum(rets, 0.0)
+            ds_std = float(np.sqrt(np.mean(downside ** 2)))
+            if ds_std > 0:
+                return float(rets.mean() / ds_std)
+    except Exception:
+        pass
+    return fallback
+
+
+def _calmar_from_returns(portfolio, fallback):
+    """Calmar = total return / max drawdown of the window (no annualisation)."""
+    try:
+        import numpy as np
+
+        rets = _get_returns(portfolio)
+        if rets is not None:
+            cum = np.cumprod(1.0 + rets)
+            peak = np.maximum.accumulate(cum)
+            max_dd = float(np.max((peak - cum) / peak))
+            total_ret = float(cum[-1] - 1.0)
+            if max_dd > 0:
+                return float(total_ret / max_dd)
     except Exception:
         pass
     return fallback
@@ -231,8 +283,8 @@ def portfolio_metrics(portfolio, window_id, n_ref: int = 50):
         "avg_gain_per_trade": float(to_scalar_score(trade_stat(portfolio.trades, "avg_winning_trade"))),
         "avg_loss_per_trade": float(to_scalar_score(trade_stat(portfolio.trades, "avg_losing_trade"))),
         "avg_pl_per_trade": float(to_scalar_score(calc_avg_pl(portfolio))),
-        "calmar_ratio": float(to_scalar_score(getattr(portfolio, "calmar_ratio", 0.0))),
-        "sortino_ratio": float(to_scalar_score(getattr(portfolio, "sortino_ratio", 0.0))),
+        "calmar_ratio": float(to_scalar_score(_calmar_from_returns(portfolio, getattr(portfolio, "calmar_ratio", 0.0)))),
+        "sortino_ratio": float(to_scalar_score(_sortino_from_returns(portfolio, getattr(portfolio, "sortino_ratio", 0.0)))),
         "pqs": calc_pqs(portfolio, n_ref=n_ref),
         "n_trades": int(n_trades),
     }

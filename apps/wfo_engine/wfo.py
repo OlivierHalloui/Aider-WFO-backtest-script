@@ -14,7 +14,7 @@ from scipy.spatial import KDTree
 from config import WFOSettings
 from strategy_adapters import resolve_strategy_adapter
 from strategy import clear_window_indicator_cache
-from metrics import trade_stat, calc_avg_pl, calc_pqs, safe_float, _get_trades_stats, _sharpe_from_returns
+from metrics import trade_stat, calc_avg_pl, calc_pqs, safe_float, _get_trades_stats, _sharpe_from_returns, _sortino_from_returns, _calmar_from_returns
 from neural_search import NeuralSearchGuide, _match_prev_value_to_candidates, _build_prev_best_grid, _safe_float
 import optuna
 
@@ -1053,8 +1053,8 @@ def walk_forward_optimization(
             'avg_gain_per_trade': trade_stat(in_sample_portfolio.trades, 'avg_winning_trade', _stats_cache=_is_stats),
             'avg_loss_per_trade': trade_stat(in_sample_portfolio.trades, 'avg_losing_trade', _stats_cache=_is_stats),
             'avg_pl_per_trade': calc_avg_pl(in_sample_portfolio),
-            'calmar_ratio': in_sample_portfolio.calmar_ratio if in_sample_portfolio.max_drawdown > 0 else np.nan,
-            'sortino_ratio': in_sample_portfolio.sortino_ratio,
+            'calmar_ratio': _calmar_from_returns(in_sample_portfolio, np.nan),
+            'sortino_ratio': _sortino_from_returns(in_sample_portfolio, in_sample_portfolio.sortino_ratio),
             'pqs': calc_pqs(in_sample_portfolio, n_ref=_pqs_n_ref),
             'n_trades': len(in_sample_portfolio.trades)
         }
@@ -1077,8 +1077,8 @@ def walk_forward_optimization(
                 'avg_gain_per_trade': trade_stat(out_sample_portfolio.trades, 'avg_winning_trade', _stats_cache=_oos_stats),
                 'avg_loss_per_trade': trade_stat(out_sample_portfolio.trades, 'avg_losing_trade', _stats_cache=_oos_stats),
                 'avg_pl_per_trade': calc_avg_pl(out_sample_portfolio),
-                'calmar_ratio': out_sample_portfolio.calmar_ratio if out_sample_portfolio.max_drawdown > 0 else np.nan,
-                'sortino_ratio': out_sample_portfolio.sortino_ratio,
+                'calmar_ratio': _calmar_from_returns(out_sample_portfolio, np.nan),
+                'sortino_ratio': _sortino_from_returns(out_sample_portfolio, out_sample_portfolio.sortino_ratio),
                 'pqs': calc_pqs(out_sample_portfolio, n_ref=_pqs_n_ref),
                 'n_trades': len(out_sample_portfolio.trades)
             }
