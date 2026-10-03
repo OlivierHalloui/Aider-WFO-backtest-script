@@ -182,6 +182,29 @@ def calc_pqs(portfolio, n_ref: int = 50) -> float:
         return 0.0
 
 
+def _sharpe_from_returns(portfolio, fallback):
+    """Non-annualised Sharpe = mean / std of the window's per-bar returns.
+
+    VectorBT's ``sharpe_ratio`` annualises with the bar frequency: on 5s data
+    that multiplies by ``sqrt(periods/year)`` ~ 2500 and turns a raw ratio of
+    0.05 into absurd figures (33-125). The raw mean/std is the honest,
+    window-comparable number. Falls back to the portfolio's own ratio when
+    returns are unavailable (e.g. mocked portfolios in tests).
+    """
+    try:
+        import numpy as np
+
+        rets = np.asarray(getattr(portfolio, "returns", None), dtype=float).ravel()
+        rets = rets[np.isfinite(rets)]  # drop leading/interior NaN bars
+        if rets.size > 1:
+            std = rets.std()
+            if std > 0:
+                return float(rets.mean() / std)
+    except Exception:
+        pass
+    return fallback
+
+
 def portfolio_metrics(portfolio, window_id, n_ref: int = 50):
     """Build a summary dict of key performance metrics for *portfolio*.
 
@@ -198,7 +221,8 @@ def portfolio_metrics(portfolio, window_id, n_ref: int = 50):
     return {
         "window": window_id,
         "return": float(to_scalar_score(getattr(portfolio, "total_return", 0.0) * 100)),
-        "sharpe": float(to_scalar_score(getattr(portfolio, "sharpe_ratio", 0.0))),
+        "sharpe": float(to_scalar_score(_sharpe_from_returns(
+            portfolio, getattr(portfolio, "sharpe_ratio", 0.0)))),
         "max_drawdown": float(to_scalar_score(getattr(portfolio, "max_drawdown", 0.0) * 100)),
         "win_rate": float(to_scalar_score(getattr(getattr(portfolio, "trades", object()), "win_rate", 0.0))),
         "avg_gain_per_trade": float(to_scalar_score(trade_stat(portfolio.trades, "avg_winning_trade"))),
