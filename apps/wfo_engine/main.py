@@ -6,6 +6,7 @@ import numpy as np
 import datetime
 import os
 import traceback
+from metrics import _sharpe_from_returns
 import time
 import sys
 from typing import Optional, Dict, Callable, Any
@@ -516,7 +517,7 @@ def run_optimization(config, status_callback: Optional[Callable[[Any], None]] = 
         
         log("\n=== Final Backtest Results ===")
         log(f"Total Return: {final_portfolio.total_return * 100:.2f}%")
-        log(f"Sharpe Ratio: {final_portfolio.sharpe_ratio:.2f}")
+        log(f"Sharpe Ratio: {_sharpe_from_returns(final_portfolio, final_portfolio.sharpe_ratio):.2f}")
         log(f"Max Drawdown: {final_portfolio.max_drawdown * 100:.2f}%")
         log(f"Win Rate: {final_portfolio.trades.win_rate *100:.2f}%")
         log(f"Average P&L per Trade: {avg_pl_per_trade:.2f}%")

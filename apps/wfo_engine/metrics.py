@@ -194,8 +194,11 @@ def _get_returns(portfolio):
 
         rets = getattr(portfolio, "returns", None)
         if callable(rets):
-            rets = rets()
-        rets = np.asarray(rets, dtype=float).ravel()
+            rets = rets()  # defensive: some VectorBT builds expose returns() as a method
+        rets = np.asarray(rets, dtype=float)
+        if rets.ndim > 1:
+            rets = rets[:, 0]  # first column; never pool columns (they are distinct assets)
+        rets = rets.ravel()
         rets = rets[np.isfinite(rets)]
         return rets if rets.size > 1 else None
     except Exception:
@@ -213,13 +216,14 @@ def _sharpe_from_returns(portfolio, fallback):
     """
     try:
         rets = _get_returns(portfolio)
-        if rets is not None:
-            std = rets.std()
-            if std > 0:
-                return float(rets.mean() / std)
+        if rets is None:
+            return fallback
+        std = rets.std(ddof=1)  # sample std (ddof=1), the usual Sharpe convention
+        if std > 0:
+            return float(rets.mean() / std)
+        return float("nan")  # zero variance: undefined, do NOT leak the annualised fallback
     except Exception:
-        pass
-    return fallback
+        return fallback
 
 
 def _sortino_from_returns(portfolio, fallback):
@@ -232,14 +236,15 @@ def _sortino_from_returns(portfolio, fallback):
         import numpy as np
 
         rets = _get_returns(portfolio)
-        if rets is not None:
-            downside = np.minimum(rets, 0.0)
-            ds_std = float(np.sqrt(np.mean(downside ** 2)))
-            if ds_std > 0:
-                return float(rets.mean() / ds_std)
+        if rets is None:
+            return fallback
+        downside = np.minimum(rets, 0.0)
+        ds_std = float(np.sqrt(np.mean(downside ** 2)))
+        if ds_std > 0:
+            return float(rets.mean() / ds_std)
+        return float("nan")  # no downside: undefined, avoid the annualised fallback
     except Exception:
-        pass
-    return fallback
+        return fallback
 
 
 def _calmar_from_returns(portfolio, fallback):
@@ -248,16 +253,17 @@ def _calmar_from_returns(portfolio, fallback):
         import numpy as np
 
         rets = _get_returns(portfolio)
-        if rets is not None:
-            cum = np.cumprod(1.0 + rets)
-            peak = np.maximum.accumulate(cum)
-            max_dd = float(np.max((peak - cum) / peak))
-            total_ret = float(cum[-1] - 1.0)
-            if max_dd > 0:
-                return float(total_ret / max_dd)
+        if rets is None:
+            return fallback
+        cum = np.cumprod(1.0 + rets)
+        peak = np.maximum.accumulate(cum)
+        max_dd = float(np.max((peak - cum) / peak))
+        total_ret = float(cum[-1] - 1.0)
+        if max_dd > 0:
+            return float(total_ret / max_dd)
+        return float("nan")  # no drawdown: undefined, avoid the annualised fallback
     except Exception:
-        pass
-    return fallback
+        return fallback
 
 
 def portfolio_metrics(portfolio, window_id, n_ref: int = 50):

@@ -24,7 +24,7 @@ class FakePf:
 class TestSharpeFromReturns:
     def test_raw_mean_over_std(self):
         rets = np.array([0.01, -0.02, 0.03, 0.0, 0.02])
-        expected = rets.mean() / rets.std()
+        expected = rets.mean() / rets.std(ddof=1)
         got = _sharpe_from_returns(FakePf(rets), 999.0)
         assert got == pytest.approx(expected)
         assert got < 5  # non-annualised: must NOT be the ~2500x inflated figure
@@ -32,7 +32,7 @@ class TestSharpeFromReturns:
     def test_nan_returns_are_filtered(self):
         raw = np.array([0.01, -0.02, 0.03])
         rets = np.concatenate([[np.nan], raw])
-        expected = raw.mean() / raw.std()
+        expected = raw.mean() / raw.std(ddof=1)
         assert _sharpe_from_returns(FakePf(rets), 999.0) == pytest.approx(expected)
 
     def test_returns_exposed_as_method(self):
@@ -44,7 +44,7 @@ class TestSharpeFromReturns:
             def returns(self):
                 return raw
 
-        assert _sharpe_from_returns(MethodPf(), 999.0) == pytest.approx(raw.mean() / raw.std())
+        assert _sharpe_from_returns(MethodPf(), 999.0) == pytest.approx(raw.mean() / raw.std(ddof=1))
 
     def test_fallback_without_returns(self):
         class Mock:
@@ -54,7 +54,14 @@ class TestSharpeFromReturns:
 
     def test_fallback_when_zero_std(self):
         rets = np.array([0.5, 0.5, 0.5, 0.5])
-        assert _sharpe_from_returns(FakePf(rets), 999.0) == 999.0
+        # zero variance -> NaN (never leak the annualised fallback into a raw column)
+        assert np.isnan(_sharpe_from_returns(FakePf(rets), 999.0))
+
+    def test_multicolumn_returns_not_pooled(self):
+        col0 = np.array([0.01, -0.02, 0.03, 0.02])
+        col1 = np.array([0.5, 0.5, -0.5, 0.5])  # distinct asset, must not mix
+        rets = np.column_stack([col0, col1])
+        assert _sharpe_from_returns(FakePf(rets), 999.0) == pytest.approx(col0.mean() / col0.std(ddof=1))
 
 
 class TestSortinoCalmar:

@@ -1187,7 +1187,8 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True, trade_start=
             if name == 'max_drawdown':
                 return port.max_drawdown * 100 * -1
             elif name == 'sharpe_ratio':
-                return port.sharpe_ratio
+                from metrics import _sharpe_from_returns
+                return _sharpe_from_returns(port, port.sharpe_ratio)
             elif name == 'total_return':
                 return port.total_return * 100
             elif name == 'avg_gain_per_trade':

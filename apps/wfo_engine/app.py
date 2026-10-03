@@ -324,6 +324,7 @@ from metrics import (
     build_window_info_dataframe as _build_window_info_dataframe,
     calc_pqs as _calc_pqs,
     calc_avg_pl as _calc_avg_pl,
+    _sharpe_from_returns,
 )
 
 # NOTE: `_to_jsonable` and `_safe_float_scalar` now come from
@@ -4440,7 +4441,7 @@ if _sess_viz.final_portfolio is not None and _sess_viz.wfo_results is None:
 
     _c1, _c2, _c3, _c4, _c5 = st.columns(5)
     _c1.metric("Total Return",  f"{_sw_pf.total_return * 100:.2f}%")
-    _c2.metric("Sharpe Ratio",  f"{_sw_pf.sharpe_ratio:.3f}")
+    _c2.metric("Sharpe Ratio",  f"{_sharpe_from_returns(_sw_pf, _sw_pf.sharpe_ratio):.3f}")
     _c3.metric("Mean P&L %",    f"{_calc_avg_pl(_sw_pf):+.4f}%")
     _c4.metric("Max Drawdown",  f"{_sw_pf.max_drawdown * 100:.2f}%")
     _c5.metric("Trades",        str(len(_sw_pf.trades)))
@@ -5979,7 +5980,7 @@ if _sess_viz.wfo_results is not None:
             # Metrics
             m1, m2, m3, m4, m5, m6 = st.columns(6)
             m1.metric("Total Return", f"{pf.total_return * 100:.2f}%")
-            m2.metric("Sharpe Ratio", f"{pf.sharpe_ratio:.2f}")
+            m2.metric("Sharpe Ratio", f"{_sharpe_from_returns(pf, pf.sharpe_ratio):.2f}")
             m3.metric("Mean P&L %",   f"{_calc_avg_pl(pf):+.4f}%")
             m4.metric("Max Drawdown", f"{pf.max_drawdown * 100:.2f}%")
             m5.metric("Win Rate",     f"{pf.trades.win_rate * 100:.2f}%")

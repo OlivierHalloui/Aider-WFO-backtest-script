@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-03
+
+- **Changement de sémantique — ratios par barre, non annualisés** : les colonnes `sharpe`, `sortino_ratio` et `calmar_ratio` des résultats WFO sont désormais calculées **sans annualisation** (mean / écart-type `ddof=1` des rendements de la fenêtre, déviation downside, return / max drawdown). Avant, VectorBT annualisait avec la fréquence de 5 s, ce qui gonflait artificiellement les valeurs (Sharpe affiché à 83–110 au lieu de ~0,05). ⚠️ **Les CSV produits avant cette date contiennent des valeurs annualisées** et ne sont pas comparables aux nouveaux : régénérer les résultats pour les relire avec la nouvelle échelle.
+
 Toutes les évolutions notables de l'application WFO sont documentées ici.
 
 ## 2026-06-13

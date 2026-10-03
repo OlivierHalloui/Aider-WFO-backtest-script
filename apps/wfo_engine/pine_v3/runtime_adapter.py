@@ -927,7 +927,8 @@ def run_strategy_test_backtest(
         if name == "max_drawdown":
             return port.max_drawdown * 100 * -1
         if name == "sharpe_ratio":
-            return port.sharpe_ratio
+            from metrics import _sharpe_from_returns
+            return _sharpe_from_returns(port, port.sharpe_ratio)
         if name == "total_return":
             return port.total_return * 100
         if name == "avg_gain_per_trade":
@@ -2114,7 +2115,8 @@ def _score_portfolio(portfolio, params: dict[str, Any]):
         if name == "max_drawdown":
             return port.max_drawdown * 100 * -1
         if name == "sharpe_ratio":
-            return port.sharpe_ratio
+            from metrics import _sharpe_from_returns
+            return _sharpe_from_returns(port, port.sharpe_ratio)
         if name == "total_return":
             return port.total_return * 100
         if name == "avg_gain_per_trade":
