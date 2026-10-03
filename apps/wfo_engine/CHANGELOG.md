@@ -4,6 +4,12 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 
 ## Non publié
 
+### Changement de sémantique — ratios par barre, non annualisés
+
+Les colonnes `sharpe`, `sortino_ratio` et `calmar_ratio` des résultats WFO sont désormais calculées **sans annualisation** (mean / écart-type `ddof=1` des rendements de la fenêtre, déviation downside, return / max drawdown). Avant, VectorBT annualisait avec la fréquence de 5 s, ce qui gonflait artificiellement les valeurs (Sharpe affiché à 83–110 au lieu de ~0,05).
+
+⚠️ **Les CSV produits avant cette date contiennent des valeurs annualisées** et ne sont pas comparables aux nouveaux : régénérer les résultats pour les relire avec la nouvelle échelle.
+
 - **Warm-up Pine généré** : les nouveaux modules transmettent `trade_start` au runtime ; les modules déjà persistés sont adaptés au chargement, sans invalider leur configuration ni leur spécification.
 - **Warm-up stagewise** : le CSV est lu avec le préfixe causal calculé depuis les plages de paramètres ; le moteur reçoit `selected_start` pour borner fenêtres et métriques à la période choisie (UI et CLI).
 
