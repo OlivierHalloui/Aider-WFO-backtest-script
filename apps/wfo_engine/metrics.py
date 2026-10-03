@@ -194,7 +194,10 @@ def _sharpe_from_returns(portfolio, fallback):
     try:
         import numpy as np
 
-        rets = np.asarray(getattr(portfolio, "returns", None), dtype=float).ravel()
+        rets = getattr(portfolio, "returns", None)
+        if callable(rets):
+            rets = rets()  # VectorBT exposes returns() as a method (see export_panel)
+        rets = np.asarray(rets, dtype=float).ravel()
         rets = rets[np.isfinite(rets)]  # drop leading/interior NaN bars
         if rets.size > 1:
             std = rets.std()
