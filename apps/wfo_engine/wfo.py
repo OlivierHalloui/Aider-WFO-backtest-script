@@ -171,8 +171,8 @@ def optimize_parameters(
              raise ValueError(f"param_grid['{key}'] must be a list/tuple.")
     if not isinstance(in_sample_df, pd.DataFrame) or in_sample_df.empty:
         raise ValueError("in_sample_df must be a non-empty pandas DataFrame.")
-    if not hasattr(settings, 'optimization_method') or settings.optimization_method.lower() not in ['grid', 'bayesian', 'optuna']:
-        raise ValueError("settings.optimization_method must be 'grid', 'bayesian', or 'optuna'.")
+    if not hasattr(settings, 'optimization_method') or settings.optimization_method.lower() not in ['grid', 'bayesian', 'optuna', 'turbo', 'bads']:
+        raise ValueError("settings.optimization_method must be 'grid', 'bayesian', 'optuna', 'turbo', or 'bads'.")
 
     data_signature = (
         in_sample_df.index[0] if len(in_sample_df) > 0 else None,
@@ -485,8 +485,65 @@ def optimize_parameters(
         sorted_results = results_df.sort_values('combined_score', ascending=False)
         evaluation_count = len(study.trials)
 
+    elif method in ("turbo", "bads"):
+        # Trust-Region BO (TuRBO) and Bayesian Adaptive Direct Search (BADS):
+        # surrogate-guided optimisers for a limited evaluation budget over a
+        # moderate number of numeric dimensions.  Both maximize evaluate_params
+        # and return every evaluated config (see advanced_optimizers.py).
+        from advanced_optimizers import bads_optimize, turbo_optimize
+
+        logger.info("Using %s optimization...", method.upper())
+        total_combinations = int(np.prod([len(v) for v in tunable_grid.values()])) if tunable_grid else 1
+        max_trials = getattr(settings, 'max_trials', 200)
+        n_evals = max(1, min(max_trials, total_combinations))
+
+        int_params = {
+            'timeperiod', 'Nb_bars_above', 'fenetre_lowest', 'longueur_mediane',
+            'nb_bars_under_bbw_mini', 'nb_bars_entre_bb', 'user_exit_sma_length',
+            'macd_fast_length', 'macd_slow_length', 'macd_signal_length',
+            'nb_bars_left_pivot', 'nb_bars_right_pivot', 'nombre_periodes_reglin',
+            'i_bars_back',
+        }
+
+        def _typed_eval(p):
+            # Mirror the grid/bayesian typing: ints cast to int, toggles kept as
+            # bool so they show as True/False (not 1.0/0.0) in results tables.
+            for pn in int_params:
+                if pn in p:
+                    try:
+                        p[pn] = int(p[pn])
+                    except (TypeError, ValueError):
+                        pass
+            for pn, vals in tunable_grid.items():
+                if pn in p and vals and all(isinstance(v, (bool, np.bool_)) for v in vals):
+                    p[pn] = bool(p[pn])
+            return evaluate_params(p)
+
+        seed = getattr(settings, 'random_state', 42)
+        if method == "turbo":
+            rows = turbo_optimize(
+                _typed_eval, tunable_grid, fixed_params, metrics_info,
+                n_evals=n_evals, n_init=min(12, n_evals),
+                rng=np.random.default_rng(seed),
+            )
+        else:
+            rows = bads_optimize(
+                _typed_eval, tunable_grid, fixed_params, metrics_info,
+                n_evals=n_evals, n_init=min(8, n_evals),
+                rng=np.random.default_rng(seed),
+            )
+
+        if not rows:
+            raise ValueError(f"{method} optimization produced no results. Check bounds or budget.")
+        results_df = pd.DataFrame(rows)
+        sorted_results = results_df.sort_values('combined_score', ascending=False)
+        evaluation_count = len(rows)
+
     else:
-        raise ValueError(f"Unsupported optimization method: {method}. Choose 'grid', 'bayesian', or 'optuna'.")
+        raise ValueError(
+            f"Unsupported optimization method: {method}. "
+            "Choose 'grid', 'bayesian', 'optuna', 'turbo', or 'bads'."
+        )
 
     return sorted_results, evaluation_count
 
