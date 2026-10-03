@@ -8,6 +8,7 @@ import time
 from datetime import timedelta
 from strategy import run_backtest
 from config import WFOSettings
+from metrics import _sharpe_from_returns
 from skopt import gp_minimize
 from skopt.space import Integer, Real
 import optuna
@@ -266,7 +267,7 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
         in_sample_metrics = {
             'window': i + 1,
             'return': in_sample_portfolio.total_return * 100,
-            'sharpe': in_sample_portfolio.sharpe_ratio,
+            'sharpe': _sharpe_from_returns(in_sample_portfolio, in_sample_portfolio.sharpe_ratio),
             'max_drawdown': in_sample_portfolio.max_drawdown * 100,
             'win_rate': in_sample_portfolio.trades.win_rate,
             'calmar_ratio': in_sample_portfolio.calmar_ratio if in_sample_portfolio.max_drawdown > 0 else np.nan,
@@ -291,7 +292,7 @@ def walk_forward_optimization(df, param_grid=None, metrics_info=None, timeframe=
             out_sample_metrics = {
                 'window': i + 1,
                 'return': out_sample_portfolio.total_return * 100,
-                'sharpe': out_sample_portfolio.sharpe_ratio,
+                'sharpe': _sharpe_from_returns(out_sample_portfolio, out_sample_portfolio.sharpe_ratio),
                 'max_drawdown': out_sample_portfolio.max_drawdown * 100,
                 'win_rate': out_sample_portfolio.trades.win_rate,  #* 100,
                 'calmar_ratio': out_sample_portfolio.calmar_ratio if out_sample_portfolio.max_drawdown > 0 else np.nan,

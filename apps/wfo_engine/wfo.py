@@ -14,7 +14,7 @@ from scipy.spatial import KDTree
 from config import WFOSettings
 from strategy_adapters import resolve_strategy_adapter
 from strategy import clear_window_indicator_cache
-from metrics import trade_stat, calc_avg_pl, calc_pqs, safe_float, _get_trades_stats
+from metrics import trade_stat, calc_avg_pl, calc_pqs, safe_float, _get_trades_stats, _sharpe_from_returns
 from neural_search import NeuralSearchGuide, _match_prev_value_to_candidates, _build_prev_best_grid, _safe_float
 import optuna
 
@@ -1047,7 +1047,7 @@ def walk_forward_optimization(
         in_sample_metrics = {
             'window': i + 1,
             'return': in_sample_portfolio.total_return * 100,
-            'sharpe': in_sample_portfolio.sharpe_ratio,
+            'sharpe': _sharpe_from_returns(in_sample_portfolio, in_sample_portfolio.sharpe_ratio),
             'max_drawdown': in_sample_portfolio.max_drawdown * 100,
             'win_rate': in_sample_portfolio.trades.win_rate,
             'avg_gain_per_trade': trade_stat(in_sample_portfolio.trades, 'avg_winning_trade', _stats_cache=_is_stats),
@@ -1071,7 +1071,7 @@ def walk_forward_optimization(
             out_sample_metrics = {
                 'window': i + 1,
                 'return': out_sample_portfolio.total_return * 100,
-                'sharpe': out_sample_portfolio.sharpe_ratio,
+                'sharpe': _sharpe_from_returns(out_sample_portfolio, out_sample_portfolio.sharpe_ratio),
                 'max_drawdown': out_sample_portfolio.max_drawdown * 100,
                 'win_rate': out_sample_portfolio.trades.win_rate,  #* 100,
                 'avg_gain_per_trade': trade_stat(out_sample_portfolio.trades, 'avg_winning_trade', _stats_cache=_oos_stats),
