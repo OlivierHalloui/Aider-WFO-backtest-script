@@ -15,3 +15,12 @@ data/
 Data/
 reports/
 fichiers_configuration_WFO/
+
+# Artefacts WFO (runs, rapports PDF, logs d'erreur stagewise)
+WFO_Report_*.pdf
+WFO_Results/
+error_log_stagewise_*.json
+
+# Tooling / CI
+.claude/
+.worktrees/
