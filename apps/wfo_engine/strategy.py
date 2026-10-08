@@ -1198,26 +1198,9 @@ def run_backtest(df, params, timeframe='5s', return_portfolio=True, trade_start=
             elif name == 'win_rate':
                 return port.trades.win_rate
             elif name == 'avg_pl_per_trade':
-                # Custom calculation
-                # For vectorized portfolio, this returns a Series
-                total_ret = port.total_return * 100
-                n_trades = port.trades.count()
-                # Handle division by zero or no trades safely
-                # n_trades may be scalar or a pandas Series (vectorized run).
-                if hasattr(n_trades, 'replace'):
-                    safe_trades = n_trades.replace(0, np.nan)
-                    avg_pl = total_ret / safe_trades
-                    return avg_pl.replace([np.inf, -np.inf], 0).fillna(0)
-
-                try:
-                    if float(n_trades) == 0.0:
-                        return 0.0
-                    avg_pl = total_ret / n_trades
-                    if np.isinf(avg_pl) or np.isnan(avg_pl):
-                        return 0.0
-                    return avg_pl
-                except Exception:
-                    return 0.0
+                # Mean per-trade P&L in % — delegated to the single source of truth.
+                from metrics import calc_avg_pl
+                return calc_avg_pl(port)
             elif name == 'pqs':
                 _n_ref = int(_scalar_param(params.get('pqs_n_ref', 50), 50))
                 return calc_pqs(port, n_ref=_n_ref)

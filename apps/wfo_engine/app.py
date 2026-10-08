@@ -5960,7 +5960,7 @@ if _sess_viz.wfo_results is not None:
                     f"Return `{best_is_metrics['return']:.2f}%`, "
                     f"Sharpe `{best_is_metrics['sharpe']:.2f}`, "
                     f"Max DD `{best_is_metrics['max_drawdown']:.2f}%`, "
-                    f"Win Rate `{best_is_metrics['win_rate']:.2f}%`, "
+                    f"Win Rate `{best_is_metrics['win_rate'] * 100:.2f}%`, "
                     f"Trades `{best_is_metrics['n_trades']}`"
                     f"{_is_pqs_str}"
                 )
@@ -5972,7 +5972,7 @@ if _sess_viz.wfo_results is not None:
                     f"Return `{best_oos_metrics['return']:.2f}%`, "
                     f"Sharpe `{best_oos_metrics['sharpe']:.2f}`, "
                     f"Max DD `{best_oos_metrics['max_drawdown']:.2f}%`, "
-                    f"Win Rate `{best_oos_metrics['win_rate']:.2f}%`, "
+                    f"Win Rate `{best_oos_metrics['win_rate'] * 100:.2f}%`, "
                     f"Trades `{best_oos_metrics['n_trades']}`"
                     f"{_oos_pqs_str}"
                 )

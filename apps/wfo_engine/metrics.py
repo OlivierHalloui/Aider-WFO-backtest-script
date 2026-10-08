@@ -77,7 +77,11 @@ def _get_trades_stats(trades) -> dict:
     ``trade_stat()`` call, avoiding repeated dict rebuilds.
     """
     try:
-        return trades.stats() or {}
+        stats = trades.stats()
+        # NB: never use `stats or {}` — pandas raises on the truth value of a
+        # Series, and the exception silently collapsed this to an empty dict,
+        # making every statistic lookup fall back to its default (e.g. 0.0).
+        return {} if stats is None else stats
     except Exception:
         return {}
 
@@ -104,6 +108,9 @@ def trade_stat(trades, attr_name, default=0.0, _stats_cache=None):
         attr_name.replace("_", " "),
         attr_name.replace("_", " ").title(),
         attr_name.replace("_", " ").capitalize(),
+        # VectorBT marks percentage statistics with a [%] suffix
+        f"{attr_name.replace('_', ' ').title()} [%]",
+        f"{attr_name.replace('_', ' ').capitalize()} [%]",
     ]
     for key in keys:
         try:
@@ -115,31 +122,46 @@ def trade_stat(trades, attr_name, default=0.0, _stats_cache=None):
     return default
 
 
-def calc_avg_pl(portfolio):
-    """Return average P/L per trade for scalar or vectorized portfolios."""
+def _trade_returns(trades):
+    """Per-trade returns of *trades* as a clean numeric array (1-D or 2-D)."""
+    import numpy as np
+
+    rets = getattr(trades, "returns", None)
+    if rets is None:
+        return None
+    if callable(rets):
+        rets = rets()
+    rets = getattr(rets, "values", rets)
     try:
-        total_ret = portfolio.total_return * 100
-        n_trades = portfolio.trades.count()
-        if n_trades is None:
-            return 0.0
+        rets = np.asarray(rets, dtype=float)
+    except Exception:
+        return None
+    return rets if rets.size else None
 
-        # Vectorized (Series) path
-        if hasattr(n_trades, "replace"):
-            safe_trades = n_trades.replace(0, np.nan)
-            avg_pl = total_ret / safe_trades
-            avg_pl = avg_pl.replace([np.inf, -np.inf], 0).fillna(0)
-            return avg_pl
 
-        # Scalar path
-        if float(n_trades) == 0.0:
+def calc_avg_pl(portfolio):
+    """Mean P&L per trade **in %** = mean of the per-trade returns.
+
+    This is the average of each trade's percentage return (``trades.returns``),
+    NOT ``total_return / n_trades``: the total return is compounded across
+    trades, so dividing it by the trade count does not give a per-trade mean
+    and silently mixes the % return with the raw P&L scale.
+    """
+    try:
+        rets = _trade_returns(portfolio.trades)
+        if rets is None:
             return 0.0
-        avg_pl = total_ret / n_trades
-        if hasattr(avg_pl, "replace"):
-            avg_pl = avg_pl.replace([np.inf, -np.inf], 0).fillna(0)
-        else:
-            if np.isinf(avg_pl) or np.isnan(avg_pl):
-                avg_pl = 0.0
-        return avg_pl
+        if rets.ndim > 1:
+            import pandas as pd
+
+            avg = np.nanmean(rets, axis=0) * 100.0
+            if avg.size == 1:
+                return float(avg[0])
+            return pd.Series(avg)
+        rets = rets[np.isfinite(rets)]
+        if rets.size == 0:
+            return 0.0
+        return float(rets.mean() * 100.0)
     except Exception:
         return 0.0
 

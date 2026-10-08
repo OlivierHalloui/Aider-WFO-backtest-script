@@ -13,6 +13,7 @@ except Exception:
     HAS_VBT = False
 
 from metrics import safe_float, to_scalar_score, python_scalar, trade_stat, calc_avg_pl, portfolio_metrics
+import metrics
 
 
 # ---------------------------------------------------------------------------
@@ -192,50 +193,86 @@ class TestTradeStat:
 # ---------------------------------------------------------------------------
 
 class TestCalcAvgPl:
-    def test_scalar_path(self):
+    def test_scalar_mean_of_trade_returns(self):
+        """Mean P&L % = mean of per-trade returns, not total_return / n_trades."""
         portfolio = MagicMock()
-        portfolio.total_return = 0.10  # 10%
         trades_mock = MagicMock()
-        trades_mock.count.return_value = 5
+        trades_mock.returns = np.array([0.02, -0.01, 0.03])
         portfolio.trades = trades_mock
         result = calc_avg_pl(portfolio)
-        # 0.10 * 100 / 5 = 2.0
-        assert result == pytest.approx(2.0)
+        assert result == pytest.approx((0.02 - 0.01 + 0.03) / 3 * 100)
+
+    def test_not_total_return_over_count(self):
+        """Guard: compounded total return must NOT be divided by trade count."""
+        portfolio = MagicMock()
+        portfolio.total_return = 0.10  # would give 2.0 with the old formula
+        trades_mock = MagicMock()
+        trades_mock.count.return_value = 5
+        trades_mock.returns = np.array([0.02, -0.01, 0.03])
+        portfolio.trades = trades_mock
+        assert calc_avg_pl(portfolio) == pytest.approx((0.02 - 0.01 + 0.03) / 3 * 100)
+
+    def test_nan_trade_returns_are_filtered(self):
+        portfolio = MagicMock()
+        trades_mock = MagicMock()
+        trades_mock.returns = np.array([0.02, np.nan, 0.04])
+        portfolio.trades = trades_mock
+        assert calc_avg_pl(portfolio) == pytest.approx((0.02 + 0.04) / 2 * 100)
 
     def test_zero_trades(self):
         portfolio = MagicMock()
-        portfolio.total_return = 0.05
         trades_mock = MagicMock()
-        trades_mock.count.return_value = 0
+        trades_mock.returns = np.array([])
         portfolio.trades = trades_mock
         assert calc_avg_pl(portfolio) == 0.0
 
-    def test_none_trades_count(self):
+    def test_no_returns_attribute(self):
         portfolio = MagicMock()
-        portfolio.total_return = 0.05
-        trades_mock = MagicMock()
-        trades_mock.count.return_value = None
+        trades_mock = MagicMock(spec=[])  # no .returns at all
         portfolio.trades = trades_mock
         assert calc_avg_pl(portfolio) == 0.0
 
-    def test_vectorized_series_path(self):
+    def test_vectorized_2d_path(self):
         portfolio = MagicMock()
-        portfolio.total_return = 0.10
         trades_mock = MagicMock()
-        n_trades = pd.Series([5, 0, 10])
-        trades_mock.count.return_value = n_trades
+        trades_mock.returns = np.array([[0.02, 0.04], [-0.01, 0.00], [0.03, 0.02]])
         portfolio.trades = trades_mock
         result = calc_avg_pl(portfolio)
-        # total_ret = 10.0; safe_trades = [5, NaN, 10]; avg_pl = [2.0, NaN, 1.0] -> fillna(0) -> [2.0, 0.0, 1.0]
-        expected = pd.Series([2.0, 0.0, 1.0])
-        pd.testing.assert_series_equal(result, expected)
+        expected = pd.Series(np.array([[0.02, 0.04], [-0.01, 0.00], [0.03, 0.02]]).mean(axis=0) * 100)
+        pd.testing.assert_series_equal(pd.Series(result), expected)
 
     def test_exception_returns_zero(self):
         portfolio = MagicMock()
-        portfolio.total_return = PropertyMock(side_effect=RuntimeError("broken"))
-        # Accessing total_return raises
-        type(portfolio).total_return = PropertyMock(side_effect=RuntimeError("broken"))
+        type(portfolio).trades = PropertyMock(side_effect=RuntimeError("broken"))
         assert calc_avg_pl(portfolio) == 0.0
+
+
+class TestTradeStatKeys:
+    """VectorBT marks percentage stats with a [%] suffix — trade_stat must find them."""
+
+    def test_percent_suffix_key_found(self):
+        stats = {"Avg Winning Trade [%]": 6.93, "Avg Losing Trade [%]": -3.08}
+        trades = MagicMock(spec=[])  # no auto-created attributes
+        got = metrics.trade_stat(trades, "avg_winning_trade", default=0.0, _stats_cache=stats)
+        assert got == pytest.approx(6.93)
+
+    def test_losing_trade_key_found(self):
+        stats = {"Avg Losing Trade [%]": -3.08}
+        trades = MagicMock(spec=[])
+        got = metrics.trade_stat(trades, "avg_losing_trade", default=0.0, _stats_cache=stats)
+        assert got == pytest.approx(-3.08)
+
+    def test_missing_key_returns_default(self):
+        trades = MagicMock(spec=[])
+        got = metrics.trade_stat(trades, "nonexistent_stat", default=0.0, _stats_cache={})
+        assert got == 0.0
+
+    def test_get_trades_stats_keeps_series(self):
+        """A pandas Series must survive _get_trades_stats (truth-test bug)."""
+        trades = MagicMock(spec=["stats"])
+        trades.stats.return_value = pd.Series({"a": 1.0})
+        stats = metrics._get_trades_stats(trades)
+        assert stats.get("a") == 1.0
 
 
 # ---------------------------------------------------------------------------
