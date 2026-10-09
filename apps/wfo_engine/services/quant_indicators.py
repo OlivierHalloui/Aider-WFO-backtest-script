@@ -896,6 +896,26 @@ def check_run_integrity(
                 "n_missing": n_expected_sides - n_present,
             }
 
+    # Upstream fingerprint reconciliation (§5.0), emitted by
+    # ``stagewise_optimizer.build_stagewise_wfo_results``.  A detected anomaly
+    # (internally inconsistent source fingerprint, or a sha256_json failure) is a
+    # real defect and must BLOCK the run — it must never be downgraded to the
+    # merely non-verifiable legacy case.
+    recon = wfo_results.get("params_sha_reconciliation") if isinstance(wfo_results, Mapping) else None
+    if isinstance(recon, Mapping) and recon.get("ok") is False:
+        anomalies = recon.get("anomalies") or []
+        codes = sorted({str(a.get("code")) for a in anomalies if isinstance(a, Mapping)})
+        _fail(
+            "params_sha_reconciliation",
+            f"réconciliation des empreintes de paramètres en échec ({len(anomalies)} anomalie(s) : {', '.join(codes)})",
+        )
+        checks["params_sha_reconciliation"] = {
+            "ok": False, "blocking": True,
+            "raison": f"empreintes de paramètres non réconciliables ({len(anomalies)} anomalie(s))",
+            "verified": "anomaly", "formal_verification": False,
+            "codes": codes, "anomalies": list(anomalies),
+        }
+
     ok = not causes
     return {
         "status": "ok" if ok else "non_evaluable",

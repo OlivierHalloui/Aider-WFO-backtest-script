@@ -27,7 +27,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -36,6 +36,7 @@ import pandas as pd
 from config import WFOSettings, DEFAULT_PARAM_GRID, compute_warmup_bars
 from data_loading import _read_csv_period
 from strategy_adapters import resolve_strategy_adapter
+from domain.serialization import sha256_json
 from wfo import walk_forward_optimization
 
 # ── logging ──────────────────────────────────────────────────────────────────
@@ -639,17 +640,110 @@ def build_stagewise_wfo_results(final_report: dict) -> dict:
     # Rebuild per-window complete params = fixed(all prior stages) + last-stage window params
     window_results = []
     best_params_list = []
-    for wr in lswr.get("window_results", []):
-        partial = wr.get("best_params", {})
+    # Fingerprint of the COMPLETE params actually used.  The ``params_sha`` left
+    # by walk_forward_optimization covers only the stage-searched subset: the
+    # merged ``best_params`` below has a different hash, so keeping the
+    # stage-level fingerprint would make §5.0's ``params_matched`` check reject
+    # the run.  Recompute it on the merged set and propagate it to all three
+    # places the check reads (window row, IS row, OOS row).
+    #
+    # The source fingerprint is VERIFIED against the stage params before being
+    # re-pointed.  A source is only ever re-pointed when it is present AND
+    # matches its own stage params; in every other case the source is left
+    # untouched AND the anomaly is recorded below so the run is blocked.
+    #
+    #   - source present and == sha256_json(partial) -> re-pointed to the
+    #     complete set (the only case that may end up certified)
+    #   - source absent (legacy run)                 -> left absent: an unverified
+    #     run must NOT be certified by reconstruction
+    #   - source present but != sha256_json(partial) -> left verbatim AND flagged:
+    #     an internally inconsistent row must block, never be reconciled silently
+    #   - sha256_json returns None on either side    -> sources kept verbatim AND
+    #     flagged: a hash failure must block, never masquerade as a legacy run
+    sha_by_window: dict[int, tuple] = {}   # wid -> (stage_sha, complete_sha)
+    anomalies: list = []
+
+    def _flag(wid, emplacement, code, raison, **extra):
+        anomalies.append({
+            "window": wid, "emplacement": emplacement, "code": code, "raison": raison, **extra,
+        })
+
+    for idx, wr in enumerate(lswr.get("window_results", [])):
+        partial = wr.get("best_params") or {}
         complete = {**fixed, **partial}
-        window_results.append({**wr, "best_params": complete})
+        stage_sha = sha256_json(partial)
+        complete_sha = sha256_json(complete)
+        # Same window-id convention as services/quant_indicators._get_window_id:
+        # ``window_info["window"]``, falling back to the 1-based position.
+        info = wr.get("window_info") if isinstance(wr, Mapping) else None
+        raw_id = (info or {}).get("window") if isinstance(info, Mapping) else None
+        if raw_id is None:
+            raw_id = wr.get("window")
+        try:
+            wid = int(raw_id) if raw_id is not None else idx + 1
+        except (TypeError, ValueError):
+            wid = idx + 1
+        sha_by_window[wid] = (stage_sha, complete_sha)
+
+        source_fp = wr.get("params_sha")
+        if stage_sha is None or complete_sha is None:
+            _flag(wid, "window_results", "hash_echec",
+                  "sha256_json a échoué — empreinte non calculable, non certifiable")
+        elif source_fp is not None and source_fp != stage_sha:
+            _flag(wid, "window_results", "empreinte_source_incoherente",
+                  "params_sha source ne correspond pas à son propre best_params",
+                  source=source_fp, attendu=stage_sha)
+
+        row_out = {**wr, "best_params": complete}
+        if source_fp is not None and complete_sha is not None and source_fp == stage_sha:
+            row_out["params_sha"] = complete_sha
+        window_results.append(row_out)
         best_params_list.append(complete)
+
+    def _rekey_metrics(rows, emplacement):
+        """Re-point each metric row at the fingerprint of its complete params.
+
+        Only a row whose source fingerprint agrees with its window's stage params
+        is re-pointed.  A missing source is left missing (never certified by
+        reconstruction) and a disagreeing source is kept verbatim and flagged
+        (never laundered).
+        """
+        out = []
+        for row in rows:
+            row = dict(row)
+            raw = row.get("window")
+            try:
+                wid = int(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                wid = None
+            pair = sha_by_window.get(wid) if wid is not None else None
+            if pair is not None:
+                stage_sha, complete_sha = pair
+                source_fp = row.get("params_sha")
+                if stage_sha is None or complete_sha is None:
+                    _flag(wid, emplacement, "hash_echec",
+                          "sha256_json a échoué — empreinte non calculable, non certifiable")
+                elif source_fp is not None and source_fp != stage_sha:
+                    _flag(wid, emplacement, "empreinte_source_incoherente",
+                          "params_sha source ne correspond pas à son propre best_params",
+                          source=source_fp, attendu=stage_sha)
+                if source_fp is not None and complete_sha is not None and source_fp == stage_sha:
+                    row["params_sha"] = complete_sha
+            out.append(row)
+        return out
 
     return {
         "window_results":            window_results,
-        "in_sample_performance":     lswr.get("in_sample_performance", []),
-        "out_of_sample_performance": lswr.get("out_of_sample_performance", []),
+        "in_sample_performance":     _rekey_metrics(lswr.get("in_sample_performance", []), "in_sample_performance"),
+        "out_of_sample_performance": _rekey_metrics(lswr.get("out_of_sample_performance", []), "out_of_sample_performance"),
         "best_params":               best_params_list,
+        # Explicit fingerprint reconciliation (§5.0).  An anomaly here is a
+        # DETECTED defect (internally inconsistent source, or hash failure) and
+        # must block the run — it is not the merely-non-verifiable legacy case.
+        "params_sha_reconciliation": {
+            "ok": not anomalies,
+            "anomalies": anomalies,
+        },
         "settings":                  lswr.get("settings", {}),
         "timing":                    lswr.get("timing", {}),
         # Stagewise-specific metadata (underscore-prefixed to avoid conflicts)

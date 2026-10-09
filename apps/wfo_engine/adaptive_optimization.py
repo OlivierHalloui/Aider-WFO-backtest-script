@@ -23,6 +23,7 @@ from metrics import (
     portfolio_metrics as _portfolio_metrics,
 )
 from strategy_adapters import resolve_strategy_adapter
+from domain.serialization import sha256_json
 
 # Integer params that must not be passed as float64 to Numba kernels.
 # pandas DataFrame round-trips convert int columns to float64 when mixed with
@@ -495,15 +496,18 @@ def adaptive_continuous_optimization(
         trials_df = pd.DataFrame(trials_rows).sort_values("combined_score", ascending=False).reset_index(drop=True)
         best_row = trials_df.iloc[0]
         best_params = _coerce_int_params({k: _python_scalar(best_row[k]) for k in param_grid.keys() if k in best_row})
+        params_sha = sha256_json(best_params)
 
         in_sample_portfolio = strategy_adapter.run_backtest(
             train_df, best_params, timeframe=timeframe, return_portfolio=True
         )
         in_sample_metrics = _portfolio_metrics(in_sample_portfolio, cycle_id)
+        in_sample_metrics["params_sha"] = params_sha
         out_sample_portfolio = strategy_adapter.run_backtest(
             oos_df, best_params, timeframe=timeframe, return_portfolio=True
         )
         out_sample_metrics = _portfolio_metrics(out_sample_portfolio, cycle_id)
+        out_sample_metrics["params_sha"] = params_sha
 
         results["in_sample_performance"].append(in_sample_metrics)
         results["out_of_sample_performance"].append(out_sample_metrics)
@@ -547,6 +551,7 @@ def adaptive_continuous_optimization(
             "optimization_trials": trials_df.to_dict("records"),
             "optimization_trials_count": int(len(trials_df)),
             "best_params": best_params,
+            "params_sha": params_sha,
             "cycle_info": cycle_info,
         }
         results["window_results"].append(window_result)

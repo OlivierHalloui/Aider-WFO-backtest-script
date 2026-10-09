@@ -16,6 +16,7 @@ from strategy_adapters import resolve_strategy_adapter
 from strategy import clear_window_indicator_cache
 from metrics import trade_stat, calc_avg_pl, calc_pqs, safe_float, _get_trades_stats, _sharpe_from_returns, _sortino_from_returns, _calmar_from_returns
 from neural_search import NeuralSearchGuide, _match_prev_value_to_candidates, _build_prev_best_grid, _safe_float
+from domain.serialization import sha256_json
 import optuna
 
 logger = logging.getLogger(__name__)
@@ -1032,6 +1033,11 @@ def walk_forward_optimization(
             errors='ignore'
         ).to_dict()
 
+        # Fingerprint of the selected parameters actually used for this window's
+        # IS and OOS backtests.  Enables the §5.0 « appariées par paramètres
+        # sélectionnés » integrity check without re-reading engine internals.
+        params_sha = sha256_json(best_params)
+
         log(f"Best parameters found: {best_params}")
         log(f"Score: {best_row['combined_score']:.4f}")
         if stable_score is not None:
@@ -1046,6 +1052,7 @@ def walk_forward_optimization(
         _is_stats = _get_trades_stats(in_sample_portfolio.trades)
         in_sample_metrics = {
             'window': i + 1,
+            'params_sha': params_sha,
             'return': in_sample_portfolio.total_return * 100,
             'sharpe': _sharpe_from_returns(in_sample_portfolio, in_sample_portfolio.sharpe_ratio),
             'max_drawdown': in_sample_portfolio.max_drawdown * 100,
@@ -1070,6 +1077,7 @@ def walk_forward_optimization(
             _oos_stats = _get_trades_stats(out_sample_portfolio.trades)
             out_sample_metrics = {
                 'window': i + 1,
+                'params_sha': params_sha,
                 'return': out_sample_portfolio.total_return * 100,
                 'sharpe': _sharpe_from_returns(out_sample_portfolio, out_sample_portfolio.sharpe_ratio),
                 'max_drawdown': out_sample_portfolio.max_drawdown * 100,
@@ -1098,7 +1106,8 @@ def walk_forward_optimization(
             'optimization_trials': optimization_results.to_dict('records'),
             'optimization_trials_count': int(len(optimization_results)),
             'evaluations': int(eval_count),
-            'best_params': best_params
+            'best_params': best_params,
+            'params_sha': params_sha,
         }
 
         window_time = time.time() - window_start_time

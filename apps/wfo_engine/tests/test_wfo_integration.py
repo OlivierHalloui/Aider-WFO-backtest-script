@@ -22,6 +22,7 @@ if HAS_VBT:
     from metrics import portfolio_metrics
     from stagewise_optimizer import PARAM_DEFAULTS
     from strategy_adapters import resolve_strategy_adapter
+    from domain.serialization import sha256_json
 
 
 def generate_mock_data(n=200):
@@ -226,6 +227,16 @@ def test_wfo_out_of_sample_metrics_populated():
     assert len(oos) == 2
     for entry in oos:
         assert "return" in entry or "sharpe" in entry, f"missing metrics in OOS entry: {entry}"
+        assert entry.get("params_sha"), f"missing params_sha fingerprint in OOS entry: {entry}"
+    # in-sample metrics carry the same fingerprint (appariement par paramètres)
+    is_perf = results.get("in_sample_performance", [])
+    assert len(is_perf) == 2
+    for entry in is_perf:
+        assert entry.get("params_sha"), f"missing params_sha fingerprint in IS entry: {entry}"
+    # fingerprint must be consistent with the window-level best_params
+    for wr in results.get("window_results", []):
+        assert wr.get("params_sha"), "missing params_sha at window level"
+        assert wr["params_sha"] == sha256_json(wr["best_params"]), "params_sha != sha256(best_params)"
 
 
 if __name__ == "__main__":
