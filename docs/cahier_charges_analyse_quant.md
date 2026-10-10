@@ -179,7 +179,16 @@ côté de celui du pair ; tout désacord est signalé.
   échoué, ou si le pair est injoignable (sondage
   `/.well-known/agent-card.json`).
 - `st.checkbox("Analyse automatique en fin de run")` (défaut **coché**) : hook
-  de fin de run (`services/run_service.py`). Décachable pour itérer vite.
+  `services/quant_expert.auto_analyze_run()`. Décachable pour itérer vite.
+  **Point de déclenchement** (report explicitement accepté, §10) : les preuves
+  exigées par §5.0 incluent `final_trades`, qui n'existent qu'**après le
+  backtest final** (sélection L2 cross-fenêtres + `final_backtest_panel`).
+  Le hook est donc câblé en fin de run WFO (`services/run_service.py`) mais ne
+  devient **exploitable** qu'une fois le backtest final produit ; le
+  déclenchement effectif automatique est intégré en **T5**, après le backtest
+  final. En attendant, un appel sans `final_trades` renvoie un
+  `non_evaluable` explicite et **aucun appel A2A** (§5.3 cas a) — jamais une
+  analyse sur preuves incomplètes.
 - Pendant l'appel : `st.status` avec temps écoulé (réponse attendue 2–6 min).
 - Labels secondaires : « Relancer l'analyse », « Effacer ».
 
@@ -478,12 +487,21 @@ au minimum (les tests ajoutés n'en modifient aucun).
 | T1 | `services/quant_indicators.py` : manifeste, `check_run_integrity`, Q1–Q8, pré-verdict + tests | — |
 | T2 | `services/quant_expert.py` : client A2A, schéma `quant_analysis.v1` + validateur, cache + tests | — |
 | T3 | `ui/quant_analysis_panel.py` : §5.0 + §5.1 (calculs, pré-verdict) | T1 |
-| T4 | §5.2 : bouton + auto fin de run + rendu structuré | T2, T3 |
-| T5 | Intégration `app.py` (onglet) + export `export_utils.py` | T3, T4 |
+| T4 | §5.2 : bouton + rendu structuré + hook d'auto-analyse (`auto_analyze_run`) | T2, T3 |
+| T5 | Intégration `app.py` (onglet) + **déclenchement de l'auto-analyse après le backtest final** + export `export_utils.py` | T3, T4 |
 | T6 | Doc (`README`, `CHANGELOG`) + prérequis pair | T5 |
 
 Ordre **T1 → T2 → T3 → T4 → T5 → T6**, avec revue `wfo-reviewer` à la fin de
 chaque lot puis push sur accord.
+
+**Report explicitement accepté (revue T4)** — le déclenchement *effectif* de
+l'analyse automatique est déplacé de T4 vers T5 : §5.0 exige `final_trades`
+comme preuve, et ceux-ci ne sont produits qu'**après le backtest final**
+(sélection L2 + `final_backtest_panel`), pas en fin de run WFO. T4 livre le hook
+complet et transmet toutes les preuves disponibles ; sans `final_trades` il
+renvoie un `non_evaluable` explicite **sans appel A2A** (§5.3 cas a). Aucun
+backtest final implicite n'est lancé dans `run_optimization_job` (décision de
+revue).
 
 ---
 

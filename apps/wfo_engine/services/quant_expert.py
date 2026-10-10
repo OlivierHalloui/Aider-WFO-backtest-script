@@ -29,7 +29,7 @@ import re
 import urllib.error
 import urllib.request
 import uuid
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import pandas as pd
 
@@ -427,6 +427,37 @@ def parse_citation_references(text: Any) -> dict:
     return {"references": references, "bare_numbers": bare}
 
 
+def substitute_citations(
+    text: Any,
+    sealed: Mapping[str, Any],
+    render: Optional[Callable[[Any], str]] = None,
+) -> tuple[str, list[str]]:
+    """Replace ``{{ID.champ}}`` with the sealed value (§5.2 source-of-truth rule).
+
+    The application owns the numbers: a citation is rendered as **the value it
+    resolves to**, with the reference kept next to it so the reader can trace
+    it.  An unresolvable reference is left verbatim and reported in the second
+    return value — it is never silently dropped nor invented.
+
+    ``render`` formats a resolved value (defaults to a plain scalar repr) so the
+    caller keeps its own unit/« indisponible » policy.
+    """
+    if not isinstance(text, str):
+        return ("" if text is None else str(text)), []
+    fmt = render or (lambda v: str(v))
+    unresolved: list[str] = []
+
+    def _sub(match: "re.Match[str]") -> str:
+        ref = match.group(1).strip()
+        value = resolve_reference(ref, sealed)
+        if value is None:
+            unresolved.append(ref)
+            return match.group(0)
+        return f"{fmt(value)} «{ref}»"
+
+    return _PLACEHOLDER.sub(_sub, text), unresolved
+
+
 def build_sealed_context(
     diagnostics: Mapping[str, Any],
     *,
@@ -448,7 +479,13 @@ def build_sealed_context(
     }
 
 
-def _descend(base: Any, path: list[str]) -> bool:
+def _resolve(base: Any, path: list[str]) -> tuple[bool, Any]:
+    """Walk ``path`` into ``base``.  ``found`` is False on a dead end.
+
+    A resolved-but-``None`` leaf counts as found here; callers decide what that
+    means (``reference_exists`` treats it as absent, matching its historical
+    behaviour).
+    """
     cur = base
     for key in path:
         if isinstance(cur, dict) and key in cur:
@@ -456,12 +493,66 @@ def _descend(base: Any, path: list[str]) -> bool:
         elif isinstance(cur, list) and key.isdigit() and int(key) < len(cur):
             cur = cur[int(key)]
         else:
-            return False
-    return cur is not None
+            return False, None
+    return True, cur
+
+
+def _descend(base: Any, path: list[str]) -> bool:
+    found, value = _resolve(base, path)
+    return found and value is not None
+
+
+def resolve_reference(ref: str, sealed: Mapping[str, Any]) -> Any:
+    """Resolve ``{{ID.champ}}`` to the sealed value (§5.2).
+
+    Returns the value, or ``None`` when the reference is out of nomenclature,
+    unresolvable, or resolves to ``None``.  Same resolution semantics as
+    :func:`reference_exists` — the two must never drift.
+    """
+    if not isinstance(ref, str) or not _CITATION_REF.match(ref):
+        return None
+    parts = ref.split(".")
+    head = parts[0]
+    try:
+        if head[:1] == "Q" and head[1:].isdigit():
+            return _resolve((sealed.get("indicators") or {}).get(head), parts[1:])[1]
+        if head == "M":
+            return _resolve(sealed.get("manifest"), parts[1:])[1]
+        if head == "P":
+            if parts[1] in (sealed.get("param_grid") or {}):
+                return (sealed.get("param_grid") or {}).get(parts[1])
+            return None
+        if head[:1] == "W" and head[1:].isdigit():
+            n = int(head[1:])
+            windows = sealed.get("windows") or []
+            # W<n> is a 1-based ORDINAL into the (numeric-aware sorted) window
+            # list — never an id match, which would accept W10 over 2 windows.
+            idx = n - 1
+            if 0 <= idx < len(windows):
+                return _resolve(windows[idx], parts[1:])[1]
+            return None
+        if head[:1] == "T" and head[1:].isdigit():
+            idx = int(head[1:]) - 1
+            trials_obj = sealed.get("trials")
+            if not isinstance(trials_obj, pd.DataFrame):
+                return None
+            trials: pd.DataFrame = trials_obj
+            if not (0 <= idx < len(trials)):
+                return None
+            return _resolve(trials.iloc[idx].to_dict(), parts[1:])[1]
+    except Exception:  # noqa: BLE001 — resolution must never raise
+        return None
+    return None
 
 
 def reference_exists(ref: str, sealed: Mapping[str, Any]) -> bool:
-    """Return True iff ``ref`` resolves against the sealed facts (§5.2)."""
+    """Return True iff ``ref`` **exists** against the sealed facts (§5.2).
+
+    Distinct from :func:`resolve_reference`, which returns the *value*: a
+    ``P.<param>`` grid entry present with a ``None`` value still exists as a
+    reference.  Non-regression guard:
+    ``reference_exists("P.foo", {"param_grid": {"foo": None}}) is True``.
+    """
     if not isinstance(ref, str) or not _CITATION_REF.match(ref):
         return False
     parts = ref.split(".")
@@ -484,11 +575,13 @@ def reference_exists(ref: str, sealed: Mapping[str, Any]) -> bool:
             return False
         if head[:1] == "T" and head[1:].isdigit():
             idx = int(head[1:]) - 1
-            trials = sealed.get("trials")
-            if not isinstance(trials, pd.DataFrame) or not (0 <= idx < len(trials)):
+            trials_obj = sealed.get("trials")
+            if not isinstance(trials_obj, pd.DataFrame):
                 return False
-            row = trials.iloc[idx].to_dict()
-            return _descend(row, parts[1:])
+            trials: pd.DataFrame = trials_obj
+            if not (0 <= idx < len(trials)):
+                return False
+            return _descend(trials.iloc[idx].to_dict(), parts[1:])
     except Exception:  # noqa: BLE001 — resolution must never raise
         return False
     return False
@@ -530,6 +623,15 @@ def _validate_evidence_refs(refs: Any) -> list[str]:
         if not isinstance(ref, str) or not _EVIDENCE_REF.match(ref):
             invalid.append(str(ref))
     return invalid
+
+
+def invalid_evidence_refs(refs: Any) -> list[str]:
+    """``evidence_refs`` outside the closed nomenclature (§5.2).
+
+    Public entry point for the UI, which marks the carrying ``findings`` row as
+    ``reference_invalide``.  Same semantics as the validator used internally.
+    """
+    return _validate_evidence_refs(refs)
 
 
 _DATETIME_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}")
@@ -700,6 +802,64 @@ def validate_quant_analysis(
             accord_local = payload.get("verdict") == local_verdict
 
     return {"ok": not errors, "errors": errors, "warnings": warnings, "accord_local": accord_local}
+
+
+# ---------------------------------------------------------------------------
+# End-of-run hook (§5.2 « Analyse automatique en fin de run »)
+# ---------------------------------------------------------------------------
+
+def auto_analyze_run(
+    wfo_results: Optional[Mapping[str, Any]] = None,
+    *,
+    diagnostics: Optional[Mapping[str, Any]] = None,
+    all_trials: Optional[pd.DataFrame] = None,
+    final_trades: Optional[pd.DataFrame] = None,
+    per_bar_returns: Optional[Mapping[str, Any]] = None,
+    oos_trades: Optional[pd.DataFrame] = None,
+    config: Optional[Mapping[str, Any]] = None,
+    param_grid: Optional[Mapping[str, Any]] = None,
+    cache: Optional[dict] = None,
+    enabled: bool = True,
+    runner: Optional[Callable[..., dict]] = None,
+) -> dict:
+    """End-of-run hook shared with ``services/run_service.py`` (§5.2).
+
+    Computes the §5.1 diagnostics when not supplied, then runs the same
+    interpretation path as the button.  ``enabled=False`` (checkbox unticked) is
+    a no-op returning ``{}``, so the toggle really disables the analysis.  The
+    automatic path keeps ``force=False``: the cache applies (§6.1).
+
+    ``config``, ``param_grid`` and ``final_trades`` are **required** for the §5.0
+    integrity check to pass (costs provenance, ``P.<param>`` references and the
+    final-trade evidence).  Missing them yields ``non_evaluable`` — and
+    :func:`call_quant_expert` then issues **no** A2A call (§5.3 case a).
+    """
+    if not enabled:
+        return {}
+    if diagnostics is None:
+        from services.quant_indicators import compute_quant_indicators
+
+        source = wfo_results if isinstance(wfo_results, Mapping) else {}
+        diagnostics = compute_quant_indicators(
+            source,
+            all_trials=all_trials,
+            final_trades=final_trades,
+            per_bar_returns=per_bar_returns,
+            oos_trades=oos_trades,
+            config=config,
+            param_grid=param_grid,
+        )
+
+    call = runner or call_quant_expert
+    out = call(
+        diagnostics,
+        wfo_results=wfo_results,
+        all_trials=all_trials,
+        param_grid=param_grid,
+        cache=cache,
+        force=False,
+    )
+    return out if isinstance(out, dict) else dict(out or {})
 
 
 # ---------------------------------------------------------------------------

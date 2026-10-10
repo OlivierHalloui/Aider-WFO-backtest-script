@@ -9,6 +9,8 @@ import pathlib
 import time
 from typing import Any
 
+import pandas as pd
+
 from adaptive_optimization import adaptive_continuous_optimization
 from config import DEFAULT_STRATEGY_ID, DEFAULT_STRATEGY_MODE, compute_warmup_bars
 from data_loading import load_data, _apply_date_filter
@@ -91,6 +93,32 @@ def _finalize_run_dir(run_dir: pathlib.Path | None, status: str,
         os.replace(tmp, run_dir / "completed.json")
     except Exception as exc:
         logger.error("Run resolution marker write failed: %s", exc, exc_info=True)
+
+
+def _collect_all_trials(results) -> "pd.DataFrame | None":
+    """All optimisation trials across windows (§5.1, ``T<n>`` references)."""
+    rows = []
+    windows = results.get("window_results") if isinstance(results, dict) else None
+    for w in (windows or []):
+        if isinstance(w, dict):
+            for trial in (w.get("optimization_trials") or []):
+                if isinstance(trial, dict):
+                    rows.append(trial)
+    return pd.DataFrame(rows) if rows else None
+
+
+def _collect_final_trades(results):
+    """Final-backtest trades when the run exposed them (§5.0 evidence).
+
+    Returns ``None`` when the run produced none: §5.0 then reports
+    ``final_trades`` unavailable and the analysis stays ``non_evaluable``
+    instead of being run on incomplete evidence.
+    """
+    if isinstance(results, dict):
+        trades = results.get("final_trades")
+        if isinstance(trades, pd.DataFrame):
+            return trades
+    return None
 
 
 def scan_orphaned_runs(runs_root: str | os.PathLike = "reports/runs") -> list[dict]:
@@ -320,6 +348,33 @@ def run_optimization_job(
         if job_state is not None:
             job_state["progress"] = 1.0
             job_state["message"] = "Optimization complete."
+
+        # §5.2 — « Analyse automatique en fin de run » (checkbox, défaut coché).
+        # Never fails the run: the interpretation is an extra, not a gate.  The
+        # §5.0 integrity check needs the config (costs provenance), the param
+        # grid (P.<param> references) and the trials; final trades are forwarded
+        # when the run produced them.  Without them the result is an explicit
+        # ``non_evaluable`` and NO A2A call is issued (§5.3 case a).
+        if config.get("quant_auto_analysis", True):
+            if job_state is not None:
+                job_state["message"] = "Analyse quant en cours…"
+            try:
+                from services.quant_expert import auto_analyze_run
+
+                _quant = auto_analyze_run(
+                    results,
+                    all_trials=_collect_all_trials(results),
+                    final_trades=_collect_final_trades(results),
+                    config=config,
+                    param_grid=params_grid,
+                )
+                if job_state is not None:
+                    job_state["quant_analysis"] = _quant
+            except Exception as exc:  # noqa: BLE001 — l'analyse ne doit pas faire échouer le run
+                logger.warning("Analyse quant automatique échouée : %s", exc)
+                if job_state is not None:
+                    job_state["quant_analysis"] = {"status": "error", "analysis": None,
+                                                   "raison": str(exc)}
 
         # Write error log (even on success — captures 0-trade window warnings)
         _entries = collect_classic_wfo_entries(results)

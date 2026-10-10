@@ -49,8 +49,15 @@ from ui.quant_analysis_panel import (
 class StubContainer:
     def __init__(self):
         self.calls: list[tuple] = []
+        self.click = False   # simule l'état du bouton Streamlit (False = pas de clic)
 
     def __getattr__(self, name):
+        if name == "button":
+            def _button(*args, **kwargs):
+                self.calls.append((name, args, kwargs))
+                return self.click
+            return _button
+
         def _recorder(*args, **kwargs):
             self.calls.append((name, args, kwargs))
             return self
@@ -386,3 +393,499 @@ def test_render_never_displays_zero_for_missing_metric():
     missing = tables[~tables["disponible"].astype(bool)]
     assert (missing["valeur"] == MISSING).all()
     assert not (missing["valeur"] == "0").any()
+
+
+# ===========================================================================
+# T4 — §5.2 « Interprétation » : gate, bouton, rendu structuré
+# ===========================================================================
+
+from services.quant_expert import auto_analyze_run, build_sealed_context, substitute_citations  # noqa: E402
+from ui.quant_analysis_panel import (  # noqa: E402
+    EXPERT_STATUS_KINDS,
+    analysis_matches_run,
+    blocking_findings_table,
+    expand_citations,
+    expert_gate,
+    expert_status_message,
+    finding_badge,
+    findings_table,
+    limitations_list,
+    recommendations_table,
+    render_expert_analysis,
+    render_quant_expert_panel,
+    run_expert_analysis,
+)
+
+
+def _analysis():
+    return {
+        "schema_version": "quant_analysis.v1",
+        "run_id": "run-1",
+        "input_digest": "abc",
+        "indicator_version": "1.0.0",
+        "generated_at": "2026-10-09T00:00:00+00:00",
+        "verdict": "WATCH",
+        "verdict_scope": "exploratoire",
+        "confidence": "moyenne",
+        "verdict_justification": "Érosion de {{Q6.median_erosion_sharpe_pct}} sur {{Q1.budget}} évaluations.",
+        "blocking_findings": [
+            {"id": "B1", "constat": "Sharpe final non recalculable ({{Q6.sharpe_final_recomputed}}).",
+             "evidence_refs": ["Q6"]},
+        ],
+        "limitations": ["Plafond d'évaluation : {{Q1.plafond}}."],
+        "findings": [
+            {"id": "F1", "niveau": "majeur", "constat": "Érosion IS → OOS marquée.",
+             "evidence_refs": ["Q6", "W1"], "interpretation": "Sur-ajustement probable.",
+             "condition": "si plus de 40 %"},
+            {"id": "F2", "niveau": "info", "constat": "Budget correct.", "evidence_refs": ["Q1"],
+             "interpretation": "Rien à signaler.", "condition": None},
+        ],
+        "recommandations": [
+            {"action": "Réduire l'espace de recherche", "priorite": 1,
+             "motif": "Budget {{Q1.budget}} trop large.", "critere_de_validation": "Q1 ≥ 200 essais"},
+        ],
+        "accord_avec_preverdict": False,
+        "preverdict_local": "WATCH",
+    }
+
+
+# --- badges + tables -------------------------------------------------------
+
+def test_finding_badge():
+    assert finding_badge("majeur") == "🔴 majeur"
+    assert finding_badge("mineur") == "🟠 mineur"
+    assert finding_badge("info") == "🔵 info"
+    assert finding_badge(None) == "None"          # jamais deviné
+
+
+def test_findings_table_shape_and_rows():
+    df = findings_table(_analysis())
+    assert list(df.columns) == [
+        "id", "niveau", "constat", "références", "interprétation", "condition", "marqueurs",
+    ]
+    assert len(df) == 2
+    assert df.iloc[0]["niveau"] == "🔴 majeur"
+    assert df.iloc[0]["références"] == "Q6, W1"
+    assert df.iloc[1]["condition"] is None          # condition facultative
+    assert df.iloc[1]["niveau"] == "🔵 info"
+    assert (df["marqueurs"] == "").all()            # fixture propre : aucun marqueur
+
+
+def test_blocking_and_recommendations_and_limitations():
+    b = blocking_findings_table(_analysis())
+    assert list(b.columns) == ["id", "constat", "références"]
+    assert b.iloc[0]["id"] == "B1"
+
+    r = recommendations_table(_analysis())
+    assert list(r.columns) == ["action", "priorité", "motif", "critère de validation"]
+    assert r.iloc[0]["priorité"] == 1
+
+    assert len(limitations_list(_analysis())) == 1
+    assert limitations_list(None) == []
+
+
+# --- §5.2 gate (règles d'activation du bouton) -----------------------------
+
+def test_gate_no_diagnostics():
+    enabled, reason = expert_gate(None, peer_reachable=True)
+    assert enabled is False
+    assert "Aucun run chargé" in reason
+
+
+def test_gate_integrity_failure_blocks():
+    enabled, reason = expert_gate(_diagnostics(integrity_ok_flag=False), peer_reachable=True)
+    assert enabled is False
+    assert "intégrité" in reason
+    assert "run_present" in reason        # la cause est exposée
+
+
+def test_gate_peer_unreachable_blocks():
+    enabled, reason = expert_gate(_diagnostics(), peer_reachable=False)
+    assert enabled is False
+    assert "agent-card" in reason
+
+
+def test_gate_all_green():
+    enabled, reason = expert_gate(_diagnostics(), peer_reachable=True)
+    assert enabled is True
+    assert reason == ""
+
+
+# --- §6.1 statuts ----------------------------------------------------------
+
+def test_status_message_severity_mapping():
+    assert EXPERT_STATUS_KINDS["ok"] == "success"
+    assert EXPERT_STATUS_KINDS["timeout"] == "warning"
+    assert EXPERT_STATUS_KINDS["non_evaluable"] == "error"
+
+
+def test_status_message_carries_reason_and_next_step():
+    severity, msg = expert_status_message({
+        "status": "timeout", "raison": "délai dépassé (900 s)",
+        "marche_a_suivre": "Relancer pour reprendre.", "cached": True,
+    })
+    assert severity == "warning"
+    assert "délai dépassé" in msg
+    assert "Marche à suivre" in msg and "Relancer pour reprendre." in msg
+    assert "cache" in msg
+
+
+def test_status_message_empty_result_is_neutral():
+    severity, msg = expert_status_message({})
+    assert severity == "error"
+    assert msg == "Aucun détail."
+
+
+# --- §5.2 substitution {{ID.champ}} ---------------------------------------
+
+def test_expand_citations_resolves_value_and_keeps_reference():
+    sealed = build_sealed_context(_diagnostics())
+    rendered, unresolved = expand_citations(
+        "Érosion de {{Q6.median_erosion_sharpe_pct}}.", sealed
+    )
+    assert "12.5" in rendered                     # valeur de l'app, source de vérité
+    assert "«Q6.median_erosion_sharpe_pct»" in rendered   # traçabilité conservée
+    assert unresolved == []
+
+
+def test_expand_citations_unresolved_left_verbatim_and_reported():
+    sealed = build_sealed_context(_diagnostics())
+    rendered, unresolved = expand_citations("Voir {{Q9.inexistant}}.", sealed)
+    assert "{{Q9.inexistant}}" in rendered        # jamais supprimé, jamais inventé
+    assert unresolved == ["Q9.inexistant"]
+
+
+def test_expand_citations_uses_indisponible_policy():
+    """Une valeur `_avail` indisponible reste « indisponible », jamais 0."""
+    sealed = build_sealed_context(_diagnostics())
+    rendered, _ = expand_citations("{{Q6.sharpe_final_recomputed}}", sealed)
+    assert "indisponible" in rendered
+    assert "0" not in rendered.replace("«Q6.sharpe_final_recomputed»", "")
+
+
+def test_substitute_citations_is_shared_with_t2():
+    """Le panneau ne duplique pas la logique de résolution §5.2."""
+    sealed = build_sealed_context(_diagnostics())
+    out, bad = substitute_citations("{{Q1.budget}}", sealed)
+    assert "286" in out and bad == []
+
+
+# --- rendu structuré -------------------------------------------------------
+
+def test_render_expert_analysis_sections_and_accord():
+    stub = StubContainer()
+    unresolved = render_expert_analysis(
+        _analysis(), sealed=build_sealed_context(_diagnostics()), container=stub
+    )
+    text = "\n".join(stub.texts())
+    assert "interprétation wfo-quant" in text
+    assert "🟠 WATCH" in text
+    assert "exploratoire" in text and "moyenne" in text
+    assert "Désaccord" in text                      # accord_avec_preverdict = False
+    assert "constat(s) bloquant(s)" in text
+    assert "Constats" in text and "Recommandations" in text and "Limites déclarées" in text
+    assert "12.5" in text                            # valeur résolue
+    assert "indisponible" in text                    # politique « indisponible » appliquée aux citations
+    assert unresolved == []
+
+
+def test_render_expert_analysis_reports_unresolved_citations():
+    analysis = _analysis()
+    analysis["verdict_justification"] = "Voir {{Q9.inconnu}}."
+    stub = StubContainer()
+    unresolved = render_expert_analysis(
+        analysis, sealed=build_sealed_context(_diagnostics()), container=stub
+    )
+    assert unresolved == ["Q9.inconnu"]
+    assert any("citation(s) non résolue(s)" in t for t in stub.texts())
+
+
+def test_render_expert_analysis_accord_true_shows_success():
+    analysis = _analysis()
+    analysis["accord_avec_preverdict"] = True
+    stub = StubContainer()
+    render_expert_analysis(analysis, sealed=build_sealed_context(_diagnostics()), container=stub)
+    assert any("Accord avec le pré-verdict" in t for t in stub.texts())
+    assert "success" in stub.kinds()
+
+
+# --- bouton + flux ---------------------------------------------------------
+
+def test_panel_disabled_when_gate_fails_disables_button():
+    stub = StubContainer()
+    calls = []
+    result = render_quant_expert_panel(
+        diagnostics=_diagnostics(integrity_ok_flag=False),
+        container=stub, peer_reachable=True, show_toggle=False,
+        runner=lambda *a, **k: calls.append(k) or {"status": "ok"},
+    )
+    assert result == {}                              # rien n'a été lancé
+    assert calls == []                               # aucun appel réseau
+    assert any(k.get("disabled") for (_n, _a, k) in stub.calls if "disabled" in k), "bouton non désactivé"
+    assert any("intégrité" in t for t in stub.texts())
+
+
+def test_panel_runs_with_injected_runner():
+    stub = StubContainer()
+    seen = {}
+
+    def fake_runner(diagnostics, **kwargs):
+        seen.update(kwargs)
+        return {"status": "ok", "analysis": _analysis(), "raison": None, "marche_a_suivre": None}
+
+    result = render_quant_expert_panel(
+        diagnostics=_diagnostics(), container=stub, peer_reachable=True,
+        show_toggle=False, run_now=True, runner=fake_runner,
+    )
+    assert result["status"] == "ok"
+    assert seen["force"] is False                    # pas de clic -> pas de bypass du cache
+    assert "interprétation wfo-quant" in "\n".join(stub.texts())
+
+
+def test_panel_manual_click_forces_cache_bypass():
+    stub = StubContainer()
+    seen = {}
+
+    def fake_runner(diagnostics, **kwargs):
+        seen.update(kwargs)
+        return {"status": "ok", "analysis": _analysis()}
+
+    # le clic sur le bouton force le bypass du cache
+    stub = StubContainer()
+    stub.click = True
+    render_quant_expert_panel(
+        diagnostics=_diagnostics(), container=stub, peer_reachable=True,
+        show_toggle=False, runner=fake_runner,
+    )
+    assert seen["force"] is True                     # clic manuel = force=True (§5.2)
+
+
+def test_panel_non_ok_status_shows_marche_a_suivre_and_no_analysis():
+    stub = StubContainer()
+
+    def fake_runner(diagnostics, **kwargs):
+        return {"status": "unreachable", "analysis": None,
+                "raison": "pair injoignable", "marche_a_suivre": "Démarrer wfo-quant."}
+
+    result = render_quant_expert_panel(
+        diagnostics=_diagnostics(), container=stub, peer_reachable=True,
+        show_toggle=False, run_now=True, runner=fake_runner,
+    )
+    assert result["status"] == "unreachable"
+    text = "\n".join(stub.texts())
+    assert "pair injoignable" in text
+    assert "Démarrer wfo-quant." in text
+    assert "interprétation wfo-quant" not in text     # pas de rendu sans analyse
+    assert "error" in stub.kinds()
+
+
+def test_run_expert_analysis_delegates_every_kwarg():
+    seen = {}
+
+    def fake_runner(diagnostics, **kwargs):
+        seen["diag"] = diagnostics
+        seen.update(kwargs)
+        return {"status": "ok"}
+
+    out = run_expert_analysis(
+        diagnostics=_diagnostics(), wfo_results={"a": 1}, all_trials=None,
+        param_grid={"p": [1]}, cache={"k": 1}, context_id="ctx-1", force=True,
+        runner=fake_runner,
+    )
+    assert out == {"status": "ok"}
+    assert seen["diag"] is not None
+    assert seen["wfo_results"] == {"a": 1}
+    assert seen["param_grid"] == {"p": [1]}
+    assert seen["cache"] == {"k": 1}
+    assert seen["context_id"] == "ctx-1"
+    assert seen["force"] is True
+
+
+# --- correctifs de revue (NO_GO T4, 3 points bloquants) --------------------
+
+def test_integrity_ko_never_shows_peer_analysis():
+    """§5.3 cas a : en intégrité KO, seul le pré-verdict local NO_GO s'affiche."""
+    stub = StubContainer()
+    calls = []
+    result = render_quant_expert_panel(
+        diagnostics=_diagnostics(integrity_ok_flag=False),
+        analysis=_analysis(),                     # une analyse existe pourtant
+        container=stub, peer_reachable=True, show_toggle=False,
+        runner=lambda *a, **k: calls.append(k) or {"status": "ok"},
+    )
+    assert result == {}
+    assert calls == []                            # aucun appel A2A (§5.3 cas a)
+    text = "\n".join(stub.texts())
+    assert "🔴 NO_GO" in text and "pré-verdict local" in text
+    assert "non_evaluable" in text
+    assert "interprétation wfo-quant" not in text  # l'avis du pair n'est PAS rendu
+    assert any(k.get("disabled") for (_n, _a, k) in stub.calls if "disabled" in k), "bouton non désactivé"
+
+
+def test_analysis_from_other_run_is_not_displayed():
+    """§5.2 : une analyse conservée ne s'affiche que si elle vient du run courant."""
+    analysis = _analysis()
+    analysis["run_id"] = "autre-run"
+    stub = StubContainer()
+    render_quant_expert_panel(
+        diagnostics=_diagnostics(), analysis=analysis,
+        container=stub, peer_reachable=True, show_toggle=False,
+    )
+    text = "\n".join(stub.texts())
+    assert "interprétation wfo-quant" not in text
+    assert "autre run" in text
+
+
+def test_analysis_matches_run_semantics():
+    assert analysis_matches_run(_analysis(), _diagnostics()) is True
+    other = _analysis()
+    other["run_id"] = "X"
+    assert analysis_matches_run(other, _diagnostics()) is False
+    other = _analysis()
+    other["input_digest"] = "DIFFERENT"
+    assert analysis_matches_run(other, _diagnostics()) is False
+    assert analysis_matches_run(None, _diagnostics()) is False
+    # Point bloquant de revue : un artefact SANS identifiants n'est JAMAIS accepté
+    assert analysis_matches_run({"verdict": "GO"}, _diagnostics()) is False
+    assert analysis_matches_run({"run_id": "run-1"}, _diagnostics()) is False
+    # identifiants manquants côté run -> pas d'affichage non plus
+    bare = {"manifest": {}}
+    assert analysis_matches_run(_analysis(), bare) is False
+
+
+def test_findings_marked_reference_invalide():
+    """§5.2 : `evidence_refs` hors nomenclature → `reference_invalide`."""
+    analysis = _analysis()
+    analysis["findings"][0]["evidence_refs"] = ["Q6", "ZZZ"]
+    df = findings_table(analysis)
+    assert "reference_invalide" in df.iloc[0]["marqueurs"]
+    assert df.iloc[1]["marqueurs"] == ""
+
+
+def test_findings_marked_chiffre_non_reference():
+    """§5.2 : un nombre nu au lieu de `{{ID.champ}}` → `chiffre_non_reference`."""
+    analysis = _analysis()
+    analysis["findings"][0]["constat"] = "Érosion de 42 %."       # nombre nu
+    df = findings_table(analysis)
+    assert "chiffre_non_reference" in df.iloc[0]["marqueurs"]
+
+
+def test_render_shows_context_id_footer_and_warnings():
+    """§5.2 « Rendu UI » : horodatage + context_id A2A en pied de bloc."""
+    stub = StubContainer()
+    render_expert_analysis(
+        _analysis(), sealed=build_sealed_context(_diagnostics()),
+        container=stub, context_id="ctx-abc123", warnings=["référence douteuse"],
+    )
+    text = "\n".join(stub.texts())
+    assert "ctx-abc123" in text
+    assert "Horodatage de rendu" in text
+    assert "référence douteuse" in text          # avertissements du validateur exposés
+    assert "pré-verdict local : 🟠 WATCH" in text # pré-verdict local à côté du verdict
+
+
+def test_render_numbers_recommendations():
+    """§5.2 : recommandations numérotées."""
+    stub = StubContainer()
+    render_expert_analysis(_analysis(), sealed=build_sealed_context(_diagnostics()), container=stub)
+    frames = [a[0] for (n, a, _k) in stub.calls if n == "dataframe" and a]
+    reco = [f for f in frames if "critère de validation" in list(getattr(f, "columns", []))]
+    assert reco and "n°" in list(reco[0].columns)
+
+
+def test_relancer_and_effacer_labels_rendered_and_wired():
+    """§5.2 ligne 184 : « Relancer l'analyse » et « Effacer » sont rendus ET câblés."""
+    stub = StubContainer()
+    cleared = []
+    render_quant_expert_panel(
+        diagnostics=_diagnostics(), analysis=_analysis(),
+        container=stub, peer_reachable=True, show_toggle=False,
+        on_clear=lambda: cleared.append(True),
+    )
+    labels = [a[0] for (n, a, _k) in stub.calls if n == "button" and a]
+    assert "Effacer" in labels and "Relancer l'analyse" in labels
+
+    # clic sur « Effacer » -> callback exécuté, analyse purgée
+    stub2 = StubContainer()
+    stub2.click = True
+    result = render_quant_expert_panel(
+        diagnostics=_diagnostics(), analysis=_analysis(),
+        container=stub2, peer_reachable=True, show_toggle=False,
+        on_clear=lambda: cleared.append(True),
+    )
+    assert result["status"] == "cleared"
+    assert cleared == [True]
+
+
+def test_status_block_with_elapsed_timer():
+    """§5.2 ligne 183 : st.status avec temps écoulé pendant l'appel."""
+    stub = StubContainer()
+
+    def fake_runner(diagnostics, **kwargs):
+        return {"status": "ok", "analysis": _analysis()}
+
+    render_quant_expert_panel(
+        diagnostics=_diagnostics(), container=stub, peer_reachable=True,
+        show_toggle=False, run_now=True, runner=fake_runner,
+    )
+    kinds = [n for (n, _a, _k) in stub.calls]
+    assert "status" in kinds                       # bloc st.status présent
+    text = "\n".join(stub.texts())
+    assert "Terminé en" in text                    # temps écoulé affiché
+
+
+def test_auto_analyze_run_disabled_is_noop():
+    assert auto_analyze_run(_diagnostics(), enabled=False) == {}
+
+
+def test_auto_analyze_run_delegates_with_cache_on():
+    """Le hook de fin de run applique le cache (force=False) — §6.1."""
+    seen = {}
+
+    def fake_runner(diagnostics, **kwargs):
+        seen.update(kwargs)
+        return {"status": "ok", "analysis": _analysis()}
+
+    out = auto_analyze_run(_diagnostics(), cache={"k": 1}, runner=fake_runner)
+    assert out["status"] == "ok"
+    assert seen["force"] is False
+    assert seen["cache"] == {"k": 1}
+
+
+def test_auto_analyze_run_forwards_evidence_to_diagnostics(monkeypatch):
+    """Point bloquant de revue : config / final_trades / param_grid doivent
+    atteindre `compute_quant_indicators`, sinon l'intégrité §5.0 est KO."""
+    seen = {}
+
+    def fake_compute(source, **kwargs):
+        seen.update(kwargs)
+        return _diagnostics()
+
+    monkeypatch.setattr("services.quant_indicators.compute_quant_indicators", fake_compute)
+    trades = pd.DataFrame({"pnl": [1.0, -0.5]})
+    auto_analyze_run(
+        {"window_results": []},
+        final_trades=trades,
+        config={"fees_pct": 0.1, "slippage_bps": 2.0},
+        param_grid={"timeperiod": [10, 12]},
+        runner=lambda d, **k: {"status": "ok"},
+    )
+    assert seen["config"] == {"fees_pct": 0.1, "slippage_bps": 2.0}   # provenance des coûts
+    assert seen["param_grid"] == {"timeperiod": [10, 12]}             # références P.<param>
+    assert isinstance(seen["final_trades"], pd.DataFrame)             # preuve des trades
+    assert len(seen["final_trades"]) == 2
+
+
+def test_reference_exists_presence_vs_value():
+    """Non-régression : `P.<param>` teste la PRÉSENCE dans la grille, pas la valeur.
+
+    Différence assumée avec `resolve_reference` (qui renvoie la valeur) :
+    une entrée de grille présente avec une valeur `None` existe toujours.
+    """
+    from services.quant_expert import reference_exists, resolve_reference
+
+    sealed = {"param_grid": {"foo": None}}
+    assert reference_exists("P.foo", sealed) is True      # présence
+    assert resolve_reference("P.foo", sealed) is None     # valeur
+    assert reference_exists("P.bar", sealed) is False
+    assert reference_exists("ZZZ", sealed) is False
