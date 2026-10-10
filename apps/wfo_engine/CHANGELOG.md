@@ -4,6 +4,17 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 
 ## Non publié
 
+### Convention brute des backtests sans coûts (dérogation utilisateur)
+
+- Absence de frais/slippage : convention **brute** informative, non bloquante
+  pour l'intégrité et le critère C4. C4 évalue le résultat OOS de base en brut
+  (positif / nul ou négatif / absent) ; les autres critères restent applicables.
+- Aucun résultat brut n'est qualifié de net ou de rentabilité nette ; Q8, l'UI
+  et le prompt du pair évitent les rappels bloquants répétitifs sur les coûts.
+  Les coûts déclarés sans valeur ou malformés restent bloquants. Version des
+  indicateurs 1.0.2 (invalidation du cache par version) ; archives antérieures
+  et leurs verdicts non réécrits.
+
 ### Correctifs de raccordement « Analyse quant »
 
 - Identité du run résolue depuis la traçabilité imbriquée, sans modifier le run

@@ -331,6 +331,11 @@ def test_criteria_table_labels_and_verdicts():
     assert df.loc[df["critère"] == "C1 — Intégrité", "verdict"].iloc[0] == "🟢 GO"
     assert df.loc[df["critère"] == "C3 — Érosion du Sharpe", "verdict"].iloc[0] == "🟠 WATCH"
 
+def test_c4_label_does_not_call_gross_returns_net():
+    pre = {"criteria": {"C4_resultat_net_oos": {"verdict": "GO", "raison": None}}}
+    label = criteria_table(pre)["critère"].iloc[0]
+    assert "brut ou net selon convention" in label
+
 
 def test_pre_verdict_rationale():
     assert pre_verdict_rationale(_diagnostics()["pre_verdict"]) == [

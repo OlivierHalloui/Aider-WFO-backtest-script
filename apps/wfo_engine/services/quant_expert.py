@@ -277,14 +277,19 @@ def _top_trials(wfo_results: Mapping[str, Any], all_trials: Optional[pd.DataFram
 _SEMANTICS_REMINDER = (
     "Rappel des sémantiques : le Sharpe est NON-annualisé (moyenne/écart-type par barre, ddof=1) ; "
     "calc_avg_pl = mean(trades.returns)*100 ; unités figées : return_pct, win_rate_pct, sharpe_per_bar. "
-    "Les rendements sont nets de frais (voir Q8.convention)."
+    "La convention des rendements est celle de Q8.convention : gross = brut sans frais/slippage, "
+    "net_of_costs = coûts inclus. Si gross, ne revendique jamais une rentabilité nette."
 )
 
 _INSTRUCTION = (
     "Consigne : distingue FAITS (fournis ci-dessus), INFÉRENCES et HYPOTHÈSES ; ne recopie PAS les "
     "nombres déjà fournis — interprète-les. Cite tout chiffre sous la forme littérale {{ID.champ}} "
     "(jamais une valeur numérique nue). Réponds UNIQUEMENT avec un JSON conforme au schéma "
-    "quant_analysis.v1, en français, en une seule réponse, sans question en retour."
+    "quant_analysis.v1, en français, en une seule réponse, sans question en retour. "
+    "Si Q8.convention est gross, selon la convention brute décidée par l'utilisateur, "
+    "ne fais pas de l'absence de frais/slippage un motif bloquant "
+    "ni un rappel répétitif ; juge la performance OOS brute et les autres critères normalement. "
+    "Des coûts explicitement malformés restent bloquants à l'intégrité."
 )
 
 
@@ -829,10 +834,9 @@ def auto_analyze_run(
     a no-op returning ``{}``, so the toggle really disables the analysis.  The
     automatic path keeps ``force=False``: the cache applies (§6.1).
 
-    ``config``, ``param_grid`` and ``final_trades`` are **required** for the §5.0
-    integrity check to pass (costs provenance, ``P.<param>`` references and the
-    final-trade evidence).  Missing them yields ``non_evaluable`` — and
-    :func:`call_quant_expert` then issues **no** A2A call (§5.3 case a).
+    ``final_trades`` and the other mandatory run evidence are required for the
+    §5.0 integrity check; missing costs alone use the gross convention. A failed
+    check yields ``non_evaluable`` and :func:`call_quant_expert` issues no A2A call.
     """
     if not enabled:
         return {}

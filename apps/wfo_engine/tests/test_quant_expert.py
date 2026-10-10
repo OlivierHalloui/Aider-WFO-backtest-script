@@ -401,6 +401,14 @@ def test_build_prompt_contains_blocks():
     assert "{{ID.champ}}" in prompt
     assert "quant_analysis.v1" in prompt
 
+def test_prompt_gross_convention_is_not_a_costs_blocker():
+    diagnostics = _diagnostics()
+    diagnostics["indicators"]["Q8"] = {"convention": "gross", "base_oos_return_pct": {"value": 5.0}}
+    prompt = build_expert_prompt(diagnostics)
+    assert "Les rendements sont nets de frais" not in prompt
+    assert "ne fais pas de l'absence de frais/slippage un motif bloquant" in prompt
+    assert "rentabilité nette" in prompt
+
 
 def test_build_prompt_declares_window_truncation():
     wfo = {

@@ -308,12 +308,15 @@ class TestIntegrity:
         assert integ["status"] == "ok"
         assert integ["causes"] == []
 
-    def test_costs_provenance_unknown_blocks(self):
-        # no fees_pct / slippage_bps anywhere -> unknown convention -> non-evaluable
+    def test_absent_costs_are_informational_gross(self):
         results = make_results()
         integ = check_run_integrity(results, final_trades=make_final_trades(), config=None)
-        assert integ["ok"] is False
-        assert any("coûts" in c or "cout" in c for c in integ["causes"])
+        assert integ["ok"] is True
+        assert integ["checks"]["costs_applied"]["convention"] == "gross"
+        assert not any("coûts" in c or "cout" in c for c in integ["causes"])
+        manifest = build_run_manifest(results)
+        assert manifest["costs"]["fees_pct"] is None  # absent, not a measured zero
+        assert manifest["costs"]["slippage_bps"] is None
 
     def test_is_oos_both_empty_blocks(self):
         results = make_results(n_windows=1)
@@ -734,13 +737,39 @@ class TestPreVerdict:
         )
         assert ind["pre_verdict"]["verdict"] == "NO_GO"
 
-    def test_gross_costs_forces_no_go(self):
+    def test_gross_positive_oos_is_not_blocked_by_costs(self):
         results = make_results(n_windows=5, oos_returns=[5.0] * 5)
         ind = compute_quant_indicators(
             results, final_trades=make_final_trades(),
             config={"fees_pct": 0.0, "slippage_bps": 0.0}, param_grid=PARAM_GRID,
         )
+        assert ind["pre_verdict"]["criteria"]["C4_resultat_net_oos"]["verdict"] == "GO"
+        assert not any("coût" in r for r in ind["pre_verdict"]["rationale"])
+
+    def test_absent_costs_positive_oos_evaluated_gross(self):
+        results = make_results(n_windows=5, oos_returns=[5.0] * 5)
+        ind = compute_quant_indicators(results, final_trades=make_final_trades(), param_grid=PARAM_GRID)
+        assert ind["integrity"]["ok"] is True
+        assert ind["indicators"]["Q8"]["convention"] == "gross"
+        assert ind["pre_verdict"]["criteria"]["C4_resultat_net_oos"]["verdict"] == "GO"
+        assert "coûts de base omis" not in str(ind)
+
+    def test_gross_nonpositive_oos_still_no_go(self):
+        results = make_results(n_windows=5, oos_returns=[-2.0] * 5)
+        ind = compute_quant_indicators(results, final_trades=make_final_trades(), param_grid=PARAM_GRID)
         assert ind["pre_verdict"]["criteria"]["C4_resultat_net_oos"]["verdict"] == "NO_GO"
+        assert ind["pre_verdict"]["verdict"] == "NO_GO"
+
+    def test_gross_missing_oos_return_is_watch_not_go(self):
+        assert compute_pre_verdict({"Q8": {"convention": "gross", "base_oos_return_pct": {"value": None}}},
+                                   {"ok": True}, {})["criteria"]["C4_resultat_net_oos"]["verdict"] == "WATCH"
+
+    def test_gross_positive_does_not_override_other_blocking_criteria(self):
+        results = make_results(n_windows=1, oos_returns=[5.0])
+        ind = compute_quant_indicators(results, final_trades=make_final_trades(), param_grid=PARAM_GRID)
+        assert ind["integrity"]["ok"] is True
+        assert ind["pre_verdict"]["criteria"]["C4_resultat_net_oos"]["verdict"] == "GO"
+        assert ind["pre_verdict"]["criteria"]["C2_echantillon_oos"]["verdict"] == "NO_GO"
         assert ind["pre_verdict"]["verdict"] == "NO_GO"
 
 
@@ -887,12 +916,13 @@ class TestReviewFindings:
         assert c["top_k_trades_frac"] == pytest.approx(2 / 20)
         assert c["status"] == "concentre"
 
-    def test_cost_unknown_vs_zero(self):
-        # F6: absent fees -> unknown; explicit zeros -> gross
+    def test_cost_absent_vs_zero(self):
+        # User convention: undeclared costs are gross, not asserted net.
         results = make_results(n_windows=1)
         out_unknown = compute_q8(results, make_final_trades(), config={})
-        assert out_unknown["convention"] == "unknown"
-        assert out_unknown["costs_included"] is None
+        assert out_unknown["convention"] == "gross"
+        assert out_unknown["costs_included"] is False
+        assert "omis" not in out_unknown["note"]
         out_gross = compute_q8(results, make_final_trades(), config={"fees_pct": 0.0, "slippage_bps": 0.0})
         assert out_gross["convention"] == "gross"
         assert out_gross["costs_included"] is False

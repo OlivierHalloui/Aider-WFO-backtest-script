@@ -139,8 +139,14 @@ aucune comparaison IS/OOS/Final ni aucun Sharpe n'est fiable.
 run terminé, colonnes requises présentes, valeurs finies, fenêtres IS/OOS
 **appariées par fenêtre et par paramètres sélectionnés**, trades/rendements
 disponibles, identifiants uniques, cohérence `n_trials` / lignes / essais
-valides, frais déjà appliqués. En cas d'échec → statut **« non évaluable +
-cause »** affiché, et **aucun appel A2A n'est lancé**.
+valides, cohérence des coûts déclarés. **Dérogation explicite décidée par
+l'utilisateur** : ses backtests sont exécutés sans frais/slippage ; lorsque
+ces deux champs sont absents, la convention est **brute** à titre informatif,
+et leur absence ne bloque ni l'intégrité ni le pré-verdict. Aucun résultat brut
+ne doit être présenté comme net ou comme une rentabilité nette. Une composante
+déclarée `None`, non numérique ou non finie reste un défaut d'intégrité
+bloquant ; les autres garde-fous sont inchangés. En cas d'échec → statut
+**« non évaluable + cause »** affiché, et **aucun appel A2A n'est lancé**.
 
 ### 5.1 Bloc « Calculs » — toujours affiché, calculé localement
 
@@ -155,7 +161,7 @@ Module `services/quant_indicators.py`, fonctions pures testables.
 | Q5 | **Voisinage du gagnant** | **voisins distincts évalués dans la même fenêtre** ; distance normalisée sur plages (règle explicite pour catégories et bornes) ; signalement **gagnant isolé / en bordure** | sparkline + alerte |
 | Q6 | **Érosion IS → OOS** | **par fenêtre** puis agrégé : érosion Sharpe/return/PQS **seulement si dénominateurs et signes le permettent** ; amplitudes `\|DD\|` comparées seulement si les deux DD sont définis ; résumé médiane + dispersion + nb de fenêtres en dégradation | table par fenêtre + code couleur |
 | Q7 | **Sharpe non-annualisé homogène** | recalcul via `metrics._sharpe_from_returns` **à partir des séries de rendements par barre** IS/OOS/Final (fournies explicitement). Si la série est absente → **« indisponible »**, jamais de substitution par un fallback de provenance différente | table homogène |
-| Q8 | **Sensibilité aux coûts** | ① établir la **convention du portefeuille** (rendements de `trades.returns` nets ou bruts de frais/slippage) ; ② si nets → afficher le **coût déjà inclus** et un **scénario de coût additionnel** (réexécution si possible, sinon **approximation explicitement étiquetée**) ; ③ si bruts → marge nette par côté. **Pas de « seuil de ruine » déduit d'un edge moyen** | KPI alerte + étiquette |
+| Q8 | **Sensibilité aux coûts** | ① établir la **convention du portefeuille** (rendements de `trades.returns` nets ou bruts de frais/slippage ; champs absents → brut par convention utilisateur, sans inventer des valeurs de frais) ; ② si nets → afficher le **coût déjà inclus** et un **scénario de coût additionnel** (réexécution si possible, sinon **approximation explicitement étiquetée**) ; ③ si bruts → afficher la convention sans prétendre à une marge nette calculée. **Pas de « seuil de ruine » déduit d'un edge moyen** | KPI + étiquette informative |
 
 **Incertitude OOS (P1)** — par fenêtre : nb de fenêtres, trades OOS, durée,
 exposition ; **intervalle de confiance** du rendement/edge par **bootstrap en
@@ -351,14 +357,15 @@ au sens du vocabulaire ci-dessus — aucune appréciation possible au-delà) :
 
 **Seuils de verdict** (défauts configurables `config.py: QUANT_VERDICT_*` ;
 garde-fous de revue, **pas** des seuils statistiquement universels ; supposent
-des fenêtres OOS comparables, des rendements **nets** et un effectif suffisant) :
+des fenêtres OOS comparables, des rendements étiquetés **bruts ou nets selon
+Q8.convention** et un effectif suffisant) :
 
 | Critère | 🟢 GO | 🟠 WATCH | 🔴 NO_GO |
 |---|---|---|---|
-| **Intégrité** | toutes les données obligatoires cohérentes | métrique non essentielle indisponible et explicitée | appariement IS/OOS impossible, provenance des rendements/coûts inconnue, incohérence matérielle |
+| **Intégrité** | toutes les données obligatoires cohérentes ; coûts absents → convention brute informative | métrique non essentielle indisponible et explicitée | appariement IS/OOS impossible, coût déclaré sans valeur ou malformé, incohérence matérielle |
 | **Échantillon OOS** | ≥ **5 fenêtres** et ≥ **100 trades** OOS, sans concentration excessive | **3–4 fenêtres** ou **30–99 trades** | **< 3 fenêtres** ou **< 30 trades** |
 | **Érosion Sharpe** (médiane, par fenêtre) | **< 30 %** et majorité des fenêtres OOS positives | **30–50 %**, ou fenêtres mitigées | **> 50 %** **récurrente** (≥ 50 % des fenêtres), ou médiane Sharpe OOS ≤ 0 |
-| **Résultat net OOS + coûts** | positif **après** scénario de coût additionnel | positif en base, nul/négatif sous stress, ou coût non testable | **≤ 0 en base**, ou coûts de base omis |
+| **Résultat OOS selon convention Q8** | **brut** : résultat OOS de base > 0 ; **net** : positif après scénario de coût additionnel | résultat absent ; si net : positif en base mais nul/négatif sous stress ou stress non testable | résultat OOS de base ≤ 0 selon sa convention (brute ou nette) |
 | **Robustesse de sélection** | ≥ **5 configurations voisines distinctes** (définition calculable ci-dessous), médiane des voisins ≥ **80 %** du gagnant, aucun paramètre systématiquement en borne | plateau peu peuplé ou dispersion sensible au régime | **gagnant isolé** *et* **dégradation marquée des voisins** dans **≥ 2 fenêtres** (définitions ci-dessous) |
 
 > **Mesure alternative pour scores ≤ 0 ou non comparables** (remplace les seuils
@@ -379,9 +386,11 @@ des fenêtres OOS comparables, des rendements **nets** et un effectif suffisant)
 > `< 50 %` du cas nominal ; les comptages (`|V_perf| ≥ 5`, `< 2`, `≥ 2`
 > fenêtres) sont inchangés.
 
-**Règle d'agrégation** : défaillance d'intégrité **ou** OOS net négatif →
+**Règle d'agrégation** : défaillance d'intégrité **ou** résultat OOS de base ≤ 0 (brut ou net) →
 `NO_GO` obligatoire ; données valides mais preuves insuffisantes / critères
 mitigés → `WATCH` ; `GO` exige que **tous les garde-fous applicables passent**.
+Le pair ne doit pas invoquer l'absence de frais/slippage comme motif bloquant ni
+répéter cet avertissement à chaque analyse ; la convention brute reste visible.
 Le budget consommé et le taux de doublons sont des **indices diagnostiques**,
 jamais des critères de verdict seuls.
 

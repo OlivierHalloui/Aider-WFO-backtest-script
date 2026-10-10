@@ -59,7 +59,7 @@ CRITERION_LABELS = {
     "C1_integrite": "C1 — Intégrité",
     "C2_echantillon_oos": "C2 — Échantillon OOS",
     "C3_erosion_sharpe": "C3 — Érosion du Sharpe",
-    "C4_resultat_net_oos": "C4 — Résultat net OOS + coûts",
+    "C4_resultat_net_oos": "C4 — Résultat OOS (brut ou net selon convention)",
     "C5_robustesse_selection": "C5 — Robustesse de sélection",
 }
 

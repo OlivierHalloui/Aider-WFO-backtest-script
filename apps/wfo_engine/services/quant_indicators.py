@@ -34,7 +34,7 @@ from domain.serialization import sanitize_for_json, sha256_json, utc_now_iso
 # Versioning — used in the cache key and the exported manifest.
 # ---------------------------------------------------------------------------
 
-INDICATOR_VERSION = "1.0.1"
+INDICATOR_VERSION = "1.0.2"
 SCHEMA_VERSION = "quant_indicators.v1"
 ENGINE_VERSION = "wfo_engine"
 METRICS_VERSION = "metrics.v1"
@@ -242,11 +242,11 @@ def _resolve_cost_convention(merged: Mapping[str, Any]) -> dict:
     """Resolve the cost convention with an explicit provenance status.
 
     Distinguishes (§5.0 / Q8.1, F6):
-      - ``unknown`` : neither component declared, or a declared component is
-        ``None`` (a declared-but-unknown value does NOT prove zero fees)
+      - ``unknown`` : a declared component is ``None`` (a declared-but-unknown
+        value does NOT prove zero fees)
       - ``invalid`` : a declared component is non-finite / non-numeric
-      - ``known``   : declared components are numeric (0 or > 0); ``gross`` is
-        reserved for an *explicit* numeric zero of known provenance
+      - ``known``   : declared components are numeric (0 or > 0), or both
+        absent (user's informational gross convention)
 
     Returns ``{status, convention, fees_pct, slippage_bps, cost_per_side_pct,
     costs_included}``.  ``costs_included`` is None unless status == "known".
@@ -276,9 +276,9 @@ def _resolve_cost_convention(merged: Mapping[str, Any]) -> dict:
         }
     if not fees_present and not slippage_present:
         return {
-            "status": "unknown", "convention": "unknown",
+            "status": "known", "convention": "gross",
             "fees_pct": None, "slippage_bps": None,
-            "cost_per_side_pct": None, "costs_included": None,
+            "cost_per_side_pct": None, "costs_included": False,
         }
 
     # both non-None numeric (or one present numeric, the other absent -> UI default 0)
@@ -826,10 +826,11 @@ def check_run_integrity(
         else:
             _pass("trials", {"n_trials": total_trials})
 
-    # costs provenance known (§5.0 / Q8.1) — unknown/invalid convention blocking
+    # Absence of both costs uses the user's gross convention; malformed or
+    # explicitly unknown components remain blocking (§5.0 / Q8.1).
     costs = _resolve_cost_convention(_merge_config(wfo_results, config))
     if costs["status"] == "unknown":
-        _fail("costs_applied", "provenance des coûts inconnue (fees_pct/slippage_bps absents)")
+        _fail("costs_applied", "composante de coût déclarée sans valeur (fees_pct/slippage_bps = None)")
     elif costs["status"] == "invalid":
         _fail("costs_applied", "composante de coût invalide (fees_pct/slippage_bps non numérique)")
     else:
@@ -1683,9 +1684,9 @@ def compute_q8(
     elif convention == "gross":
         result["net_margin_per_side"] = {
             "cost_per_side_pct": cost_per_side_pct,
-            "note": "rendements bruts : aucune marge de coût déduite (coûts de base omis)",
+            "note": "rendements bruts : aucune déduction de frais/slippage ; marge nette non estimée",
         }
-        result["note"] = "rendements bruts — coûts de base omis"
+        result["note"] = "rendements bruts, sans frais/slippage ; rentabilité nette non estimée"
     else:
         result["note"] = (
             "convention des coûts inconnue (fees_pct/slippage_bps absents)"
@@ -1922,25 +1923,26 @@ def compute_pre_verdict(
         c3 = {"verdict": "WATCH", "raison": f"érosion partiellement évaluable ({int(n_undefined)} fenêtre(s) non évaluable(s))"}
     criteria["C3_erosion_sharpe"] = c3
 
-    # C4 — résultat net OOS + coûts
+    # C4 — résultat OOS selon la convention de Q8 (brut ou net)
     q8 = indicators.get("Q8", {})
     convention = q8.get("convention")
-    costs_included = bool(q8.get("costs_included"))
     base_oos = q8.get("base_oos_return_pct", {}).get("value")
     stress = None
     scenario = q8.get("additional_cost_scenario")
     if isinstance(scenario, dict):
         stress = scenario.get("oos_return_after_stress_pct", {}).get("value")
-    if convention == "unknown" or (convention != "net_of_costs" and not costs_included):
-        c4 = {"verdict": "NO_GO", "raison": "coûts de base omis ou provenance inconnue (rendements bruts)"}
+    if convention not in ("gross", "net_of_costs"):
+        c4 = {"verdict": "WATCH", "raison": "convention du résultat OOS indéterminée"}
     elif base_oos is not None and base_oos <= 0:
-        c4 = {"verdict": "NO_GO", "raison": "résultat net OOS ≤ 0 en base"}
+        c4 = {"verdict": "NO_GO", "raison": "résultat OOS ≤ 0 en base (convention " + convention + ")"}
+    elif base_oos is not None and base_oos > 0 and convention == "gross":
+        c4 = {"verdict": "GO", "raison": None}
     elif base_oos is not None and base_oos > 0 and stress is not None and stress > 0:
         c4 = {"verdict": "GO", "raison": None}
     elif base_oos is not None and base_oos > 0:
         c4 = {"verdict": "WATCH", "raison": "positif en base, nul/négatif sous stress ou coût non testable"}
     else:
-        c4 = {"verdict": "WATCH", "raison": "résultat net OOS indéterminé"}
+        c4 = {"verdict": "WATCH", "raison": "résultat OOS indéterminé"}
     criteria["C4_resultat_net_oos"] = c4
 
     # C5 — robustesse de sélection (nominal + alternative, F4)

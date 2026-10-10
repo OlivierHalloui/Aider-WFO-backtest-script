@@ -54,6 +54,15 @@ Une réponse JSON confirme que le pair est joignable. Sans réponse :
 Le pré-verdict local (déterministe) reste affiché dans tous les cas : les
 calculs §5.0/§5.1 ne dépendent jamais du pair.
 
+**Convention utilisateur (dérogation explicite)** : les backtests sans
+frais/slippage, y compris lorsque les deux champs sont absents, sont analysés
+en **brut**. Cette absence est informative et ne bloque ni l'appel au pair ni
+le pré-verdict C4 : un OOS brut positif peut satisfaire C4, un OOS nul ou
+négatif reste `NO_GO`, un résultat manquant reste `WATCH`. Ne pas annoncer de
+rentabilité nette ni faire de l'absence de coûts un motif bloquant récurrent.
+Une valeur de coût déclarée mais malformée (y compris `None`) reste bloquante
+pour l'intégrité, tout comme les autres défauts du run (§5.0).
+
 ## 4. Artefacts produits
 
 Indépendamment du pair, un run donne :
