@@ -6,6 +6,30 @@ import numpy as np
 import pandas as pd
 
 
+def sync_final_data_file_path(state, source_path):
+    """Follow WFO source changes unless the final path was explicitly selected.
+
+    Call before the final-path widget is instantiated. Track the last automatic
+    value, not file existence: a missing explicit holdout must not be replaced.
+    Existing independent paths are preserved; legacy upload defaults migrate.
+    """
+    if not source_path:
+        return
+    current = state.get("final_file_path")
+    previous_auto = state.get("_final_file_path_auto")
+    explicit = state.get("_final_file_path_explicit", False)
+    legacy_default = (
+        previous_auto is None and not explicit
+        and current == state.get("uploaded_data_file_path")
+    )
+    if not current or (not explicit and (
+        current == previous_auto or current == source_path or legacy_default
+    )):
+        state["final_file_path"] = source_path
+        state["_final_file_path_auto"] = source_path
+        state["_final_file_path_explicit"] = False
+
+
 def _coerce_arrow_value(v):
     """Convert a single cell value to a type PyArrow can serialize.
 

@@ -4,6 +4,14 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 
 ## Non publié
 
+### Source du backtest final
+
+- Le champ « Final Data File Path » suit par défaut le fichier WFO sélectionné,
+  y compris après un nouvel upload ou un changement de stockage. Une saisie
+  manuelle conserve un fichier final distinct, même s'il n'existe plus ; vider
+  le champ rétablit le suivi. Les anciens défauts associés aux uploads sont
+  resynchronisés sans remplacer un choix final indépendant.
+
 ### Fonctionnalité « Analyse quant » (T1–T6)
 
 Nouvel onglet **📊 Analyse quant** (`app.py`, après « Final Backtest ») qui

@@ -1215,6 +1215,10 @@ with st.sidebar:
         )
         
         if data_source == "Local File":
+            from ui.data_utils import sync_final_data_file_path
+
+            # Capture the old automatic source before an upload replaces it.
+            sync_final_data_file_path(st.session_state, st.session_state.get("file_path"))
             uploaded_market_csv = st.file_uploader(
                 "Browse CSV file from disk",
                 type=["csv"],
@@ -1225,11 +1229,7 @@ with st.sidebar:
                 uploaded_path, is_new_upload = _persist_uploaded_data_file(uploaded_market_csv)
                 if uploaded_path:
                     st.session_state["file_path"] = uploaded_path
-                    # Keep the final-backtest file field in sync when it is still
-                    # empty, so a freshly loaded CSV is reused by the final
-                    # backtest instead of a stale empty path.
-                    if not st.session_state.get("final_file_path"):
-                        st.session_state["final_file_path"] = uploaded_path
+                    sync_final_data_file_path(st.session_state, uploaded_path)
                     if is_new_upload:
                         sync_dates_from_file(force=True)
                     st.caption(f"Selected file: `{uploaded_market_csv.name}`")
@@ -1241,6 +1241,7 @@ with st.sidebar:
                 on_change=sync_dates_from_file,
                 help="Chemin du CSV OHLCV local. Les dates peuvent être synchronisées automatiquement avec le fichier."
             )
+            sync_final_data_file_path(st.session_state, file_path)
             uploaded_path = st.session_state.get("uploaded_data_file_path")
             if isinstance(uploaded_path, str) and os.path.exists(uploaded_path):
                 st.caption(f"Uploaded local copy: `{uploaded_path}`")
@@ -4121,11 +4122,19 @@ if 'wfo_results' in st.session_state or _has_stagewise_params:
             key="final_end_date",
             help="Date de fin du jeu de données utilisé pour le backtest final."
         )
+        from ui.data_utils import sync_final_data_file_path
+
+        sync_final_data_file_path(
+            st.session_state, st.session_state.get('file_path', DEFAULT_DATA_FILE),
+        )
         st.text_input(
             "Final Data File Path",
-            value=st.session_state.get('file_path', DEFAULT_DATA_FILE),
             key="final_file_path",
-            help="Chemin du fichier de données pour le backtest final (si source locale)."
+            on_change=lambda: st.session_state.__setitem__(
+                "_final_file_path_explicit", bool(st.session_state.get("final_file_path")),
+            ),
+            help=("Par défaut, suit le fichier WFO sélectionné. Une saisie manuelle "
+                  "conserve un fichier final distinct ; vider le champ rétablit le suivi.")
         )
         _tf_options = ['1s', '5s', '10s', '15s', '30s', '1m', '5m', '15m', '30m', '1h', '4h', '1d']
         _wfo_tf = st.session_state.get('timeframe', DEFAULT_TIMEFRAME)
