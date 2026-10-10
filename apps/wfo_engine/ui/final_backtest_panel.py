@@ -818,6 +818,13 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
                 return_portfolio=True
             )
             st.session_state['final_portfolio'] = final_portfolio
+            from services.export_utils import record_final_quant_context
+
+            record_final_quant_context(
+                st.session_state, final_portfolio,
+                final_start_date=final_start_date, final_end_date=final_end_date,
+                final_file_path=final_file_path, final_timeframe=_final_tf,
+            )
             from ui.quant_analysis_panel import run_auto_quant_after_final_backtest as _auto_quant
             st.session_state['quant_analysis'] = _auto_quant(
                 final_portfolio,

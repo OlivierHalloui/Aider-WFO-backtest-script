@@ -845,6 +845,7 @@ def walk_forward_optimization(
             'parallel_backend': settings.parallel_backend,
             'use_numba': settings.use_numba,
             'optimization_method': settings.optimization_method,
+            'max_trials': getattr(settings, 'max_trials', None),
             'optimization_regime': optimization_regime,
             'neighbor_count': getattr(settings, 'neighbor_count', 5),
             'nn_min_samples': int(getattr(settings, 'nn_min_samples', 500)),

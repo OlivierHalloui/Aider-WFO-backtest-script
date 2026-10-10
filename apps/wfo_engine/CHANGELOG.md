@@ -4,6 +4,20 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 
 ## Non publié
 
+### Correctifs de raccordement « Analyse quant »
+
+- Identité du run résolue depuis la traçabilité imbriquée, sans modifier le run
+  ni assouplir les gardes d'export/import.
+- Période finale figée lors du backtest et partagée par les diagnostics,
+  l'appel expert et le replay ; les modifications ultérieures des champs
+  ne réécrivent plus cette période. Une période inconnue reste indisponible.
+- Q1 utilise le budget enregistré par le moteur, ou la configuration explicite
+  des résultats anciens ; aucun budget par défaut de 200 n'est inventé.
+- L'import ZIP purge le portfolio final live et son contexte figé précédents,
+  afin qu'un autre run ne puisse pas réutiliser leurs preuves ni leurs dates.
+- Version des indicateurs 1.0.1 incluse dans la clé du cache live ; les
+  diagnostics archivés valides restent préservés conformément à T6.
+
 ### Source du backtest final
 
 - Le champ « Final Data File Path » suit par défaut le fichier WFO sélectionné,

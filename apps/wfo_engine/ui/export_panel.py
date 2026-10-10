@@ -66,9 +66,9 @@ def _build_replay_manifest(payload, snapshot_mode_requested, snapshot_mode_actua
         data_source=data_source,
         run_meta=st.session_state.get("wfo_run_metadata") or {},
         final_params=st.session_state.get("final_params"),
-        final_start_date=st.session_state.get("final_start_date"),
-        final_end_date=st.session_state.get("final_end_date"),
-        final_file_path=st.session_state.get("final_file_path"),
+        final_start_date=(payload.get("config") or {}).get("final_start_date", st.session_state.get("final_start_date")),
+        final_end_date=(payload.get("config") or {}).get("final_end_date", st.session_state.get("final_end_date")),
+        final_file_path=(payload.get("config") or {}).get("final_file_path", st.session_state.get("final_file_path")),
         v3_artifacts=st.session_state.get("pine_artifacts_manifest") or {},
     )
 
@@ -265,7 +265,12 @@ def _export_results_zip(
     # The builder may enrich/replace the session run (e.g. robust_set_summary).
     # Hash and export the exact run carried by results.json, not the old reference.
     results = payload.get("wfo_results") or results
-    config_snapshot = payload.get("config", {})
+    from services.export_utils import quant_config_with_final_context
+
+    config_snapshot = quant_config_with_final_context(
+        payload.get("config", {}), st.session_state, st.session_state.get("final_portfolio"),
+    )
+    payload["config"] = config_snapshot
     archived = st.session_state.get("quant_diagnostics")
     if isinstance(archived, dict) and archived.get("source") == "archived":
         from services.export_utils import _manifest_matches_run

@@ -94,6 +94,7 @@ def test_wfo_runs_for_core_optimizers(method):
     )
 
     assert isinstance(results, dict)
+    assert results['settings']['max_trials'] == settings.max_trials
     assert "window_results" in results
     assert len(results["window_results"]) == 1
     assert "best_params" in results

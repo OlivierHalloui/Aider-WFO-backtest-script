@@ -34,7 +34,7 @@ from domain.serialization import sanitize_for_json, sha256_json, utc_now_iso
 # Versioning — used in the cache key and the exported manifest.
 # ---------------------------------------------------------------------------
 
-INDICATOR_VERSION = "1.0.0"
+INDICATOR_VERSION = "1.0.1"
 SCHEMA_VERSION = "quant_indicators.v1"
 ENGINE_VERSION = "wfo_engine"
 METRICS_VERSION = "metrics.v1"
@@ -215,6 +215,19 @@ def _hash_returns(rets: Any) -> Optional[str]:
 def _get_run_settings(wfo_results: Mapping[str, Any]) -> dict:
     settings = wfo_results.get("settings") if isinstance(wfo_results, Mapping) else None
     return settings if isinstance(settings, Mapping) else {}
+
+
+def resolve_run_id(wfo_results) -> Optional[str]:
+    """Read the existing run identity, including the production traceability path."""
+    if not isinstance(wfo_results, Mapping):
+        return None
+    run_id = wfo_results.get("run_id")
+    if isinstance(run_id, str) and run_id.strip():
+        return run_id
+    traceability = wfo_results.get("traceability")
+    run = traceability.get("run") if isinstance(traceability, Mapping) else None
+    run_id = run.get("run_id") if isinstance(run, Mapping) else None
+    return run_id if isinstance(run_id, str) and run_id.strip() else None
 
 
 def _merge_config(wfo_results: Mapping[str, Any], config: Optional[Mapping[str, Any]]) -> dict:
@@ -514,8 +527,8 @@ def build_run_manifest(
         })
 
     final_period = {
-        "start": merged.get("final_start_date", merged.get("end_date")),
-        "end": merged.get("final_end_date", merged.get("end_date")),
+        "start": merged.get("final_start_date"),
+        "end": merged.get("final_end_date"),
     }
 
     # costs convention (§5.1 Q8): distinguish unknown / invalid / zero
@@ -527,7 +540,7 @@ def build_run_manifest(
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "indicator_version": INDICATOR_VERSION,
-        "run_id": wfo_results.get("run_id") if isinstance(wfo_results, Mapping) else None,
+        "run_id": resolve_run_id(wfo_results),
         "input_digest": _compute_input_digest(
             wfo_results, all_trials, final_trades, per_bar_returns, config, oos_trades, param_grid
         ),
@@ -786,7 +799,7 @@ def check_run_integrity(
         _pass("final_trades", {"n_trades": n_final_trades})
 
     # unique identifier
-    run_id = wfo_results.get("run_id") if isinstance(wfo_results, Mapping) else None
+    run_id = resolve_run_id(wfo_results)
     if run_id is None:
         digest = _compute_input_digest(wfo_results, all_trials, final_trades, per_bar_returns, config, oos_trades, param_grid)
         if digest:
@@ -960,7 +973,15 @@ def compute_q1(
     if optimization_method == "grid":
         demanded_per_window = _fnum((wfo_results.get("timing") or {}).get("param_combinations"))
     else:
-        demanded_per_window = _fnum(settings.get("max_trials", merged.get("max_trials", 200)))
+        # A recorded run budget wins; legacy results may use explicit config.
+        # Never manufacture the optimizer's default as a historical run fact.
+        raw_budget = settings.get("max_trials") if "max_trials" in settings else (
+            config.get("max_trials") if isinstance(config, Mapping) else None
+        )
+        demanded_per_window = _fnum(raw_budget)
+        if (isinstance(raw_budget, bool) or demanded_per_window is None
+                or demanded_per_window < 1 or demanded_per_window != int(demanded_per_window)):
+            demanded_per_window = None
 
     n_windows = len(windows)
     demanded = (demanded_per_window * n_windows) if (demanded_per_window is not None and n_windows) else None

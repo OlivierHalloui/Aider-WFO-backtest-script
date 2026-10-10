@@ -10,6 +10,32 @@ from typing import Any, Mapping
 from domain.serialization import json_safe, sanitize_for_json, utc_now_iso
 
 
+def record_final_quant_context(state, portfolio, **final_fields) -> None:
+    """Freeze the executed final period before triggering quant diagnostics."""
+    state["quant_final_context"] = {"portfolio": portfolio, "config": dict(final_fields)}
+
+
+def quant_config_with_final_context(config, state, final_portfolio=None) -> dict:
+    """Attach the final portfolio's actual period, shared by tab/trigger/export.
+
+    A completed-backtest snapshot wins over subsequently edited widgets. Older
+    live sessions have no snapshot: use their explicit final fields, never the
+    WFO end date as a fabricated final period.
+    """
+    effective = dict(config) if isinstance(config, Mapping) else {}
+    if final_portfolio is None:
+        return effective
+    snapshot = state.get("quant_final_context") or {}
+    if snapshot.get("portfolio") is final_portfolio:
+        effective.update(snapshot.get("config") or {})
+    else:
+        for key in ("final_start_date", "final_end_date", "final_file_path", "final_timeframe"):
+            value = state.get(key)
+            if value is not None:
+                effective[key] = value
+    return effective
+
+
 def build_data_source_descriptor(config_snapshot: dict | None, df) -> dict[str, Any]:
     descriptor = {
         "from_file": None,
@@ -128,7 +154,9 @@ def _manifest_matches_run(
     """
     manifest = manifest if isinstance(manifest, Mapping) else {}
     wfo = wfo_results if isinstance(wfo_results, Mapping) else {}
-    run_id = wfo.get("run_id")
+    from services.quant_indicators import resolve_run_id
+
+    run_id = resolve_run_id(wfo)
     if run_id is not None and manifest.get("run_id") != run_id:
         return False
     from services.quant_indicators import compute_replay_input_digest
@@ -232,7 +260,10 @@ def apply_quant_restore(state, restored) -> None:
     """
     if state is None or not (hasattr(state, "pop") and hasattr(state, "__setitem__")):
         return
-    for key in ("quant_analysis", "quant_diagnostics", "quant_diag_key"):
+    # ZIP replay never restores a live portfolio: remove its previous evidence
+    # and frozen context even when no quant artifact could be restored.
+    for key in ("quant_analysis", "quant_diagnostics", "quant_diag_key",
+                "final_portfolio", "quant_final_context"):
         try:
             state.pop(key, None)
         except Exception:  # noqa: BLE001 — never break the import on a state quirk

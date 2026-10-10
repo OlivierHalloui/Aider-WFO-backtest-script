@@ -1040,10 +1040,12 @@ def ensure_quant_diagnostics(
     facts/config until the run content changes; they are not live certificates.
     Returns ``(diagnostics, all_trials, param_grid)``.
     """
-    from services.quant_indicators import compute_quant_indicators
+    from services.quant_indicators import INDICATOR_VERSION, compute_quant_indicators
 
     state = _as_state(state)
-    config = config if isinstance(config, Mapping) else {}
+    from services.export_utils import quant_config_with_final_context
+
+    config = quant_config_with_final_context(config, state, final_portfolio)
     trials = all_trials_frame(wfo_results)
     trades = final_trades_frame(final_portfolio) if final_portfolio is not None else None
     try:
@@ -1054,7 +1056,7 @@ def ensure_quant_diagnostics(
         grid = None
 
     key = evidence_cache_key(
-        _results_signature(wfo_results), trades,
+        f"{INDICATOR_VERSION}:{_results_signature(wfo_results)}", trades,
         all_trials=trials, config=config, param_grid=grid,
     )
     diagnostics = state.get("quant_diagnostics")

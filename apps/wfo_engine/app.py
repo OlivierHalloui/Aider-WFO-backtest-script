@@ -3368,7 +3368,11 @@ def get_current_config():
     }
     # Merge parameter ranges
     config.update(config_params)
-    return config
+    from services.export_utils import quant_config_with_final_context
+
+    return quant_config_with_final_context(
+        config, st.session_state, st.session_state.get("final_portfolio"),
+    )
 
 
 
