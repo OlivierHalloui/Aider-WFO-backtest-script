@@ -262,7 +262,18 @@ def _export_results_zip(
     st.session_state.update(_updates)
 
     payload = build_results_payload()
+    # The builder may enrich/replace the session run (e.g. robust_set_summary).
+    # Hash and export the exact run carried by results.json, not the old reference.
+    results = payload.get("wfo_results") or results
     config_snapshot = payload.get("config", {})
+    archived = st.session_state.get("quant_diagnostics")
+    if isinstance(archived, dict) and archived.get("source") == "archived":
+        from services.export_utils import _manifest_matches_run
+
+        if _manifest_matches_run(archived.get("manifest"), results, archived.get("replay_config")):
+            # Re-export the archive with its imported config, not edited widgets.
+            config_snapshot = archived.get("replay_config") or {}
+            payload["config"] = config_snapshot
     zip_buffer = io.BytesIO()
     expert_context_pack = build_expert_context_pack_for_export(results, config_snapshot)
 
@@ -279,7 +290,20 @@ def _export_results_zip(
         # `quant_analysis.md` en est dérivé (citations résolues, traçables).
         _quant_result = st.session_state.get("quant_analysis") or {}
         _quant_analysis = _quant_result.get("analysis") if isinstance(_quant_result, dict) else None
-        _quant_diag = st.session_state.get("quant_diagnostics")
+        # Les faits scellés sont obtenus par le CHEMIN COMMUN pour le run
+        # exporté : jamais ceux d'un autre run laissés en session (§5.0).
+        _quant_diag = None
+        try:
+            from ui.quant_analysis_panel import ensure_quant_diagnostics
+
+            _quant_diag, _qa_trials, _qa_grid = ensure_quant_diagnostics(
+                st.session_state,
+                wfo_results=results,
+                config=config_snapshot,
+                final_portfolio=st.session_state.get("final_portfolio"),
+            )
+        except Exception:  # noqa: BLE001 — l'export ne doit jamais échouer
+            _quant_diag = None
         # Une analyse étrangère au run courant n'entre jamais dans son export —
         # même garde que l'affichage (§5.2 `analysis_matches_run`).
         from services.export_utils import quant_artifacts_for_run
@@ -297,6 +321,20 @@ def _export_results_zip(
         if _quant_artifacts is not None:
             zf.writestr("quant_analysis.json", _quant_artifacts[0])
             zf.writestr("quant_analysis.md", _quant_artifacts[1])
+        # §6.4 — indicateurs Q1–Q8 et manifeste du run : joints pour le replay
+        # (« réimportés si présents »).  Indépendants de la présence d'une
+        # analyse : ce sont les faits scellés, pas l'interprétation.
+        if isinstance(_quant_diag, dict) and _quant_diag:
+            from services.export_utils import quant_analysis_json as _quant_dump
+
+            # Tous les blocs scellés sont joints : sans `integrity`/`pre_verdict`,
+            # le replay laisserait une analyse affichable mais non évaluable.
+            zf.writestr("quant_indicators.json", _quant_dump({
+                "indicators": _quant_diag.get("indicators") or {},
+                "integrity": _quant_diag.get("integrity") or {},
+                "pre_verdict": _quant_diag.get("pre_verdict") or {},
+            }))
+            zf.writestr("run_manifest.json", _quant_dump(_quant_diag.get("manifest") or {}))
         if isinstance(pine_precheck_report, dict) and pine_precheck_report:
             zf.writestr("pine_precheck_report.json", json.dumps(pine_precheck_report, indent=2, ensure_ascii=False))
         if isinstance(pine_compatibility_report, dict) and pine_compatibility_report:
@@ -1522,6 +1560,26 @@ def _load_results_zip(
                 payload = json.loads(zf.read("results.json").decode("utf-8"))
                 if payload.get("wfo_results"):
                     st.session_state["wfo_results"] = payload["wfo_results"]
+                    # §6.4 — replay des artefacts quant présents, et seulement
+                    # s'ils appartiennent au run importé.  L'état quant précédent
+                    # est TOUJOURS purgé (y compris si les artefacts sont absents
+                    # ou rejetés) : un import ne doit jamais laisser les faits
+                    # d'un run antérieur en session.
+                    _quant_payload = {}
+                    for _name in ("quant_analysis.json", "quant_indicators.json", "run_manifest.json"):
+                        if _name in names:
+                            try:
+                                _quant_payload[_name] = json.loads(zf.read(_name).decode("utf-8"))
+                            except Exception as _exc:  # noqa: BLE001
+                                st.warning(f"Impossible de lire {_name} : {_exc}")
+                    from services.export_utils import apply_quant_restore, restore_quant_artifacts
+
+                    apply_quant_restore(
+                        st.session_state,
+                        restore_quant_artifacts(
+                            _quant_payload, payload["wfo_results"], config=payload.get("config"),
+                        ),
+                    )
                 pine_precheck = payload.get("pine_precheck_report")
                 if isinstance(pine_precheck, dict):
                     st.session_state["pine_precheck_report"] = pine_precheck

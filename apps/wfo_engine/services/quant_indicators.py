@@ -531,6 +531,7 @@ def build_run_manifest(
         "input_digest": _compute_input_digest(
             wfo_results, all_trials, final_trades, per_bar_returns, config, oos_trades, param_grid
         ),
+        "input_digest_replay": compute_replay_input_digest(wfo_results, config),
         "engine_version": ENGINE_VERSION,
         "metrics_version": METRICS_VERSION,
         "seed": merged.get("seed", settings.get("seed")),
@@ -561,6 +562,20 @@ def build_run_manifest(
         },
     }
     return sanitize_for_json(manifest)
+
+
+def compute_replay_input_digest(wfo_results, config=None) -> Optional[str]:
+    """Hash only the shared replay inputs: run results and config.
+
+    This associates archived facts with an imported run, not with missing raw
+    evidence. It is a content fingerprint, not an authenticity certificate.
+    """
+    if not isinstance(wfo_results, Mapping) or not wfo_results:
+        return None
+    return sha256_json({
+        "wfo_results": wfo_results,
+        "config": config if isinstance(config, Mapping) else {},
+    })
 
 
 def _compute_input_digest(

@@ -1036,7 +1036,9 @@ def ensure_quant_diagnostics(
     run digest, so they all go through here with the same evidence: ``config``,
     ``param_grid``, ``all_trials`` and ``final_trades`` are all part of the
     cache key, as is a cheap signature of ``wfo_results`` (derived here, so the
-    callers need not share a scope).  Returns ``(diagnostics, all_trials, param_grid)``.
+    callers need not share a scope). Archived diagnostics retain the imported
+    facts/config until the run content changes; they are not live certificates.
+    Returns ``(diagnostics, all_trials, param_grid)``.
     """
     from services.quant_indicators import compute_quant_indicators
 
@@ -1055,6 +1057,20 @@ def ensure_quant_diagnostics(
         _results_signature(wfo_results), trades,
         all_trials=trials, config=config, param_grid=grid,
     )
+    diagnostics = state.get("quant_diagnostics")
+    if isinstance(diagnostics, Mapping) and diagnostics.get("source") == "archived":
+        from services.export_utils import _manifest_matches_run
+
+        # Archives describe the imported config, not the currently edited UI.
+        # Keep them until the imported run content changes.
+        if _manifest_matches_run(
+            diagnostics.get("manifest"), wfo_results, diagnostics.get("replay_config"),
+        ):
+            return diagnostics, trials, grid
+        # A changed run leaves archive mode and resumes the T5 path.
+        state.pop("quant_diagnostics", None)
+        state.pop("quant_diag_key", None)
+        state.pop("quant_analysis", None)
     if state.get("quant_diag_key") != key:
         state["quant_diagnostics"] = compute_quant_indicators(
             wfo_results,

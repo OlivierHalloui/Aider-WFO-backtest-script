@@ -274,7 +274,18 @@ def _build_results_payload():
     config_snapshot = get_current_config()
     _sess = WFOSessionState.read()
     results_snapshot = _sess.wfo_results
-    if isinstance(results_snapshot, dict):
+    archived = st.session_state.get("quant_diagnostics")
+    preserve_archive = False
+    if isinstance(archived, dict) and archived.get("source") == "archived":
+        from services.export_utils import _manifest_matches_run
+
+        preserve_archive = _manifest_matches_run(
+            archived.get("manifest"), results_snapshot, archived.get("replay_config"),
+        )
+        if preserve_archive:
+            # Preserve the imported run before any widget-driven enrichment.
+            config_snapshot = archived.get("replay_config") or {}
+    if isinstance(results_snapshot, dict) and not preserve_archive:
         robust_summary = _build_robust_set_summary(results_snapshot, config_snapshot)
         results_snapshot = dict(results_snapshot)
         results_snapshot["robust_set_summary"] = robust_summary

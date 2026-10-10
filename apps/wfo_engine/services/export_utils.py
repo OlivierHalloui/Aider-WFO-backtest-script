@@ -115,6 +115,135 @@ def quant_analysis_json(analysis: Mapping[str, Any] | None) -> str:
     )
 
 
+def _manifest_matches_run(
+    manifest: Mapping[str, Any] | None,
+    wfo_results: Mapping[str, Any] | None,
+    config: Mapping[str, Any] | None = None,
+) -> bool:
+    """Does a restored manifest belong to the imported run? (§6.4 replay)
+
+    The original evidence digest must be present, and the replay digest must
+    match the imported run and config. Legacy archives lacking that fingerprint
+    cannot be verified and are rejected.
+    """
+    manifest = manifest if isinstance(manifest, Mapping) else {}
+    wfo = wfo_results if isinstance(wfo_results, Mapping) else {}
+    run_id = wfo.get("run_id")
+    if run_id is not None and manifest.get("run_id") != run_id:
+        return False
+    from services.quant_indicators import compute_replay_input_digest
+
+    try:
+        expected = compute_replay_input_digest(wfo_results, config)
+    except Exception:  # noqa: BLE001 — fail closed on unreadable replay inputs
+        return False
+    return bool(
+        manifest.get("input_digest") and expected
+        and manifest.get("input_digest_replay") == expected
+    )
+
+
+def restore_quant_artifacts(
+    artifacts: Mapping[str, Any] | None,
+    wfo_results=None,
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> dict:
+    """§6.4 — replay: accept only the quant artefacts that belong to this run.
+
+    ``artifacts`` maps file names to decoded JSON payloads
+    (``quant_analysis.json``, ``quant_indicators.json``, ``run_manifest.json``).
+    Returns ``{"analysis": … | None, "diagnostics": … | None}``; a foreign or
+    unverifiable artefact is **dropped**, never restored.
+
+    The stored ``integrity`` is treated as a **claim**, not as a fact: it is
+    recomputed from the imported run with ``check_run_integrity``.  Restoring a
+    stored ``ok: True`` would let a tampered artefact certify itself.
+    """
+    artifacts = artifacts if isinstance(artifacts, Mapping) else {}
+    block = artifacts.get("quant_indicators.json")
+    block = block if isinstance(block, Mapping) else {}
+    manifest = artifacts.get("run_manifest.json")
+    analysis = artifacts.get("quant_analysis.json")
+
+    diagnostics = None
+    if isinstance(manifest, Mapping) or block:
+        if _manifest_matches_run(manifest, wfo_results, config):
+            diagnostics = {
+                "manifest": manifest if isinstance(manifest, Mapping) else {},
+                "indicators": block.get("indicators") or {},
+                "integrity": _recompute_integrity(wfo_results, config),
+                "pre_verdict": block.get("pre_verdict") or {},
+                "replay_config": dict(config) if isinstance(config, Mapping) else {},
+            }
+            # §5.3 cas a : un contrôle recalculé en échec impose le pré-verdict
+            # local `NO_GO`.  Conserver un pré-verdict restauré à `WATCH` à côté
+            # d'une intégrité KO serait contradictoire.
+            if not diagnostics["integrity"].get("ok"):
+                scope = (block.get("pre_verdict") or {}).get("scope", "exploratoire")
+                diagnostics["pre_verdict"] = {
+                    "verdict": "NO_GO", "scope": scope, "status": "non_evaluable",
+                    "criteria": {},
+                    "rationale": ["replay : contrôle d'intégrité recalculé en échec"],
+                }
+
+    if isinstance(analysis, Mapping) and analysis:
+        try:
+            from ui.quant_analysis_panel import analysis_matches_run
+
+            if not analysis_matches_run(analysis, diagnostics):
+                analysis = None
+        except Exception:  # noqa: BLE001 — never raise on a corrupt artefact
+            analysis = None
+    else:
+        analysis = None
+
+    return {"analysis": analysis, "diagnostics": diagnostics}
+
+
+def _recompute_integrity(wfo_results, config) -> dict:
+    """Integrity of the imported run, recomputed — never trusted from the file.
+
+    The ZIP carries the facts, **not** the raw evidence (``final_trades`` and the
+    per-bar returns are not exported), so a replay cannot re-establish a full
+    §5.0 verdict.  The artefacts are therefore **archives, not certificates**:
+    the control is recomputed from what is available and honestly reports what
+    is missing instead of certifying the file's own claim.
+    """
+    try:
+        from services.quant_indicators import check_run_integrity
+
+        return check_run_integrity(
+            wfo_results if isinstance(wfo_results, Mapping) else {},
+            config=config if isinstance(config, Mapping) else None,
+        )
+    except Exception as exc:  # noqa: BLE001 — an unreadable run is not "ok"
+        return {"ok": False, "status": "non_evaluable",
+                "causes": [f"contrôle d'intégrité non recalculable ({exc})"], "checks": {}}
+
+
+def apply_quant_restore(state, restored) -> None:
+    """Replace the session's quant state with what the import restored (§6.4).
+
+    The previous state is **always** cleared first: importing a ZIP without quant
+    artefacts (or with rejected ones) must never leave the previous run's facts
+    around.  Accepts any mutable mapping (``st.session_state`` is a
+    ``SessionStateProxy``, not a ``dict``).
+    """
+    if state is None or not (hasattr(state, "pop") and hasattr(state, "__setitem__")):
+        return
+    for key in ("quant_analysis", "quant_diagnostics", "quant_diag_key"):
+        try:
+            state.pop(key, None)
+        except Exception:  # noqa: BLE001 — never break the import on a state quirk
+            pass
+    restored = restored if isinstance(restored, Mapping) else {}
+    if restored.get("diagnostics") is not None:
+        state["quant_diagnostics"] = {**restored["diagnostics"], "source": "archived"}
+    if restored.get("analysis") is not None:
+        state["quant_analysis"] = {"status": "ok", "analysis": restored["analysis"]}
+
+
 def quant_artifacts_for_run(
     analysis: Mapping[str, Any] | None,
     diagnostics: Mapping[str, Any] | None,

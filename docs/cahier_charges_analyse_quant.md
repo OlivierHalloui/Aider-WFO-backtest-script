@@ -419,8 +419,42 @@ jamais des critères de verdict seuls.
 
 ### 6.4 Export
 - `services/export_utils.py` : `quant_analysis.json` (**canonique**) +
-  `quant_analysis.md` (rendu dérivé) + `quant_indicators.json` + `run_manifest.json`,
-  réimportés si présents (replay).
+  `quant_analysis.md` (rendu dérivé) + `quant_indicators.json` + `run_manifest.json`.
+
+> **Dérogation explicite du propriétaire du cahier des charges (2026-10-09) —
+> statut des artefacts : ARCHIVES, pas certificats.**
+>
+> La formulation initiale « réimportés si présents (replay) » laissait entendre
+> qu'un réimport rétablissait un run certifié. C'est impossible : le ZIP porte
+> les **faits** (indicateurs, manifeste, analyse), pas les **preuves brutes**
+> (`final_trades`, rendements par barre) qui servent à §5.0. Leur export
+> alourdirait fortement le ZIP pour un usage rare (reprendre l'analyse d'un
+> ancien run sans le relancer).
+>
+> Décision : les quatre fichiers sont **archivés puis relus** au réimport, avec
+> les garanties suivantes —
+> - le contrôle d'intégrité est **recalculé** sur le run importé ; l'`ok: True`
+>   éventuellement stocké dans le fichier n'est **jamais** cru (un artefact ne
+>   s'auto-certifie pas) ;
+> - en cas d'échec, le pré-verdict affiché est **`NO_GO`** (§5.3 cas a) et
+>   **aucun appel A2A** n'est émis — jamais un pré-verdict archivé à côté d'une
+>   intégrité KO ;
+> - un artefact d'un **autre run** (`run_id` / `input_digest` divergents, ou
+>   `input_digest` absent) n'est ni restauré, ni affiché, ni exporté. Le manifeste
+>   archive aussi `input_digest_replay`, empreinte des seules entrées communes
+>   (`wfo_results` + configuration) : elle est recalculée au réimport et tout
+>   écart ou absence entraîne le rejet des artefacts quant ; les anciennes
+>   archives sans cette empreinte ne sont pas vérifiables ;
+> - les diagnostics restaurés sont marqués `source="archived"` et conservent
+>   les indicateurs archivés tant que le contenu du run importé ne change pas,
+>   même si la configuration des widgets diffère. Le réexport conserve la
+>   configuration importée ; tout changement du run (même avec le même `run_id`)
+>   invalide l'archive et reprend le chemin unique de calcul de T5 ;
+> - l'état quant est **purgé** à chaque import (y compris sans artefacts), pour
+>   qu'aucun fait d'un run antérieur ne survive.
+>
+> Toute évolution vers un replay réellement certifiable devra exporter les
+> preuves brutes et faire l'objet d'un amendement du présent paragraphe.
 
 ---
 

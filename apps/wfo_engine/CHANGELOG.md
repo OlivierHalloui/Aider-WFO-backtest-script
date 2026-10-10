@@ -4,6 +4,74 @@ Toutes les évolutions notables de l'application WFO sont documentées ici.
 
 ## Non publié
 
+### Fonctionnalité « Analyse quant » (T1–T6)
+
+Nouvel onglet **📊 Analyse quant** (`app.py`, après « Final Backtest ») qui
+produit une lecture critique d'un run WFO. Cahier des charges :
+`docs/cahier_charges_analyse_quant.md` (v2.10, validé par `wfo-quant`).
+
+- **§5.0 Manifeste + contrôle d'intégrité** (`services/quant_indicators.py`) :
+  périmètre et provenance du run, contrôle bloquant. En cas d'échec →
+  **`non_evaluable` + cause**, **aucun appel A2A** n'est lancé (§5.3 cas a) et
+  seul le pré-verdict local `NO_GO` s'affiche.
+- **§5.1 Calculs locaux** : indicateurs **Q1–Q8** (budget effectif d'évaluation,
+  diversité, forme de la distribution, stabilité des paramètres, voisinage du
+  gagnant, érosion IS→OOS, Sharpe non-annualisé homogène, sensibilité aux coûts)
+  + incertitude OOS (bootstrap en blocs). Valeurs **sourcées** (colonne
+  `référence`, fenêtres listées `Q6.windows[0].…`) et affichées **par fenêtre
+  avant les agrégats**.
+- **§5.2 Interprétation** (`services/quant_expert.py`) : appel A2A local au pair
+  `wfo-quant`, schéma canonique `quant_analysis.v1` validé (rejet `NaN`/
+  `Infinity`, enums, nomenclature fermée d'`evidence_refs`, règle de citation
+  `{{ID.champ}}`), cache par run. Rendu structuré : verdict codé
+  🟢/🟠/🔴 + portée + confiance, pré-verdict local à côté, constats bloquants,
+  constats marqués (`reference_invalide`, `chiffre_non_reference`),
+  recommandations numérotées, limites, avertissements du validateur,
+  `context_id` A2A en pied de bloc.
+- **§5.3 Politique des données manquantes** : une métrique non calculable est
+  `null` **avec** `raison` et s'affiche **« indisponible »** — jamais `0`, jamais
+  un badge vert. Pré-verdict déterministe `GO`/`WATCH`/`NO_GO` selon les seuils
+  calculables du CDC.
+
+⚠️ **Le déclenchement de l'analyse automatique est fait après le backtest final**
+(checkbox « Analyse automatique en fin de run », défaut coché) : §5.0 exige
+`final_trades`, qui n'existent qu'à ce moment-là (sélection L2 +
+`final_backtest_panel`), pas en fin de run WFO. Sans eux, le hook renvoie un
+`non_evaluable` explicite **sans appel réseau**.
+
+**Empreinte de paramètres (`params_sha`)** : chaque fenêtre émet maintenant
+`params_sha = sha256_json(best_params)` sur les métriques IS, OOS et la fenêtre,
+ce qui permet à §5.0 de vérifier que IS et OOS sont **appariés par paramètres
+sélectionnés** (et pas seulement par numéro de fenêtre). En stagewise,
+l'empreinte est recalculée sur les paramètres **complets** ; une source
+incohérente, absente ou un échec de hachage est signalé explicitement et bloque
+(`params_sha_reconciliation`) — jamais blanchi, jamais certifié par
+reconstruction.
+
+**Export** (ZIP) : `quant_analysis.json` (canonique, clés triées, `allow_nan=
+False`), `quant_analysis.md` (dérivé, citations résolues et traçables),
+`quant_indicators.json`, `run_manifest.json` — les quatre **archivés puis
+relus** au réimport. Une analyse appartenant à un **autre run** (`run_id` /
+`input_digest` divergents) n'est ni affichée ni exportée.
+
+⚠️ **Ce sont des archives, pas des certificats.** Le ZIP porte les faits, pas
+les preuves brutes (`final_trades`, rendements par barre) : le contrôle
+d'intégrité est **recalculé** au réimport sur ce qui est disponible et signale
+honnêtement ce qui manque — jamais l'`ok: True` stocké dans le fichier. En cas
+d'échec, le pré-verdict local est `NO_GO` (§5.3 cas a), et aucun appel A2A n'est
+émis.
+
+**Fiabilité du replay (T6)** : `input_digest_replay` lie les artefacts au
+contenu exact du run et à sa configuration exportée ; il est recalculé à
+l'import (écart/absence → rejet). Les diagnostics restaurés sont marqués
+`archived` : les indicateurs Q1–Q8 survivent aux rerenders, avec la configuration
+importée conservée au réexport. Une modification du contenu du run invalide
+l'archive et reprend le chemin unique de calcul de T5.
+
+**Prérequis pair** : `docs/analyse_quant_prerequis_pair.md` (profil `wfo-quant`,
+`platforms.a2a.enabled: true`, `extra.port: 9924`, **`approvals.mode: off`**,
+local 127.0.0.1 sans token).
+
 ### Changement de sémantique — ratios par barre, non annualisés
 
 Les colonnes `sharpe`, `sortino_ratio` et `calmar_ratio` des résultats WFO sont désormais calculées **sans annualisation** (mean / écart-type `ddof=1` des rendements de la fenêtre, déviation downside, return / max drawdown). Avant, VectorBT annualisait avec la fréquence de 5 s, ce qui gonflait artificiellement les valeurs (Sharpe affiché à 83–110 au lieu de ~0,05).

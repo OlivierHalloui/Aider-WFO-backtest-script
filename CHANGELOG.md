@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-09
+
+- **Fonctionnalité « Analyse quant »** : nouvel onglet **📊 Analyse quant** (après « Final Backtest ») produisant une lecture critique d'un run WFO — manifeste + contrôle d'intégrité bloquant (§5.0), indicateurs locaux **Q1–Q8** et incertitude OOS (§5.1), interprétation par le pair A2A `wfo-quant` avec schéma canonique `quant_analysis.v1` (§5.2), politique des données manquantes (« indisponible », jamais `0`) et pré-verdict déterministe `GO`/`WATCH`/`NO_GO` (§5.3). Export ZIP : `quant_analysis.json` (canonique), `quant_analysis.md` (dérivé), `quant_indicators.json`, `run_manifest.json`. ⚠️ L'analyse automatique se déclenche **après le backtest final** (§5.0 exige `final_trades`) ; sans eux, `non_evaluable` explicite **sans appel réseau**. Prérequis du pair : `docs/analyse_quant_prerequis_pair.md`. Détail dans `apps/wfo_engine/CHANGELOG.md`.
+- **Empreinte de paramètres (`params_sha`)** : chaque fenêtre émet `params_sha = sha256_json(best_params)` sur les métriques IS/OOS et la fenêtre, permettant de vérifier que IS et OOS sont **appariés par paramètres sélectionnés**. En stagewise, empreinte recalculée sur les paramètres **complets** ; une incohérence, une absence ou un échec de hachage est signalée et bloque — jamais blanchie.
+
 ## 2026-10-03
 
 - **Changement de sémantique — ratios par barre, non annualisés** : les colonnes `sharpe`, `sortino_ratio` et `calmar_ratio` des résultats WFO sont désormais calculées **sans annualisation** (mean / écart-type `ddof=1` des rendements de la fenêtre, déviation downside, return / max drawdown). Avant, VectorBT annualisait avec la fréquence de 5 s, ce qui gonflait artificiellement les valeurs (Sharpe affiché à 83–110 au lieu de ~0,05). ⚠️ **Les CSV produits avant cette date contiennent des valeurs annualisées** et ne sont pas comparables aux nouveaux : régénérer les résultats pour les relire avec la nouvelle échelle.
