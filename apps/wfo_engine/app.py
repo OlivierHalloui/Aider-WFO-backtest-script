@@ -3348,7 +3348,11 @@ def get_current_config():
         'adaptive_ucb_beta': float(st.session_state.get('adaptive_ucb_beta', 0.75)),
         'adaptive_warmup_trials': int(st.session_state.get('adaptive_warmup_trials', 300)),
         'adaptive_max_cycles': int(st.session_state.get('adaptive_max_cycles', 0)),
-        'adaptive_oos_weight': float(st.session_state.get('adaptive_oos_weight', 2.0))
+        'adaptive_oos_weight': float(st.session_state.get('adaptive_oos_weight', 2.0)),
+        # §5.2 — checkbox « Analyse automatique en fin de run ». Propagée ici
+        # pour que le trigger de fin de run lise la valeur réelle (et non le
+        # défaut) : décocher doit vraiment désactiver l'auto-analyse.
+        'quant_auto_analysis': bool(st.session_state.get('quant_auto_analysis', True))
     }
     # Merge parameter ranges
     config.update(config_params)
@@ -4575,14 +4579,15 @@ if _sess_viz.wfo_results is not None:
         </style>
     """, unsafe_allow_html=True)
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📈 OOS Performance",
         "🔍 Parameters",
         "📉 Drawdowns & Returns",
         "🧠 Adaptive Insights",
         "🤖 Expert IA",
         "📋 Raw Data",
-        "🏆 Final Backtest"
+        "🏆 Final Backtest",
+        "📊 Analyse quant"
     ])
     
     with tab1:
@@ -6293,6 +6298,44 @@ if _sess_viz.wfo_results is not None:
             load_data=load_data,
             resolve_strategy_adapter=resolve_strategy_adapter,
         )
+
+    with tab8:
+        # 📊 Analyse quant — §5.0/§5.1 (calculs locaux) + §5.2 (interprétation)
+        from ui.quant_analysis_panel import (
+            ensure_quant_diagnostics as _qa_ensure,
+            persist_analysis_result as _qa_persist,
+            render_quant_analysis_panel as _render_quant_analysis,
+            render_quant_expert_panel as _render_quant_expert,
+        )
+
+        _qa_config = get_current_config()
+        _qa_pf = st.session_state.get('final_portfolio')
+        # Chemin UNIQUE de calcul des diagnostics, partagé avec le trigger de fin
+        # de backtest final : mêmes preuves (config, grille, essais, trades) et
+        # donc digest identique pour l'affichage, l'analyse et l'export (§5.0).
+        _qa_diag, _qa_trials, _qa_grid = _qa_ensure(
+            st.session_state,
+            wfo_results=results,
+            config=_qa_config,
+            final_portfolio=_qa_pf,
+        )
+
+        _render_quant_analysis(diagnostics=_qa_diag, show_manifest=True)
+        st.divider()
+        _qa_result = st.session_state.get('quant_analysis') or {}
+        _qa_new = _render_quant_expert(
+            diagnostics=_qa_diag,
+            wfo_results=results,
+            all_trials=_qa_trials,
+            param_grid=_qa_grid,
+            analysis=_qa_result.get('analysis'),
+            warnings=_qa_result.get('warnings'),
+            context_id=_qa_result.get('context_id'),
+            on_clear=lambda: st.session_state.pop('quant_analysis', None),
+        )
+        # L'analyse obtenue à la main est PERSISTÉE : elle survit au rerun et
+        # entre dans l'export ZIP (§5.2).
+        _qa_persist(st.session_state, _qa_new)
 
 elif not os.path.exists(DEFAULT_DATA_FILE):
     st.warning(f"⚠️ Default data file not found at: `{DEFAULT_DATA_FILE}`. Please configure the data source in the sidebar.")

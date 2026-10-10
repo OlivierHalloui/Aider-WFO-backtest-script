@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import datetime
+import json
 import os
-from typing import Any
+from typing import Any, Mapping
 
 from domain.serialization import json_safe, sanitize_for_json, utc_now_iso
 
@@ -93,3 +94,147 @@ def build_replay_manifest(
         "v3_artifacts": v3_artifacts,
     }
     return sanitize_for_json(manifest)
+
+
+# ---------------------------------------------------------------------------
+# §5.2 artefact export (T5) — quant_analysis.v1 canonical JSON + derived Markdown
+# ---------------------------------------------------------------------------
+
+def quant_analysis_json(analysis: Mapping[str, Any] | None) -> str:
+    """Canonical ``quant_analysis.v1`` JSON artefact (§5.2).
+
+    The JSON is the **canonical** export; the Markdown below is derived from it.
+    ``allow_nan=False`` rejects ``NaN``/``Infinity`` instead of emitting them
+    (§5.2 schema rules), and keys are sorted so the artefact is byte-stable for
+    a given analysis.
+    """
+    payload = analysis if isinstance(analysis, Mapping) else {}
+    return json.dumps(
+        sanitize_for_json(payload),
+        indent=2, ensure_ascii=False, allow_nan=False, sort_keys=True, default=str,
+    )
+
+
+def quant_artifacts_for_run(
+    analysis: Mapping[str, Any] | None,
+    diagnostics: Mapping[str, Any] | None,
+    *,
+    sealed: Mapping[str, Any] | None = None,
+) -> tuple[str, str] | None:
+    """``(json, md)`` artefacts to write in the ZIP, or ``None`` to write none.
+
+    An analysis that does not belong to the current run is **never** exported —
+    the same guard as the UI (``analysis_matches_run``).
+    """
+    if not isinstance(analysis, Mapping) or not analysis:
+        return None
+    try:
+        from ui.quant_analysis_panel import analysis_matches_run
+
+        if not analysis_matches_run(analysis, diagnostics):
+            return None
+    except Exception:  # noqa: BLE001 — export must never raise
+        return None
+    return quant_analysis_json(analysis), quant_analysis_markdown(analysis, sealed=sealed)
+
+
+def _md_cite(text: Any, sealed: Mapping[str, Any] | None) -> str:
+    """Resolve ``{{ID.champ}}`` for the derived export (traceable numbers)."""
+    if not isinstance(text, str):
+        return "" if text is None else str(text)
+    try:
+        from services.quant_expert import substitute_citations
+
+        rendered, _ = substitute_citations(text, sealed or {})
+        return rendered
+    except Exception:  # noqa: BLE001 — export must never raise on a citation
+        return text
+
+
+def quant_analysis_markdown(
+    analysis: Mapping[str, Any] | None,
+    *,
+    sealed: Mapping[str, Any] | None = None,
+) -> str:
+    """Derived, human-readable export of ``quant_analysis.v1`` (§5.2).
+
+    Numbers are written as their **resolved** value with the reference kept
+    (``valeur «ID.champ»``), so the export stays traceable to the sealed facts —
+    the same substitution policy as the UI.
+    """
+    if not isinstance(analysis, Mapping) or not analysis:
+        return "# Analyse quant\n\nAucune analyse disponible.\n"
+
+    def cite(value):
+        return _md_cite(value, sealed)
+
+    def refs(item):
+        return ", ".join(str(r) for r in (item.get("evidence_refs") or [])) or "—"
+
+    lines = [
+        "# Analyse quant — interprétation wfo-quant",
+        "",
+        f"- **Verdict** : {analysis.get('verdict')}",
+        f"- **Portée** : `{analysis.get('verdict_scope')}`",
+        f"- **Confiance** : `{analysis.get('confidence')}`",
+        f"- **Pré-verdict local** : {analysis.get('preverdict_local')}",
+        f"- **Accord avec le pré-verdict** : {analysis.get('accord_avec_preverdict')}",
+        f"- **Run** : `{analysis.get('run_id')}` · digest `{analysis.get('input_digest')}`",
+        f"- **Généré le** : `{analysis.get('generated_at')}` · indicateurs `{analysis.get('indicator_version')}`",
+        "",
+        "## Justification",
+        "",
+        cite(analysis.get("verdict_justification")),
+        "",
+    ]
+
+    blocking = analysis.get("blocking_findings") or []
+    if blocking:
+        lines += ["## Constats bloquants", ""]
+        for item in blocking:
+            if not isinstance(item, Mapping):
+                continue
+            lines.append(f"- **{item.get('id')}** — {cite(item.get('constat'))} _(réf. {refs(item)})_")
+        lines.append("")
+
+    findings = analysis.get("findings") or []
+    if findings:
+        lines += ["## Constats", ""]
+        for item in findings:
+            if not isinstance(item, Mapping):
+                continue
+            condition = item.get("condition")
+            lines.append(
+                f"- **{item.get('id')}** [{item.get('niveau')}] — {cite(item.get('constat'))} "
+                f"_(réf. {refs(item)})_"
+            )
+            lines.append(f"  - Interprétation : {cite(item.get('interpretation'))}")
+            if condition:
+                lines.append(f"  - Condition : {cite(condition)}")
+        lines.append("")
+
+    recos = analysis.get("recommandations") or []
+    if recos:
+        lines += ["## Recommandations", ""]
+        for i, item in enumerate(recos, start=1):
+            if not isinstance(item, Mapping):
+                continue
+            lines.append(f"{i}. **{cite(item.get('action'))}** (priorité {item.get('priorite')})")
+            lines.append(f"   - Motif : {cite(item.get('motif'))}")
+            lines.append(f"   - Critère de validation : {cite(item.get('critere_de_validation'))}")
+        lines.append("")
+
+    limits = analysis.get("limitations") or []
+    if limits:
+        lines += ["## Limites déclarées", ""]
+        lines += [f"- {cite(x)}" for x in limits]
+        lines.append("")
+
+    lines += [
+        "---",
+        "",
+        "_Artefact dérivé de `quant_analysis.json` (canonique). "
+        "Les citations `{{ID.champ}}` sont résolues contre les faits scellés de l'application._",
+        "",
+    ]
+    return "\n".join(lines)

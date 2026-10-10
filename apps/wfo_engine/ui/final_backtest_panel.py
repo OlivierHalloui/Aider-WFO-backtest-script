@@ -818,6 +818,13 @@ def run_final_backtest_logic(*, get_current_config, load_data, resolve_strategy_
                 return_portfolio=True
             )
             st.session_state['final_portfolio'] = final_portfolio
+            from ui.quant_analysis_panel import run_auto_quant_after_final_backtest as _auto_quant
+            st.session_state['quant_analysis'] = _auto_quant(
+                final_portfolio,
+                wfo_results=st.session_state.get('wfo_results'),
+                config=config,
+                state=st.session_state,
+            )
             st.success("Final Backtest Complete!")
             if str(final_source or "").lower() == "robust_set":
                 st.info("Final backtest executed with robust-set parameters (Top-N vote multi-fenetres).")

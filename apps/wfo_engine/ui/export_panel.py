@@ -275,6 +275,28 @@ def _export_results_zip(
         zf.writestr("results.json", json.dumps(_sanitize_for_json(payload), indent=2, allow_nan=False, default=str))
         zf.writestr("audit_trace.json", json.dumps(_sanitize_for_json(payload.get("traceability", {})), indent=2, allow_nan=False, default=str))
         zf.writestr("expert_context_pack.json", json.dumps(_sanitize_for_json(expert_context_pack), indent=2, ensure_ascii=False, allow_nan=False, default=str))
+        # §5.2 — artefact d'interprétation : `quant_analysis.json` est CANONIQUE,
+        # `quant_analysis.md` en est dérivé (citations résolues, traçables).
+        _quant_result = st.session_state.get("quant_analysis") or {}
+        _quant_analysis = _quant_result.get("analysis") if isinstance(_quant_result, dict) else None
+        _quant_diag = st.session_state.get("quant_diagnostics")
+        # Une analyse étrangère au run courant n'entre jamais dans son export —
+        # même garde que l'affichage (§5.2 `analysis_matches_run`).
+        from services.export_utils import quant_artifacts_for_run
+
+        _quant_sealed = None
+        try:
+            from services.quant_expert import build_sealed_context
+
+            _quant_sealed = build_sealed_context(_quant_diag or {})
+        except Exception:  # noqa: BLE001 — l'export ne doit jamais échouer sur une citation
+            _quant_sealed = None
+        _quant_artifacts = quant_artifacts_for_run(
+            _quant_analysis, _quant_diag, sealed=_quant_sealed
+        )
+        if _quant_artifacts is not None:
+            zf.writestr("quant_analysis.json", _quant_artifacts[0])
+            zf.writestr("quant_analysis.md", _quant_artifacts[1])
         if isinstance(pine_precheck_report, dict) and pine_precheck_report:
             zf.writestr("pine_precheck_report.json", json.dumps(pine_precheck_report, indent=2, ensure_ascii=False))
         if isinstance(pine_compatibility_report, dict) and pine_compatibility_report:

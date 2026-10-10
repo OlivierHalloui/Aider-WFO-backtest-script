@@ -852,9 +852,15 @@ def render_quant_expert_panel(
     target = container if container is not None else st
 
     if peer_reachable is None:
-        from services.quant_expert import DEFAULT_EXPERT_URL, probe_agent_card
+        # §5.3 cas a — l'intégrité est vérifiée AVANT tout sondage réseau : un
+        # run non évaluable ne doit jamais déclencher d'aller vers le pair.
+        integrity = _mapping(diagnostics.get("integrity")) if isinstance(diagnostics, Mapping) else {}
+        if not isinstance(diagnostics, Mapping) or not integrity.get("ok"):
+            peer_reachable = False
+        else:
+            from services.quant_expert import DEFAULT_EXPERT_URL, probe_agent_card
 
-        peer_reachable = probe_agent_card(DEFAULT_EXPERT_URL)["reachable"]
+            peer_reachable = probe_agent_card(DEFAULT_EXPERT_URL)["reachable"]
 
     enabled, reason = expert_gate(diagnostics, peer_reachable=bool(peer_reachable))
     sealed = _build_sealed(diagnostics, wfo_results, all_trials, param_grid)
@@ -944,6 +950,210 @@ def render_quant_expert_panel(
             warnings=result.get("warnings"),
         )
     return result
+
+
+def _as_state(state):
+    """Accept any mutable mapping — Streamlit's ``SessionStateProxy`` included.
+
+    It is a ``MutableMapping``, **not** a ``dict``: an ``isinstance(state, dict)``
+    test would silently discard it and break the shared cache.
+    """
+    if state is None:
+        return {}
+    if hasattr(state, "get") and hasattr(state, "__setitem__"):
+        return state
+    return {}
+
+
+def _results_signature(wfo_results) -> str:
+    """Canonical content hash of a ``wfo_results`` payload.
+
+    **Every** field counts, including the IS/OOS metrics: changing one OOS
+    return must invalidate the cached diagnostics.  Derived *inside* the module
+    so every caller (tab, post-final-backtest trigger, export) agrees on the
+    cache key without sharing a scope.
+
+    The cost is one JSON serialisation per rerun — acceptable next to
+    ``compute_quant_indicators`` itself, and the only way to avoid silently
+    serving stale diagnostics.
+    """
+    from domain.serialization import sha256_json
+
+    try:
+        return sha256_json(_mapping(wfo_results)) or "unhashable"
+    except Exception:  # noqa: BLE001 — never break the UI over a cache key
+        return "unhashable"
+
+
+def persist_analysis_result(state, result) -> dict:
+    """Store a successful manual analysis in session state (§5.2).
+
+    Without this the button result is lost on the next Streamlit rerun and never
+    reaches the ZIP export.  ``cleared`` purges the stored analysis.
+    """
+    state = _as_state(state)
+    if not isinstance(result, Mapping):
+        return result if isinstance(result, dict) else {}
+    status = result.get("status")
+    if status == "ok":
+        state["quant_analysis"] = dict(result)
+    elif status == "cleared":
+        state.pop("quant_analysis", None)
+    return dict(result)
+
+
+def evidence_cache_key(results_key, trades=None, *, all_trials=None, config=None, param_grid=None) -> str:
+    """Cache key over **every** input of ``compute_quant_indicators`` (§5.0).
+
+    Content-based, never cardinality-based, and never just the result identity:
+    a config or grid change must invalidate the diagnostics too, otherwise the
+    panel, the auto-analysis and the export would disagree on the run digest.
+    """
+    from domain.serialization import sha256_json
+
+    def _sig(value):
+        if value is None:
+            return "-"
+        try:
+            records = value.to_dict("records") if hasattr(value, "to_dict") else value
+            return sha256_json(records) or "unhashable"
+        except Exception:  # noqa: BLE001 — never break the UI over a cache key
+            return "unhashable"
+
+    return ":".join([str(results_key), _sig(trades), _sig(all_trials), _sig(config), _sig(param_grid)])
+
+
+def ensure_quant_diagnostics(
+    state,
+    *,
+    wfo_results,
+    config=None,
+    final_portfolio=None,
+):
+    """Compute (or reuse) the §5.1 diagnostics — **one** path for every caller.
+
+    The tab, the post-final-backtest trigger and the export must agree on the
+    run digest, so they all go through here with the same evidence: ``config``,
+    ``param_grid``, ``all_trials`` and ``final_trades`` are all part of the
+    cache key, as is a cheap signature of ``wfo_results`` (derived here, so the
+    callers need not share a scope).  Returns ``(diagnostics, all_trials, param_grid)``.
+    """
+    from services.quant_indicators import compute_quant_indicators
+
+    state = _as_state(state)
+    config = config if isinstance(config, Mapping) else {}
+    trials = all_trials_frame(wfo_results)
+    trades = final_trades_frame(final_portfolio) if final_portfolio is not None else None
+    try:
+        from main import get_param_grid
+
+        grid = get_param_grid(config)
+    except Exception:  # noqa: BLE001 — la grille reste optionnelle
+        grid = None
+
+    key = evidence_cache_key(
+        _results_signature(wfo_results), trades,
+        all_trials=trials, config=config, param_grid=grid,
+    )
+    if state.get("quant_diag_key") != key:
+        state["quant_diagnostics"] = compute_quant_indicators(
+            wfo_results,
+            all_trials=trials,
+            final_trades=trades,
+            config=config,
+            param_grid=grid,
+        )
+        state["quant_diag_key"] = key
+    return state.get("quant_diagnostics"), trials, grid
+
+
+def all_trials_frame(wfo_results):
+    """All optimisation trials across windows, as one DataFrame (§5.1 ``T<n>``)."""
+    rows = []
+    windows = _mapping(wfo_results).get("window_results")
+    for w in (windows or []):
+        if isinstance(w, Mapping):
+            for trial in (w.get("optimization_trials") or []):
+                if isinstance(trial, Mapping):
+                    rows.append(dict(trial))
+    return pd.DataFrame(rows) if rows else None
+
+
+def final_trades_frame(final_portfolio):
+    """``pf.trades`` as the ``records``-like frame §5.0/§5.1 expect.
+
+    VectorBT exposes capitalised column names (``Return``, ``PnL``, ``Size``)
+    while the quant pipeline reads the lowercase ``records``-style names.  Both
+    are kept so the evidence is complete whoever reads it.
+    """
+    trades = getattr(final_portfolio, "trades", None)
+    if trades is None:
+        return None
+    frame_obj = getattr(trades, "records_readable", None)
+    if not isinstance(frame_obj, pd.DataFrame):
+        frame_obj = getattr(trades, "records", None)
+    if not isinstance(frame_obj, pd.DataFrame):
+        return None
+    frame: pd.DataFrame = frame_obj
+    if frame.empty:
+        return None
+    out = frame.copy()
+    aliases = {
+        "Return": "return", "PnL": "pnl", "Direction": "direction", "Size": "size",
+        "Avg Entry Price": "entry_price", "Avg Exit Price": "exit_price",
+        "Entry Value": "entry_value",
+    }
+    for src, dst in aliases.items():
+        if src in out.columns and dst not in out.columns:
+            out[dst] = out[src]
+    return out
+
+
+def run_auto_quant_after_final_backtest(
+    final_portfolio,
+    *,
+    wfo_results=None,
+    config=None,
+    state=None,
+    cache=None,
+    runner=None,
+) -> dict:
+    """§5.2 / §10 — auto analysis triggered **after** the final backtest.
+
+    This is the only point where ``final_trades`` (evidence required by §5.0)
+    exists, which is why the effective trigger was moved here (explicitly
+    accepted deferral).  Returns ``{}`` when the checkbox is off, and never
+    raises: the interpretation must not break the backtest.
+
+    The diagnostics go through :func:`ensure_quant_diagnostics`, the **same**
+    path as the tab, so both produce an identical run digest — otherwise the
+    auto-analysis would be refused at display and export.
+    """
+    config = config if isinstance(config, Mapping) else {}
+    if not config.get("quant_auto_analysis", True):
+        return {}
+    try:
+        from services.quant_expert import auto_analyze_run
+
+        state = _as_state(state)
+        diagnostics, trials, grid = ensure_quant_diagnostics(
+            state,
+            wfo_results=wfo_results if isinstance(wfo_results, Mapping) else {},
+            config=config,
+            final_portfolio=final_portfolio,
+        )
+        return auto_analyze_run(
+            wfo_results,
+            diagnostics=diagnostics,
+            all_trials=trials,
+            param_grid=grid,
+            config=config,
+            cache=cache,
+            runner=runner,
+        )
+    except Exception as exc:  # noqa: BLE001 — l'analyse ne doit pas casser le backtest
+        return {"status": "error", "analysis": None, "raison": str(exc),
+                "marche_a_suivre": "Relancer l'analyse depuis l'onglet « Analyse quant »."}
 
 
 def _build_sealed(diagnostics, wfo_results, all_trials, param_grid) -> dict:
